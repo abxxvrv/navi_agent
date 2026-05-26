@@ -1,5 +1,13 @@
 # Navi Agent
 
+<p align="center">
+  <img src="assets/readme/navi-agent-hero.svg" alt="Navi Agent animated hero" width="100%">
+</p>
+
+<p align="center">
+  <sub>动画由 <code>huashu-design</code> skill 制作 · 宣传页由 <code>guizang-ppt-skill</code> 视觉语言生成</sub>
+</p>
+
 > 本地项目导航员。把读文件、改文件、跑命令、加载技能、记录会话，收进一个可交互的 CLI Agent。
 
 [![Python](https://img.shields.io/badge/Python-3.11%2B-blue)](pyproject.toml)
@@ -13,6 +21,10 @@
 它不是一个网页应用，也不是一个只会聊天的壳。Navi 的目标很直接：在你的项目目录里理解上下文，调用受控工具，完成文件阅读、代码修改、命令验证和技能加载。
 
 [效果示例](#效果示例) · [安装](#安装) · [技能系统](#技能系统) · [工作逻辑](#工作逻辑) · [仓库结构](#仓库结构)
+
+<p align="center">
+  <img src="assets/readme/navi-agent-promo.svg" alt="Navi Agent promotional page" width="100%">
+</p>
 
 ---
 
