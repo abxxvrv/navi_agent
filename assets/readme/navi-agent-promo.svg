@@ -24,11 +24,11 @@
   <rect x="44" y="44" width="1192" height="632" fill="none" stroke="#c9b9a5"/>
 
   <g font-family="Inter, Arial, sans-serif" fill="#6b6259">
-    <text x="78" y="84" font-size="13" letter-spacing="7" fill="#a39788">NAVI AGENT / LOCAL PROJECT NAVIGATOR</text>
+    <text x="78" y="80" font-size="12" letter-spacing="6" fill="#a39788">NAVI AGENT / LOCAL PROJECT NAVIGATOR</text>
     <text x="1110" y="84" font-size="13" text-anchor="end" letter-spacing="4" fill="#a39788">v0.1.0</text>
   </g>
 
-  <g transform="translate(96 128)">
+  <g transform="translate(96 160)">
     <text x="0" y="0" font-family="Georgia, 'Times New Roman', serif" font-size="96" fill="url(#ink)">Navi Agent</text>
     <text x="4" y="62" font-family="Inter, Arial, sans-serif" font-size="25" letter-spacing="7" fill="#a86d50">READ / EDIT / RUN / REMEMBER</text>
     <line x1="0" y1="98" x2="560" y2="98" stroke="#c0ad99"/>
@@ -40,7 +40,7 @@
     <text x="0" y="310" font-family="Inter, Arial, sans-serif" font-size="21" fill="#665d53">把“看代码、改文件、跑验证、查历史”收束成一个 CLI 工作流。</text>
   </g>
 
-  <g transform="translate(780 132)" filter="url(#shadow)">
+  <g transform="translate(780 150)" filter="url(#shadow)">
     <rect width="360" height="390" rx="10" fill="#211f1c"/>
     <rect x="22" y="24" width="316" height="342" rx="6" fill="#11100e"/>
     <circle cx="44" cy="45" r="5" fill="#d36f4f"/>
