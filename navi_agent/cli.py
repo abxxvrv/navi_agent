@@ -18,6 +18,8 @@ from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.text import Text
 
+from navi_agent.approval import ApprovalDecision, UserApprovalChoice
+from navi_agent.paths import get_navi_home
 from navi_agent.runtime import AgentRuntime
 
 
@@ -26,12 +28,15 @@ VERSION = "0.1.0"
 
 DEFAULT_MODEL = "deepseek-v4-flash"
 DEFAULT_MAX_STEPS = 40
+DEFAULT_APPROVAL_MODE = "normal"
+APPROVAL_MODES = ["strict", "normal", "open"]
 SLASH_COMMANDS = [
     "/help",
     "/clear",
     "/tools",
     "/skills",
     "/sessions",
+    "/approval",
     "/exit",
     "/quit",
 ]
@@ -64,6 +69,7 @@ console = Console()
 def print_splash(
     workspace: Path,
     model: str,
+    approval_mode: str,
     no_wait: bool = False,
 ) -> None:
     """
@@ -91,6 +97,7 @@ def print_splash(
     console.print()
     console.print(f"[dim]Workspace:[/dim] [bold]{workspace}[/bold]")
     console.print(f"[dim]Model:[/dim] [bold]{model}[/bold]")
+    console.print(f"[dim]Approval:[/dim] [bold]{approval_mode}[/bold]")
     console.print(f"[dim]Version:[/dim] [bold]{VERSION}[/bold]")
     console.print()
 
@@ -118,6 +125,7 @@ def print_chat_help() -> None:
             "[cyan]/tools[/cyan]     Show available tools",
             "[cyan]/skills[/cyan]    Show available skills",
             "[cyan]/sessions[/cyan]  Show recent sessions",
+            "[cyan]/approval[/cyan]  Show approval mode and session approvals",
             "[cyan]/exit[/cyan]      Exit Navi",
             "",
             "Type a natural language task to start.",
@@ -249,6 +257,145 @@ def print_agent_event(event: dict[str, Any]) -> None:
         console.print(f"[red]• Tool error {tool_name}:[/red] {event.get('error')}")
 
 
+def ask_approval_from_cli(decision: ApprovalDecision) -> UserApprovalChoice:
+    """
+    CLI 审批交互。
+
+    ApprovalManager 负责判断是否需要审批；
+    这个函数只负责展示给用户并读取选择。
+    支持方向键上下移动光标 + 回车选择，或直接按数字键 1/2/3。
+    """
+    import platform
+    import sys
+
+    # 打印原因
+    console.print()
+    console.print(
+        Panel(
+            decision.reason,
+            title="Approval required",
+            border_style="yellow",
+        )
+    )
+
+    # 打印详情
+    lines = [
+        f"[bold]Tool[/bold]: {decision.tool_name}",
+        f"[bold]Risk[/bold]: {decision.risk.value}",
+    ]
+
+    if decision.command:
+        lines.append(f"[bold]Command[/bold]: {decision.command}")
+
+    path = decision.tool_args.get("path")
+    if path:
+        lines.append(f"[bold]Path[/bold]: {path}")
+
+    if decision.approval_key:
+        lines.append(f"[dim]Approval key: {decision.approval_key}[/dim]")
+
+    console.print("\n".join(lines))
+    console.print()
+
+    # 菜单选项，下面的代码实现的是用户审批的交互
+    options = [
+        ("1", "Allow once", UserApprovalChoice.ALLOW_ONCE),
+        ("2", "Allow for this session", UserApprovalChoice.ALLOW_SESSION),
+        ("3", "Reject", UserApprovalChoice.REJECT),
+    ]
+    selected = 0
+
+    def render():
+        for i, (num, label, _) in enumerate(options):
+            prefix = "❯ " if i == selected else "  "
+            print(f"{prefix}[{num}] {label}")
+
+    render()
+
+    if platform.system() == "Windows":
+        import msvcrt
+
+        while True:
+            ch = msvcrt.getch()
+            if ch == b'\xe0':          # 方向键前缀（Windows）
+                ch2 = msvcrt.getch()
+                if ch2 == b'H':        # 上
+                    selected = (selected - 1) % 3
+                elif ch2 == b'P':      # 下
+                    selected = (selected + 1) % 3
+            elif ch == b'\r':          # 回车
+                return options[selected][2]
+            elif ch == b'1':
+                return options[0][2]
+            elif ch == b'2':
+                return options[1][2]
+            elif ch == b'3':
+                return options[2][2]
+            else:
+                continue
+
+            # 重绘：光标上移 3 行，清除下方内容
+            sys.stdout.write('\033[3A\033[J')
+            render()
+            sys.stdout.flush()
+    else:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':          # 方向键前缀（Unix）
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'A':    # 上
+                            selected = (selected - 1) % 3
+                        elif ch3 == 'B':  # 下
+                            selected = (selected + 1) % 3
+                elif ch in ('\r', '\n'):  # 回车
+                    return options[selected][2]
+                elif ch == '1':
+                    return options[0][2]
+                elif ch == '2':
+                    return options[1][2]
+                elif ch == '3':
+                    return options[2][2]
+                else:
+                    continue
+
+                # 重绘：光标上移 3 行，清除下方内容
+                sys.stdout.write('\033[3A\033[J')
+                render()
+                sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def resolve_approval_mode(
+    approval: str,
+    yolo: bool,
+) -> str:
+    """
+    解析 CLI 审批参数。
+
+    --yolo 等价于 --approval open。
+    """
+    if yolo:
+        return "open"
+
+    approval = approval.strip().lower()
+
+    if approval not in APPROVAL_MODES:
+        allowed = ", ".join(APPROVAL_MODES)
+        raise typer.BadParameter(f"approval must be one of: {allowed}")
+
+    return approval
+
+
 # =========================
 # Runtime result helpers
 # =========================
@@ -308,12 +455,12 @@ def list_runtime_tools(runtime: AgentRuntime) -> list[str]:
     ]
 
 
-def list_skills_from_workspace(workspace: Path) -> list[str]:
+def list_skills_from_navi_home() -> list[str]:
     """
-    从源码目录的 skills 目录扫描技能。
+    从 Navi home 的 skills 目录扫描技能。
     第一版只扫描目录名和 SKILL.md。
     """
-    skills_dir = Path(__file__).resolve().parent / "skills"
+    skills_dir = get_navi_home() / "skills"
 
     if not skills_dir.exists():
         return []
@@ -331,22 +478,15 @@ def list_skills_from_workspace(workspace: Path) -> list[str]:
     return skills
 
 
-def list_sessions_from_workspace(workspace: Path, limit: int = 20) -> list[str]:
+def list_sessions_from_navi_home(limit: int = 20) -> list[str]:
     """
-    从 .navi/sessions 或 .light_agent/sessions 里读取历史 session。
-    兼容你之前的 .light_agent 目录。
+    从 Navi home 的 sessions 目录读取历史 session。
     """
-    candidates = [
-        workspace / ".navi" / "sessions",
-        workspace / ".light_agent" / "sessions",
-    ]
+    sessions_dir = get_navi_home() / "sessions"
 
     sessions: list[str] = []
 
-    for sessions_dir in candidates:
-        if not sessions_dir.exists():
-            continue
-
+    if sessions_dir.exists():
         for item in sorted(sessions_dir.iterdir(), reverse=True):
             if item.is_dir():
                 sessions.append(item.name)
@@ -380,7 +520,7 @@ def create_prompt_key_bindings() -> KeyBindings:
 
     return key_bindings
 
-
+# / 开头命令
 def handle_slash_command(
     command: str,
     runtime: AgentRuntime,
@@ -420,7 +560,7 @@ def handle_slash_command(
         return True
 
     if command == "/skills":
-        skills = list_skills_from_workspace(workspace)
+        skills = list_skills_from_navi_home()
 
         if not skills:
             console.print("[yellow]No skills found.[/yellow]")
@@ -433,7 +573,7 @@ def handle_slash_command(
         return True
 
     if command == "/sessions":
-        sessions = list_sessions_from_workspace(workspace)
+        sessions = list_sessions_from_navi_home()
 
         if not sessions:
             console.print("[yellow]No sessions found.[/yellow]")
@@ -442,6 +582,20 @@ def handle_slash_command(
         console.print("[bold]Recent sessions[/bold]")
         for session in sessions:
             console.print(f"- {session}")
+
+        return True
+
+    if command == "/approval":
+        mode = getattr(runtime.approval_manager, "mode", None)
+        console.print(f"[bold]Approval mode[/bold]: {mode.value if mode else 'unknown'}")
+
+        allowlist = getattr(runtime.approval_manager, "session_allowlist", set())
+        if allowlist:
+            console.print("[bold]Session approvals[/bold]")
+            for item in sorted(allowlist):
+                console.print(f"- {item}")
+        else:
+            console.print("[dim]No session approvals yet.[/dim]")
 
         return True
 
@@ -454,11 +608,13 @@ def handle_slash_command(
 # Chat mode
 # =========================
 
+# 开始对话
 def start_chat(
     workspace: Path,
     model: str,
     max_steps: int,
     no_splash: bool,
+    approval_mode: str,
 ) -> None:
     """
     默认交互模式。
@@ -477,26 +633,31 @@ def start_chat(
         model=model,
         max_steps=max_steps,
         event_handler=print_agent_event,
+        approval_mode=approval_mode,
+        approval_handler=ask_approval_from_cli,
     )
 
+    # 打印启动信息
     if not no_splash:
         print_splash(
             workspace=workspace,
             model=model,
+            approval_mode=approval_mode,
         )
 
     print_chat_help()
 
-    navi_dir = workspace / ".navi"
-    navi_dir.mkdir(parents=True, exist_ok=True)
+    navi_home = get_navi_home()
 
+    # 创建 prompt session
     prompt_session = PromptSession(
-        history=FileHistory(str(navi_dir / "chat_history.txt")),
+        history=FileHistory(str(navi_home / "chat_history.txt")),
         auto_suggest=AutoSuggestFromHistory(),
         completer=WordCompleter(SLASH_COMMANDS, ignore_case=True),
         key_bindings=create_prompt_key_bindings(),
     )
 
+    # 主循环
     while True:
         try:
             user_input = prompt_session.prompt("You > ")
@@ -504,7 +665,8 @@ def start_chat(
 
             if not text:
                 continue
-
+            
+            # 处理斜杠命令
             handled = handle_slash_command(
                 command=text,
                 runtime=runtime,
@@ -514,14 +676,17 @@ def start_chat(
             if handled:
                 continue
 
+            # 发给 Agent 处理
             console.print("[dim]Thinking...[/dim]")
             result = runtime.run_turn(text)
-
+            
+            # 打印结果
             if result_is_ok(result):
                 print_assistant_message(result_final_answer(result))
             else:
                 print_error_message(result_error(result))
 
+        # 中止对话和退出对话
         except KeyboardInterrupt:
             console.print("\n[yellow]Interrupted.[/yellow]")
             continue
@@ -568,15 +733,32 @@ def main_callback(
             help="Skip splash screen.",
         ),
     ] = False,
+    approval: Annotated[
+        str,
+        typer.Option(
+            "--approval",
+            help="Approval mode: strict, normal, or open.",
+        ),
+    ] = DEFAULT_APPROVAL_MODE,
+    yolo: Annotated[
+        bool,
+        typer.Option(
+            "--yolo",
+            help="Alias for --approval open.",
+        ),
+    ] = False,
 ):
     """
     无子命令时，默认进入 chat 模式。
     """
+    approval_mode = resolve_approval_mode(approval, yolo)
+
     ctx.obj = {
         "workspace": workspace,
         "model": model,
         "max_steps": max_steps,
         "no_splash": no_splash,
+        "approval_mode": approval_mode,
     }
 
     if ctx.invoked_subcommand is None:
@@ -585,6 +767,7 @@ def main_callback(
             model=model,
             max_steps=max_steps,
             no_splash=no_splash,
+            approval_mode=approval_mode,
         )
 
 
@@ -600,6 +783,7 @@ def chat(ctx: typer.Context):
         model=config.get("model", DEFAULT_MODEL),
         max_steps=config.get("max_steps", DEFAULT_MAX_STEPS),
         no_splash=config.get("no_splash", False),
+        approval_mode=config.get("approval_mode", DEFAULT_APPROVAL_MODE),
     )
 
 
@@ -623,19 +807,23 @@ def run(
     workspace = Path(config.get("workspace", Path("."))).resolve()
     model = config.get("model", DEFAULT_MODEL)
     max_steps = config.get("max_steps", DEFAULT_MAX_STEPS)
+    approval_mode = config.get("approval_mode", DEFAULT_APPROVAL_MODE)
 
     runtime = AgentRuntime(
         workspace=workspace,
         model=model,
         max_steps=max_steps,
         event_handler=print_agent_event,
+        approval_mode=approval_mode,
+        approval_handler=ask_approval_from_cli,
     )
 
     console.print(
         Panel(
             f"[bold]Task[/bold]: {task}\n"
             f"[bold]Workspace[/bold]: {workspace}\n"
-            f"[bold]Model[/bold]: {model}",
+            f"[bold]Model[/bold]: {model}\n"
+            f"[bold]Approval[/bold]: {approval_mode}",
             title="Navi",
             border_style="dim",
         )
@@ -706,8 +894,7 @@ def skills(
     """
     List available skills.
     """
-    workspace = workspace.resolve()
-    skills_list = list_skills_from_workspace(workspace)
+    skills_list = list_skills_from_navi_home()
 
     if not skills_list:
         console.print("[yellow]No skills found.[/yellow]")
@@ -733,8 +920,7 @@ def sessions(
     """
     List recent sessions.
     """
-    workspace = workspace.resolve()
-    sessions_list = list_sessions_from_workspace(workspace)
+    sessions_list = list_sessions_from_navi_home()
 
     if not sessions_list:
         console.print("[yellow]No sessions found.[/yellow]")

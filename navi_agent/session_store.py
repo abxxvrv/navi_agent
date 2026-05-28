@@ -45,7 +45,49 @@ class SessionStore:
         self.session_dir.mkdir(parents=True, exist_ok=True)
         self._write_meta()
         self._update_index()
-    
+
+    @classmethod
+    def from_existing(cls, session_dir: str | Path, root: str | None = None) -> "SessionStore":
+        """从已有 session 目录加载，不创建新目录或写 index。"""
+        session_dir = Path(session_dir).resolve()
+        if root is None:
+            root = str(session_dir.parent)
+
+        instance = cls.__new__(cls)
+        instance.root = Path(root)
+        instance.session_dir = session_dir
+        instance.path = session_dir
+        instance.meta_path = session_dir / "meta.json"
+        instance.turns_path = session_dir / "turns.jsonl"
+        instance.events_path = session_dir / "events.jsonl"
+        instance.index_path = instance.root / "index.jsonl"
+
+        # 加载 meta
+        instance.meta = {}
+        if instance.meta_path.exists():
+            try:
+                instance.meta = json.loads(instance.meta_path.read_text(encoding="utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                instance.meta = {}
+
+        instance.session_id = instance.meta.get("session_id", session_dir.name)
+        instance.project_path = instance.meta.get("project_path", "")
+        instance.created_at = instance.meta.get("created_at", "")
+
+        # 加载 turns
+        instance.turns = instance._read_jsonl(instance.turns_path)
+
+        # 加载 event_id（取最大 event_id + 1）
+        events = instance._read_jsonl(instance.events_path)
+        max_id = 0
+        for ev in events:
+            eid = ev.get("event_id", 0)
+            if isinstance(eid, int) and eid >= max_id:
+                max_id = eid + 1
+        instance.event_id = max_id
+
+        return instance
+
     # 保存一轮用户输入 → agent 最终回答
     def append_turn(self, turn: dict[str, Any]) -> None:
         assistant = turn.get("final_answer") or turn.get("assistant") or ""

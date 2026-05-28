@@ -19,15 +19,26 @@ class ContextManager:
         soul_filename: str = ".navi/SOUL.md",
         agents_filename: str = "AGENTS.md",
         skills_dirname: str = "skills",
+        skills_path: str | None = None,
+        navi_home: str | None = None,
         max_soul_chars: int = 12000,
         max_agents_chars: int = 12000,
         max_skill_chars: int = 8000,
         max_total_skill_chars: int = 20000,
     ):
         self.workspace = Path(workspace).resolve()
-        self.soul_path = self.workspace / soul_filename
+        self.navi_home = Path(navi_home).resolve() if navi_home is not None else None
+        self.soul_path = (
+            self.navi_home / "SOUL.md"
+            if self.navi_home is not None
+            else self.workspace / soul_filename
+        )
         self.agents_path = self.workspace / agents_filename
-        self.skills_path = self.workspace / skills_dirname
+        self.skills_path = (
+            Path(skills_path).resolve()
+            if skills_path is not None
+            else self.workspace / skills_dirname
+        )
         self.max_soul_chars = max_soul_chars
         self.max_agents_chars = max_agents_chars
         self.max_skill_chars = max_skill_chars
@@ -44,6 +55,9 @@ class ContextManager:
             [
                 f"当前系统: {platform.system()}",
                 f"当前工作目录: {self.workspace}",
+                f"Navi home: {self.navi_home}" if self.navi_home else "",
+                f"技能目录: {self.skills_path}",
+                f"会话目录: {self.navi_home / 'sessions'}" if self.navi_home else "",
                 f"运行终端: {self._detect_terminal()}",
             ]
         )
@@ -86,7 +100,7 @@ class ContextManager:
                 {
                     "name": name,
                     "description": description,
-                    "path": str(skill_path.relative_to(self.workspace)),
+                    "path": str(skill_path),
                 }
             )
 
@@ -187,11 +201,7 @@ class ContextManager:
         return blocks
 
     def _read_text_file(self, path: Path, max_chars: int) -> str:
-        try:
-            resolved = path.resolve()
-            resolved.relative_to(self.workspace)
-        except ValueError:
-            return ""
+        resolved = path.resolve()
 
         if not resolved.exists() or not resolved.is_file():
             return ""

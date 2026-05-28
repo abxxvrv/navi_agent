@@ -15,6 +15,7 @@ from typing_extensions import TypedDict
 
 from .context_manager import ContextManager
 from .history_utils import build_turn_record, get_final_assistant_message
+from .paths import get_navi_home
 from .session_store import SessionStore
 from .tool import (
     ListDirTool,
@@ -28,6 +29,11 @@ from .tool import (
 )
 from .tool_registry import ToolRegistry
 
+from .approval import (
+    ApprovalDecision,
+    ApprovalManager,
+    UserApprovalChoice,
+)
 
 class AgentState(TypedDict):
     messages: Annotated[list[dict[str, Any]], operator.add]
@@ -36,6 +42,7 @@ class AgentState(TypedDict):
 
 AgentEventHandler = Callable[[dict[str, Any]], None]
 
+ApprovalHandler = Callable[[ApprovalDecision], str | UserApprovalChoice | bool]
 
 class AgentRuntime:
     def __init__(
@@ -44,6 +51,9 @@ class AgentRuntime:
         model: str = "deepseek-v4-flash",
         max_steps: int = 40,
         event_handler: AgentEventHandler | None = None,
+        approval_mode: str = "normal",
+        approval_handler: ApprovalHandler | None = None,
+        resume_session_id: str | None = None,
     ):
         load_dotenv()
 
@@ -51,16 +61,39 @@ class AgentRuntime:
         self.model = model
         self.max_steps = max_steps
         self.event_handler = event_handler
+        self.approval_handler = approval_handler
+        self.approval_manager = ApprovalManager(mode=approval_mode)
+        self.navi_home = get_navi_home()
 
-        self.session_store = SessionStore(
-            root=str(self.workspace / ".light_agent" / "sessions"),
-            project_path=str(self.workspace),
-        )
+        sessions_root = str(self.navi_home / "sessions")
+
+        if resume_session_id:
+            session_dir = Path(sessions_root) / resume_session_id
+            self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
+            self.semantic_history = []
+            for turn in self.session_store.turns:
+                user_content = turn.get("user", "")
+                assistant_content = turn.get("assistant", "")
+                if user_content:
+                    self.semantic_history.append({"role": "user", "content": user_content})
+                if assistant_content:
+                    self.semantic_history.append({"role": "assistant", "content": assistant_content})
+            self.turn_id = len(self.session_store.turns)
+        else:
+            self.session_store = SessionStore(
+                root=sessions_root,
+                project_path=str(self.workspace),
+            )
+            self.semantic_history = []
+            self.turn_id = 0
+
         self.tool_registry = ToolRegistry()
-        self.context_manager = ContextManager(workspace=str(self.workspace))
-        self.semantic_history: list[dict[str, Any]] = []
+        self.context_manager = ContextManager(
+            workspace=str(self.workspace),
+            skills_path=str(self.navi_home / "skills"),
+            navi_home=str(self.navi_home),
+        )
         self.active_skills: list[str] = []
-        self.turn_id = 0
         self.current_turn_id: int | None = None
 
         self.client = OpenAI(
@@ -303,6 +336,40 @@ class AgentRuntime:
                     "arguments": tool_args,
                 }
             )
+
+            # 进入审批
+            approval_result = self._handle_approval(
+                tool_call_id=tool_call["id"],
+                tool_name=tool_name,
+                tool_args=tool_args,
+            )
+
+            # 如果审批没通过，那审批返回值非空，这里会拦下来。
+            if approval_result is not None:
+                tool_result = approval_result
+                self.session_store.append_event(
+                    {
+                        "turn_id": self.current_turn_id,
+                        "type": "tool_result",
+                        "tool_call_id": tool_call["id"],
+                        "tool_name": tool_name,
+                        "arguments": tool_args,
+                        "ok": False,
+                        "summary": self._summarize_tool_result(tool_result),
+                        "result": tool_result,
+                    }
+                )
+
+                tool_messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": tool_call["id"],
+                        "content": json.dumps(tool_result, ensure_ascii=False),
+                    }
+                )
+                continue
+
+            # 往下就是正常的调用流程
             self._emit(
                 {
                     "type": "tool_start",
@@ -336,6 +403,8 @@ class AgentRuntime:
                         "error": str(exc),
                     }
                 )
+            
+            # else 块在 try 没有异常时才执行
             else:
                 self.session_store.append_event(
                     {
@@ -361,8 +430,12 @@ class AgentRuntime:
                         "tool_result": tool_result,
                     }
                 )
-
-            if tool_name == "load_skill" and tool_result.get("ok"):
+            # 如果有 load_skill
+            if (
+                    tool_name == "load_skill"
+                    and isinstance(tool_result, dict)
+                    and tool_result.get("ok")
+                ):
                 skill_name = tool_result["skill_name"]
                 if skill_name not in active_skills:
                     active_skills.append(skill_name)
@@ -380,6 +453,145 @@ class AgentRuntime:
             "active_skills": active_skills,
         }
 
+    # 在工具节点去审批的函数
+    def _handle_approval(
+        self,
+        tool_call_id: str,
+        tool_name: str,
+        tool_args: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        # 根据工具名字和参数，生成一个选择：看看是允许、拒绝、问用户的哪一种
+        decision = self.approval_manager.check_tool_call(tool_name, tool_args)
+        # 记录一下进入审批了
+        self.session_store.append_event(
+            {
+                "turn_id": self.current_turn_id,
+                "type": "approval_check",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "arguments": tool_args,
+                "action": decision.action.value,
+                "risk": decision.risk.value,
+                "reason": decision.reason,
+                "approval_key": decision.approval_key,
+                "command": decision.command,
+            }
+        )
+
+        if decision.is_allow: # 如果被允许，返回空。
+            return None
+
+        if decision.is_deny: # 如果被拒绝，会返回调用失败的结果作为工具结果。
+            tool_result = decision.to_tool_error()
+            self.session_store.append_event(
+                {
+                    "turn_id": self.current_turn_id,
+                    "type": "approval_denied",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "risk": decision.risk.value,
+                    "reason": decision.reason,
+                    "command": decision.command,
+                }
+            )
+            self._emit(
+                {
+                    "type": "tool_error",
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "error": decision.reason,
+                }
+            )
+            return tool_result
+
+        try:
+            user_choice = self.approval_handler(decision)
+            approved = self.approval_manager.resolve_user_choice(decision, user_choice) # 这是个 bool 值
+        except Exception as exc:
+            reason = f"审批处理失败：{exc}"
+            tool_result = {
+                "ok": False,
+                "error": reason,
+                "approval": {
+                    "action": "ask",
+                    "risk": decision.risk.value,
+                    "tool_name": tool_name,
+                    "command": decision.command,
+                },
+            }
+            self.session_store.append_event(
+                {
+                    "turn_id": self.current_turn_id,
+                    "type": "approval_error",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "risk": decision.risk.value,
+                    "error": str(exc),
+                    "command": decision.command,
+                }
+            )
+            self._emit(
+                {
+                    "type": "tool_error",
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "error": reason,
+                }
+            )
+            return tool_result
+
+        if approved: # 如果用户同意执行，记录一下，返回 None
+            self.session_store.append_event(
+                {
+                    "turn_id": self.current_turn_id,
+                    "type": "approval_approved",
+                    "tool_call_id": tool_call_id,
+                    "tool_name": tool_name,
+                    "arguments": tool_args,
+                    "risk": decision.risk.value,
+                    "reason": decision.reason,
+                    "approval_key": decision.approval_key,
+                    "command": decision.command,
+                }
+            )
+            return None
+        
+        # 走到这里说明没同意，返回没同意的结果
+        reason = "用户拒绝执行该工具调用。"
+        tool_result = {
+            "ok": False,
+            "error": reason,
+            "approval": {
+                "action": "reject",
+                "risk": decision.risk.value,
+                "tool_name": tool_name,
+                "command": decision.command,
+            },
+        }
+        self.session_store.append_event(
+            {
+                "turn_id": self.current_turn_id,
+                "type": "approval_rejected",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "arguments": tool_args,
+                "risk": decision.risk.value,
+                "reason": reason,
+                "command": decision.command,
+            }
+        )
+        self._emit(
+            {
+                "type": "tool_error",
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+                "error": reason,
+            }
+        )
+        return tool_result
+    
     # 摘要，现在就是按关键词随便匹配。然后内容存入了 event.jsonl，里面也包括了完整的工具调用结果。
     def _summarize_tool_result(self, result: Any) -> str:
         if not isinstance(result, dict):
@@ -624,7 +836,10 @@ class AgentRuntime:
                 },
                 "required": ["name"],
             },
-            function=SkillViewTool(workspace=workspace),
+            function=SkillViewTool(
+                workspace=workspace,
+                skills_path=str(self.navi_home / "skills"),
+            ),
         )
 
         # load_skill
@@ -645,7 +860,10 @@ class AgentRuntime:
                 },
                 "required": ["name"],
             },
-            function=LoadSkillTool(workspace=workspace),
+            function=LoadSkillTool(
+                workspace=workspace,
+                skills_path=str(self.navi_home / "skills"),
+            ),
         )
 
         # run_command
@@ -690,7 +908,7 @@ class AgentRuntime:
             name="search_session_history",
             description=(
                 "搜索 Navi 的全部会话历史，包括历史会话和当前会话。"
-                "Navi 的会话历史保存在 .light_agent/sessions 下，主要有 3 种 jsonl 文件："
+                "Navi 的会话历史保存在 NAVI_HOME 指定目录或用户主目录 .navi/sessions 下，主要有 3 种 jsonl 文件："
                 "1. index.jsonl：位于 sessions 根目录，每行是一个 session 索引，记录 session_id、title、created_at、updated_at、project_path、turn_count。"
                 "2. <session_id>/turns.jsonl：位于每个 session 目录内，每行是一轮语义历史，记录 turn_id、created_at、user、assistant。"
                 "当 include_trace=false 时，搜索工具只搜索 turns.jsonl，适合回答用户之前问过什么、助手之前回答过什么。"

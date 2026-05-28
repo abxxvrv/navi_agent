@@ -53,16 +53,6 @@ class ListDirTool:
     ) -> dict[str, Any]:
         target = (self.workspace / path).resolve()
 
-        # 安全检查：禁止访问 workspace 外部
-        try:
-            target.relative_to(self.workspace)
-        except ValueError:
-            return {
-                "ok": False,
-                "error": "拒绝访问：路径位于工作区外。",
-                "path": path,
-            }
-
         if not target.exists():
             return {
                 "ok": False,
@@ -96,7 +86,7 @@ class ListDirTool:
 
         return {
             "ok": True,
-            "path": str(target.relative_to(self.workspace)),
+            "path": str(target),
             "items": items,
             "count": len(items),
             "truncated": len(items) >= max_items,
@@ -114,16 +104,6 @@ class ReadFileTool:
         max_lines: int = 200,
     ) -> dict[str, Any]:
         target = (self.workspace / path).resolve()
-
-        # 安全检查：禁止访问 workspace 外部
-        try:
-            target.relative_to(self.workspace)
-        except ValueError:
-            return {
-                "ok": False,
-                "error": "拒绝访问：路径位于工作区外。",
-                "path": path,
-            }
 
         if not target.exists():
             return {
@@ -180,7 +160,7 @@ class ReadFileTool:
 
         return {
             "ok": True,
-            "path": str(target.relative_to(self.workspace)),
+            "path": str(target),
             "start_line": start_line,
             "end_line": end_index,
             "total_lines": total_lines,
@@ -203,26 +183,8 @@ class WriteFileTool:
         try:
             input_path = Path(path)
 
-            # 1. 禁止绝对路径
-            if input_path.is_absolute():
-                return {
-                    "ok": False,
-                    "error": "不允许使用绝对路径。请使用相对于工作区的路径。",
-                    "path": path,
-                }
-
-            # 2. 拼成 workspace 内的真实路径
             target = (self.workspace / input_path).resolve()
 
-            # 3. 安全检查：禁止写到 workspace 外面
-            if not target.is_relative_to(self.workspace):
-                return {
-                    "ok": False,
-                    "error": "拒绝访问：路径位于工作区外。",
-                    "path": path,
-                }
-
-            # 4. 检查写入模式
             if mode not in ("overwrite", "append"):
                 return {
                     "ok": False,
@@ -230,7 +192,6 @@ class WriteFileTool:
                     "path": path,
                 }
 
-            # 5. 如果目标已经存在并且是目录，禁止写入
             if target.exists() and target.is_dir():
                 return {
                     "ok": False,
@@ -238,10 +199,9 @@ class WriteFileTool:
                     "path": path,
                 }
 
-            # 6. 父目录不存在时，自动创建
             target.parent.mkdir(parents=True, exist_ok=True)
 
-            relative_path = str(target.relative_to(self.workspace))
+            relative_path = str(target)
             if target.exists():
                 try:
                     old_content = target.read_text(encoding=encoding)
@@ -255,7 +215,6 @@ class WriteFileTool:
             else:
                 old_content = ""
 
-            # 7. 写入文件
             file_mode = "w" if mode == "overwrite" else "a"
 
             with open(target, file_mode, encoding=encoding) as f:
@@ -302,26 +261,8 @@ class PatchTool:
         try:
             input_path = Path(path)
 
-            # 1. 禁止绝对路径
-            if input_path.is_absolute():
-                return {
-                    "ok": False,
-                    "error": "不允许使用绝对路径。请使用相对于工作区的路径。",
-                    "path": path,
-                }
-
-            # 2. 拼成 workspace 内的真实路径
             target = (self.workspace / input_path).resolve()
 
-            # 3. 安全检查：禁止修改 workspace 外面的文件
-            if not target.is_relative_to(self.workspace):
-                return {
-                    "ok": False,
-                    "error": "拒绝访问：路径位于工作区外。",
-                    "path": path,
-                }
-
-            # 4. 检查文件是否存在
             if not target.exists():
                 return {
                     "ok": False,
@@ -329,7 +270,6 @@ class PatchTool:
                     "path": path,
                 }
 
-            # 5. 检查目标是不是文件
             if not target.is_file():
                 return {
                     "ok": False,
@@ -386,7 +326,7 @@ class PatchTool:
                 replacements = 1
 
             # 10. 生成 diff，方便用户检查改了什么
-            relative_path = str(target.relative_to(self.workspace))
+            relative_path = str(target)
             diff = make_unified_diff(original_text, patched_text, relative_path)
             added_lines, removed_lines = count_diff_lines(diff)
 
@@ -427,9 +367,13 @@ class PatchTool:
 
 
 class SkillViewTool:
-    def __init__(self, workspace: str = "."):
+    def __init__(self, workspace: str = ".", skills_path: str | None = None):
         self.workspace = Path(workspace).resolve()
-        self.skills_dir = Path(__file__).resolve().parent / "skills"
+        self.skills_dir = (
+            Path(skills_path).resolve()
+            if skills_path is not None
+            else self.workspace / "skills"
+        )
 
     def __call__(
         self,
@@ -521,9 +465,18 @@ class SkillViewTool:
 
 # 加载技能工具
 class LoadSkillTool:
-    def __init__(self, workspace: str = ".", skills_dir: str = "skills"):
+    def __init__(
+        self,
+        workspace: str = ".",
+        skills_dir: str = "skills",
+        skills_path: str | None = None,
+    ):
         self.workspace = Path(workspace).resolve()
-        self.skills_path = (Path(__file__).resolve().parent / skills_dir).resolve()
+        self.skills_path = (
+            Path(skills_path).resolve()
+            if skills_path is not None
+            else self.workspace / skills_dir
+        )
 
     def __call__(self, name: str) -> dict[str, Any]:
         if not isinstance(name, str) or not name.strip():
@@ -686,26 +639,8 @@ class RunCommandTool:
 
             command = command.strip()
 
-            # 1. 检查 cwd，必须在 workspace 内部
             input_cwd = Path(cwd)
-
-            if input_cwd.is_absolute():
-                return {
-                    "ok": False,
-                    "error": "cwd 必须是工作区内的相对路径。",
-                    "cwd": cwd,
-                    "command": command,
-                }
-
             target_cwd = (self.workspace / input_cwd).resolve()
-
-            if not target_cwd.is_relative_to(self.workspace):
-                return {
-                    "ok": False,
-                    "error": "拒绝访问：cwd 位于工作区外。",
-                    "cwd": cwd,
-                    "command": command,
-                }
 
             if not target_cwd.exists():
                 return {
@@ -769,7 +704,7 @@ class RunCommandTool:
             return {
                 "ok": completed.returncode == 0,
                 "command": command,
-                "cwd": str(target_cwd.relative_to(self.workspace)),
+                "cwd": str(target_cwd),
                 "exit_code": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -836,10 +771,6 @@ class RunCommandTool:
         # 禁止用 .. 逃出工作区
         if ".." in command:
             return "命令中不允许使用 '..' 进行路径穿越。"
-
-        # 禁止 Windows 绝对路径，比如 C:\xxx 或 E:/xxx
-        if re.search(r"[a-zA-Z]:[\\/]", command):
-            return "命令中不允许使用 Windows 绝对路径。"
 
         # 禁止用户目录简写
         if "~" in command:
