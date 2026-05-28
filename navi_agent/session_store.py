@@ -136,12 +136,193 @@ class SessionStore:
         self._write_meta()
         self._update_index()
     
+    def _stream_search_turns(
+        self,
+        turns_path: Path,
+        keywords: list[str],
+        context_chars: int = 300,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """逐行读 turns.jsonl，匹配的行截取关键词附近上下文后返回。"""
+        if not turns_path.exists() or not turns_path.is_file():
+            return []
+
+        results: list[tuple[int, dict[str, Any]]] = []
+
+        with turns_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                lower_line = line.lower()
+                if not any(kw in lower_line for kw in keywords):
+                    continue
+
+                try:
+                    turn = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if not isinstance(turn, dict):
+                    continue
+
+                score = 0
+                # 完整查询串匹配权重高
+                full_query = " ".join(keywords)
+                if full_query in lower_line:
+                    score += 10
+                for kw in keywords:
+                    if kw in lower_line:
+                        score += 1
+
+                if score <= 0:
+                    continue
+
+                user_text = str(turn.get("user", ""))
+                assistant_text = str(turn.get("assistant", ""))
+
+                # 截取匹配位置附近的上下文
+                snippet_fields = {"user": user_text, "assistant": assistant_text}
+                for field_name, field_text in snippet_fields.items():
+                    if len(field_text) <= context_chars * 2:
+                        continue
+                    match_idx = -1
+                    for kw in keywords:
+                        match_idx = field_text.lower().find(kw)
+                        if match_idx != -1:
+                            break
+                    if match_idx == -1:
+                        field_text = field_text[: context_chars * 2]
+                    else:
+                        start = max(0, match_idx - context_chars)
+                        end = min(len(field_text), match_idx + context_chars)
+                        field_text = field_text[start:end]
+                        if start > 0:
+                            field_text = "..." + field_text
+                        if end < len(turn.get(field_name, "")):
+                            field_text = field_text + "..."
+                    snippet_fields[field_name] = field_text
+
+                item = {
+                    "turn_id": turn.get("turn_id"),
+                    "created_at": turn.get("created_at"),
+                    "user": snippet_fields["user"],
+                    "final_answer": snippet_fields["assistant"],
+                    "source": "turns.jsonl",
+                }
+
+                results.append((score, item))
+
+        return results
+
+    def _stream_search_events(
+        self,
+        events_path: Path,
+        keywords: list[str],
+        context_chars: int = 300,
+    ) -> list[tuple[int, dict[str, Any]]]:
+        """逐行读 events.jsonl，按 turn_id 分组后匹配，截取上下文。"""
+        if not events_path.exists() or not events_path.is_file():
+            return []
+
+        # 第一遍：逐行读，按 turn_id 分组（只存匹配的 turn）
+        matched_turns: dict[int, list[dict[str, Any]]] = {}
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+
+                lower_line = line.lower()
+                if not any(kw in lower_line for kw in keywords):
+                    continue
+
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+
+                if not isinstance(event, dict):
+                    continue
+
+                turn_id = event.get("turn_id")
+                if isinstance(turn_id, int):
+                    matched_turns.setdefault(turn_id, []).append(event)
+
+        # 第二遍：对匹配的 turn 做评分和截取
+        results: list[tuple[int, dict[str, Any]]] = []
+        full_query = " ".join(keywords)
+
+        for turn_id, events in matched_turns.items():
+            user = ""
+            final_answer = ""
+            created_at = ""
+
+            for event in events:
+                event_type = event.get("type")
+                if not created_at:
+                    created_at = str(event.get("created_at") or "")
+                if event_type == "turn_start":
+                    user = str(event.get("user") or user)
+                elif event_type == "turn_end":
+                    final_answer = str(event.get("final_answer") or final_answer)
+                    created_at = str(event.get("created_at") or created_at)
+
+            searchable = f"{user}\n{final_answer}".lower()
+            score = 0
+            if full_query in searchable:
+                score += 10
+            for kw in keywords:
+                if kw in searchable:
+                    score += 1
+
+            if score <= 0:
+                continue
+
+            # 截取
+            for field_name, field_text in [("user", user), ("final_answer", final_answer)]:
+                if len(field_text) <= context_chars * 2:
+                    continue
+                original_len = len(field_text)
+                match_idx = -1
+                for kw in keywords:
+                    match_idx = field_text.lower().find(kw)
+                    if match_idx != -1:
+                        break
+                if match_idx == -1:
+                    field_text = field_text[: context_chars * 2]
+                else:
+                    start = max(0, match_idx - context_chars)
+                    end = min(original_len, match_idx + context_chars)
+                    field_text = field_text[start:end]
+                    if start > 0:
+                        field_text = "..." + field_text
+                    if end < original_len:
+                        field_text = field_text + "..."
+                if field_name == "user":
+                    user = field_text
+                else:
+                    final_answer = field_text
+
+            item = {
+                "turn_id": turn_id,
+                "created_at": created_at,
+                "user": user,
+                "final_answer": final_answer,
+                "source": "events.jsonl",
+            }
+
+            results.append((score, item))
+
+        return results
+
     # 全部会话搜索工具
     def search(
         self,
         query: str,
         limit: int = 5,
         include_trace: bool = False,
+        context_chars: int = 300,
     ) -> list[dict[str, Any]]:
         query = query.strip().lower()
         if not query:
@@ -211,116 +392,35 @@ class SessionStore:
             session_title = str(session_meta.get("title") or "")
             project_path = str(session_meta.get("project_path") or "")
 
-            # 3A. include_trace=True：只搜 events.jsonl
+            # 3A. include_trace=True：流式搜 events.jsonl
             if include_trace:
-                events_by_turn = self._load_events_by_turn(events_path)
-
-                for turn_id, events in events_by_turn.items():
-                    user = ""
-                    final_answer = ""
-                    created_at = ""
-
-                    for event in events:
-                        event_type = event.get("type")
-
-                        if not created_at:
-                            created_at = str(event.get("created_at") or "")
-
-                        if event_type == "turn_start":
-                            user = str(event.get("user") or user)
-
-                        elif event_type == "turn_end":
-                            final_answer = str(event.get("final_answer") or final_answer)
-                            created_at = str(event.get("created_at") or created_at)
-
-                    searchable_text = "\n".join(
-                        [
-                            session_id,
-                            session_title,
-                            project_path,
-                            json.dumps(events, ensure_ascii=False),
-                        ]
-                    ).lower()
-
-                    score = 0
-
-                    if query in searchable_text:
-                        score += 10
-
-                    for keyword in keywords:
-                        if keyword in searchable_text:
-                            score += 1
-
-                    if score <= 0:
-                        continue
-
-                    item: dict[str, Any] = {
-                        "session_id": session_id,
-                        "session_title": session_title,
-                        "project_path": project_path,
-                        "turn_id": turn_id,
-                        "created_at": created_at,
-                        "user": user,
-                        "final_answer": final_answer,
-                        "source": "events.jsonl",
-                        "events": events,
-                    }
-
+                results = self._stream_search_events(events_path, keywords, context_chars)
+                for score, item in results:
+                    item["session_id"] = session_id
+                    item["session_title"] = session_title
+                    item["project_path"] = project_path
                     sort_time = str(
-                        created_at
+                        item.get("created_at")
                         or session_meta.get("updated_at")
                         or session_meta.get("created_at")
                         or ""
                     )
-
                     scored.append((score, sort_time, item))
 
                 continue
 
-            # 3B. include_trace=False：只搜 turns.jsonl
-            turns = self._read_jsonl(turns_path)
-
-            for turn in turns:
-                searchable_text = "\n".join(
-                    [
-                        session_id,
-                        session_title,
-                        project_path,
-                        str(turn.get("user", "")),
-                        str(turn.get("assistant", "")),
-                    ]
-                ).lower()
-
-                score = 0
-
-                if query in searchable_text:
-                    score += 10
-
-                for keyword in keywords:
-                    if keyword in searchable_text:
-                        score += 1
-
-                if score <= 0:
-                    continue
-
-                item = {
-                    "session_id": session_id,
-                    "session_title": session_title,
-                    "project_path": project_path,
-                    "turn_id": turn.get("turn_id"),
-                    "created_at": turn.get("created_at"),
-                    "user": turn.get("user"),
-                    "final_answer": turn.get("assistant"),
-                    "source": "turns.jsonl",
-                }
-
+            # 3B. include_trace=False：流式搜 turns.jsonl
+            results = self._stream_search_turns(turns_path, keywords, context_chars)
+            for score, item in results:
+                item["session_id"] = session_id
+                item["session_title"] = session_title
+                item["project_path"] = project_path
                 sort_time = str(
-                    turn.get("created_at")
+                    item.get("created_at")
                     or session_meta.get("updated_at")
                     or session_meta.get("created_at")
                     or ""
                 )
-
                 scored.append((score, sort_time, item))
 
         # 4. 排序：先按匹配分数，再按时间
