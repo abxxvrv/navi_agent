@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+from collections import defaultdict
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 import operator
 import os
-from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -283,173 +285,143 @@ class AgentRuntime:
             ]
         }
 
+    def _execute_single_tool(
+        self, tool_name: str, tool_args: dict, tool_call_id: str
+    ) -> tuple[str, Any, str, dict]:
+        """执行单个工具，供线程池调用。返回 (tool_call_id, result, name, args)。"""
+        self._emit({"type": "tool_start", "tool_name": tool_name, "tool_args": tool_args})
+
+        try:
+            tool_result = self.tool_registry.invoke(tool_name, tool_args)
+        except Exception as exc:
+            tool_result = {"ok": False, "error": str(exc)}
+            self.session_store.append_event(
+                {"turn_id": self.current_turn_id, "type": "tool_error",
+                 "tool_call_id": tool_call_id, "tool_name": tool_name,
+                 "arguments": tool_args, "error": str(exc)}
+            )
+            self._emit({"type": "tool_error", "tool_name": tool_name,
+                        "tool_args": tool_args, "error": str(exc)})
+        else:
+            self.session_store.append_event(
+                {"turn_id": self.current_turn_id, "type": "tool_result",
+                 "tool_call_id": tool_call_id, "tool_name": tool_name,
+                 "arguments": tool_args,
+                 "ok": bool(tool_result.get("ok")) if isinstance(tool_result, dict) else True,
+                 "summary": self._summarize_tool_result(tool_result),
+                 "result": tool_result}
+            )
+            self._emit({"type": "tool_result", "tool_name": tool_name,
+                        "tool_args": tool_args, "tool_result": tool_result})
+
+        return (tool_call_id, tool_result, tool_name, tool_args)
+
     def _tool_node(self, state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1]
-        tool_messages = []
         active_skills = list(state.get("active_skills", []))
+        failed_messages: list[dict] = []
+        rejected_messages: list[dict] = []
 
+        # 阶段一：解析参数
+        parsed: list[tuple[str, str, dict]] = []  # (call_id, name, args)
         for tool_call in last_message.get("tool_calls", []):
             tool_name = tool_call["function"]["name"]
-
             try:
                 tool_args = json.loads(tool_call["function"]["arguments"] or "{}")
                 if not isinstance(tool_args, dict):
                     raise ValueError("工具参数必须是 JSON object。")
             except Exception as exc:
-                tool_args = {}
-                tool_result = {
-                    "ok": False,
-                    "error": f"工具参数解析失败：{exc}",
-                }
+                tool_result = {"ok": False, "error": f"工具参数解析失败：{exc}"}
                 self.session_store.append_event(
-                    {
-                        "turn_id": self.current_turn_id,
-                        "type": "tool_error",
-                        "tool_call_id": tool_call["id"],
-                        "tool_name": tool_name,
-                        "error": f"工具参数解析失败：{exc}",
-                    }
+                    {"turn_id": self.current_turn_id, "type": "tool_error",
+                     "tool_call_id": tool_call["id"], "tool_name": tool_name,
+                     "error": str(exc)}
                 )
-                self._emit(
-                    {
-                        "type": "tool_error",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "error": str(exc),
-                    }
-                )
-                tool_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": json.dumps(tool_result, ensure_ascii=False),
-                    }
-                )
+                self._emit({"type": "tool_error", "tool_name": tool_name,
+                            "tool_args": {}, "error": str(exc)})
+                failed_messages.append({"role": "tool", "tool_call_id": tool_call["id"],
+                                        "content": json.dumps(tool_result, ensure_ascii=False)})
                 continue
-
             self.session_store.append_event(
-                {
-                    "turn_id": self.current_turn_id,
-                    "type": "tool_call",
-                    "tool_call_id": tool_call["id"],
-                    "tool_name": tool_name,
-                    "arguments": tool_args,
-                }
+                {"turn_id": self.current_turn_id, "type": "tool_call",
+                 "tool_call_id": tool_call["id"], "tool_name": tool_name,
+                 "arguments": tool_args}
             )
+            parsed.append((tool_call["id"], tool_name, tool_args))
 
-            # 进入审批
-            approval_result = self._handle_approval(
-                tool_call_id=tool_call["id"],
-                tool_name=tool_name,
-                tool_args=tool_args,
-            )
+        # 冲突检测：多个工具写同一文件则全部拒绝
+        write_map: dict[str, list[int]] = defaultdict(list)
+        for i, (call_id, tool_name, tool_args) in enumerate(parsed):
+            if tool_name in ("write_file", "patch_file") and tool_args.get("path"):
+                write_map[tool_args["path"]].append(i)
 
-            # 如果审批没通过，那审批返回值非空，这里会拦下来。
-            if approval_result is not None:
-                tool_result = approval_result
+        conflict_indices = set()
+        for path, indices in write_map.items():
+            if len(indices) > 1:
+                conflict_indices.update(indices)
+
+        non_conflicting: list[tuple[str, str, dict]] = []
+        for i, (call_id, tool_name, tool_args) in enumerate(parsed):
+            if i in conflict_indices:
+                error = {"ok": False, "error": f"冲突：多个工具同时写入同一文件 {tool_args.get('path')}"}
                 self.session_store.append_event(
-                    {
-                        "turn_id": self.current_turn_id,
-                        "type": "tool_result",
-                        "tool_call_id": tool_call["id"],
-                        "tool_name": tool_name,
-                        "arguments": tool_args,
-                        "ok": False,
-                        "summary": self._summarize_tool_result(tool_result),
-                        "result": tool_result,
-                    }
+                    {"turn_id": self.current_turn_id, "type": "tool_result",
+                     "tool_call_id": call_id, "tool_name": tool_name,
+                     "arguments": tool_args, "ok": False,
+                     "summary": self._summarize_tool_result(error), "result": error}
                 )
-
-                tool_messages.append(
-                    {
-                        "role": "tool",
-                        "tool_call_id": tool_call["id"],
-                        "content": json.dumps(tool_result, ensure_ascii=False),
-                    }
-                )
-                continue
-
-            # 往下就是正常的调用流程
-            self._emit(
-                {
-                    "type": "tool_start",
-                    "tool_name": tool_name,
-                    "tool_args": tool_args,
-                }
-            )
-
-            try:
-                tool_result = self.tool_registry.invoke(tool_name, tool_args)
-            except Exception as exc:
-                tool_result = {
-                    "ok": False,
-                    "error": str(exc),
-                }
-                self.session_store.append_event(
-                    {
-                        "turn_id": self.current_turn_id,
-                        "type": "tool_error",
-                        "tool_call_id": tool_call["id"],
-                        "tool_name": tool_name,
-                        "arguments": tool_args,
-                        "error": str(exc),
-                    }
-                )
-                self._emit(
-                    {
-                        "type": "tool_error",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "error": str(exc),
-                    }
-                )
-            
-            # else 块在 try 没有异常时才执行
+                rejected_messages.append({"role": "tool", "tool_call_id": call_id,
+                                          "content": json.dumps(error, ensure_ascii=False)})
             else:
-                self.session_store.append_event(
-                    {
-                        "turn_id": self.current_turn_id,
-                        "type": "tool_result",
-                        "tool_call_id": tool_call["id"],
-                        "tool_name": tool_name,
-                        "arguments": tool_args,
-                        "ok": (
-                            bool(tool_result.get("ok"))
-                            if isinstance(tool_result, dict)
-                            else True
-                        ),
-                        "summary": self._summarize_tool_result(tool_result),
-                        "result": tool_result,
-                    }
-                )
-                self._emit(
-                    {
-                        "type": "tool_result",
-                        "tool_name": tool_name,
-                        "tool_args": tool_args,
-                        "tool_result": tool_result,
-                    }
-                )
-            # 如果有 load_skill
-            if (
-                    tool_name == "load_skill"
-                    and isinstance(tool_result, dict)
-                    and tool_result.get("ok")
-                ):
-                skill_name = tool_result["skill_name"]
-                if skill_name not in active_skills:
-                    active_skills.append(skill_name)
+                non_conflicting.append((call_id, tool_name, tool_args))
+        parsed = non_conflicting
 
-            tool_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call["id"],
-                    "content": json.dumps(tool_result, ensure_ascii=False),
+        # 阶段二：审批
+        to_execute: list[tuple[str, str, dict]] = []  # (call_id, name, args)
+        for call_id, tool_name, tool_args in parsed:
+            approval_result = self._handle_approval(
+                tool_call_id=call_id, tool_name=tool_name, tool_args=tool_args)
+            if approval_result is not None:
+                self.session_store.append_event(
+                    {"turn_id": self.current_turn_id, "type": "tool_result",
+                     "tool_call_id": call_id, "tool_name": tool_name,
+                     "arguments": tool_args, "ok": False,
+                     "summary": self._summarize_tool_result(approval_result),
+                     "result": approval_result}
+                )
+                rejected_messages.append({"role": "tool", "tool_call_id": call_id,
+                                          "content": json.dumps(approval_result, ensure_ascii=False)})
+                continue
+            to_execute.append((call_id, tool_name, tool_args))
+
+        # 阶段三：并发执行
+        executed_messages: list[dict] = []
+        if to_execute:
+            with ThreadPoolExecutor(max_workers=len(to_execute)) as executor:
+                futures = {
+                    executor.submit(self._execute_single_tool, name, args, cid): cid
+                    for cid, name, args in to_execute
                 }
-            )
+                results: dict[str, tuple] = {}
+                for future in futures:
+                    call_id, result, name, args = future.result()
+                    results[call_id] = (call_id, result, name, args)
+
+            for call_id, tool_name, tool_args in to_execute:
+                _, tool_result, _, _ = results[call_id]
+                if (tool_name == "load_skill"
+                        and isinstance(tool_result, dict)
+                        and tool_result.get("ok")):
+                    skill_name = tool_result["skill_name"]
+                    if skill_name not in active_skills:
+                        active_skills.append(skill_name)
+                executed_messages.append(
+                    {"role": "tool", "tool_call_id": call_id,
+                     "content": json.dumps(tool_result, ensure_ascii=False)}
+                )
 
         return {
-            "messages": tool_messages,
+            "messages": failed_messages + rejected_messages + executed_messages,
             "active_skills": active_skills,
         }
 
