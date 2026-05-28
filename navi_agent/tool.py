@@ -531,6 +531,7 @@ class SearchSessionHistoryTool:
         query: str,
         limit: int = 5,
         include_trace: bool = False,
+        snippet_chars: int = 300,
     ) -> dict:
         if not isinstance(query, str) or not query.strip():
             return {
@@ -544,10 +545,17 @@ class SearchSessionHistoryTool:
         if limit > 20:
             limit = 20
 
+        if snippet_chars < 50:
+            snippet_chars = 50
+
+        if snippet_chars > 2000:
+            snippet_chars = 2000
+
         matches = self.session_store.search(
             query=query,
             limit=limit,
             include_trace=include_trace,
+            context_chars=snippet_chars,
         )
 
         searched_sources = ["index.jsonl"]

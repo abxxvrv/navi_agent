@@ -914,6 +914,16 @@ class AgentRuntime:
                             "此时只搜索 <session_id>/events.jsonl。"
                         ),
                         "default": False,
+                    },
+                    "snippet_chars": {
+                        "type": "integer",
+                        "description": (
+                            "每条结果返回的上下文字符数（匹配位置前后各截取的字符数）。"
+                            "默认 300，范围 50-2000。较小的值节省上下文 token，较大的值提供更多上下文。"
+                        ),
+                        "default": 300,
+                        "minimum": 50,
+                        "maximum": 2000,
                     }
                 },
                 "required": ["query"],
