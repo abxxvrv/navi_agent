@@ -30,8 +30,6 @@ class ContextManager:
         self.navi_home = Path(navi_home).resolve() if navi_home is not None else None
         self.soul_path = (
             self.navi_home / "SOUL.md"
-            if self.navi_home is not None
-            else self.workspace / soul_filename
         )
         self.agents_path = self.workspace / agents_filename
         self.skills_path = (

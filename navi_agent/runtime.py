@@ -49,7 +49,7 @@ class AgentRuntime:
         self,
         workspace: str | Path = ".",
         model: str = "deepseek-v4-flash",
-        max_steps: int = 40,
+        max_steps: int = 120,
         event_handler: AgentEventHandler | None = None,
         approval_mode: str = "normal",
         approval_handler: ApprovalHandler | None = None,

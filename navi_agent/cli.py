@@ -12,10 +12,12 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.patch_stdout import run_in_terminal
 from rich.console import Console
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
+from rich.table import Table
 from rich.text import Text
 
 from navi_agent.approval import ApprovalDecision, UserApprovalChoice
@@ -27,7 +29,7 @@ APP_NAME = "Navi"
 VERSION = "0.1.0"
 
 DEFAULT_MODEL = "deepseek-v4-flash"
-DEFAULT_MAX_STEPS = 40
+DEFAULT_MAX_STEPS = 120
 DEFAULT_APPROVAL_MODE = "normal"
 APPROVAL_MODES = ["strict", "normal", "open"]
 SLASH_COMMANDS = [
@@ -478,20 +480,60 @@ def list_skills_from_navi_home() -> list[str]:
     return skills
 
 
-def list_sessions_from_navi_home(limit: int = 20) -> list[str]:
+def list_sessions_from_navi_home(limit: int = 20) -> list[dict]:
     """
-    从 Navi home 的 sessions 目录读取历史 session。
+    从 Navi home 的 sessions 目录读取历史 session 元数据。
     """
-    sessions_dir = get_navi_home() / "sessions"
+    import json as _json
 
-    sessions: list[str] = []
+    sessions_dir = get_navi_home() / "sessions"
+    sessions: list[dict] = []
 
     if sessions_dir.exists():
         for item in sorted(sessions_dir.iterdir(), reverse=True):
-            if item.is_dir():
-                sessions.append(item.name)
+            if not item.is_dir():
+                continue
+            meta_path = item / "meta.json"
+            if not meta_path.is_file():
+                continue
+            try:
+                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
+                sessions.append({
+                    "session_id": meta.get("session_id", item.name),
+                    "title": meta.get("title", "Untitled"),
+                    "project_path": meta.get("project_path", ""),
+                    "created_at": meta.get("created_at", ""),
+                })
+            except Exception:
+                continue
 
     return sessions[:limit]
+
+
+def print_sessions_table(limit: int = 5) -> None:
+    sessions = list_sessions_from_navi_home(limit)
+
+    if not sessions:
+        console.print("[yellow]No sessions found.[/yellow]")
+        return
+
+    table = Table(show_header=True, header_style="bold")
+    table.add_column("title", max_width=40)
+    table.add_column("project_path", max_width=50)
+    table.add_column("time", width=12)
+    table.add_column("session_id", width=25)
+
+    for s in sessions:
+        created = s["created_at"]
+        if len(created) >= 16:
+            try:
+                from datetime import datetime as _dt
+                created = _dt.fromisoformat(created).strftime("%m-%d %H:%M")
+            except Exception:
+                created = created[:16]
+        table.add_row(s["title"], s["project_path"], created, s["session_id"])
+
+    console.print(table)
 
 
 def create_prompt_key_bindings() -> KeyBindings:
@@ -517,6 +559,10 @@ def create_prompt_key_bindings() -> KeyBindings:
         suggestion = event.current_buffer.suggestion
         if suggestion:
             event.current_buffer.insert_text(suggestion.text)
+
+    @key_bindings.add("c-o")
+    def show_more_sessions(event) -> None:
+        run_in_terminal(lambda: print_sessions_table(limit=20))
 
     return key_bindings
 
@@ -573,16 +619,8 @@ def handle_slash_command(
         return True
 
     if command == "/sessions":
-        sessions = list_sessions_from_navi_home()
-
-        if not sessions:
-            console.print("[yellow]No sessions found.[/yellow]")
-            return True
-
-        console.print("[bold]Recent sessions[/bold]")
-        for session in sessions:
-            console.print(f"- {session}")
-
+        print_sessions_table(limit=5)
+        console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
     if command == "/approval":
@@ -609,12 +647,58 @@ def handle_slash_command(
 # =========================
 
 # 开始对话
+def print_recent_history(session_id: str, max_chars: int = 3000) -> None:
+    """
+    恢复会话时，输出最近几轮对话内容。
+    """
+    import json as _json
+
+    turns_path = get_navi_home() / "sessions" / session_id / "turns.jsonl"
+    if not turns_path.is_file():
+        return
+
+    turns: list[dict] = []
+    try:
+        for line in turns_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                turns.append(_json.loads(line))
+    except Exception:
+        return
+
+    if not turns:
+        return
+
+    # 从后往前截取，保证最后一轮完整
+    lines: list[str] = []
+    total = 0
+    for turn in reversed(turns):
+        user = turn.get("user", "")
+        assistant = turn.get("final_answer", "")
+        block = f"You: {user}\n\nNavi: {assistant}\n"
+        if total + len(block) > max_chars and lines:
+            break
+        lines.append(block)
+        total += len(block)
+
+    lines.reverse()
+
+    console.print()
+    console.print(Panel(
+        "\n---\n".join(lines),
+        title="Resumed session",
+        border_style="dim",
+    ))
+    console.print()
+
+
 def start_chat(
     workspace: Path,
     model: str,
     max_steps: int,
     no_splash: bool,
     approval_mode: str,
+    resume_session_id: str | None = None,
 ) -> None:
     """
     默认交互模式。
@@ -635,10 +719,15 @@ def start_chat(
         event_handler=print_agent_event,
         approval_mode=approval_mode,
         approval_handler=ask_approval_from_cli,
+        resume_session_id=resume_session_id,
     )
 
-    # 打印启动信息
-    if not no_splash:
+    # 恢复会话时显示历史
+    if resume_session_id:
+        print_recent_history(resume_session_id)
+
+    # 打印启动信息（恢复会话时跳过）
+    if not no_splash and not resume_session_id:
         print_splash(
             workspace=workspace,
             model=model,
@@ -747,11 +836,41 @@ def main_callback(
             help="Alias for --approval open.",
         ),
     ] = False,
+    resume: Annotated[
+        str,
+        typer.Option(
+            "--resume",
+            "-r",
+            help="Resume a previous session by ID.",
+        ),
+    ] = "",
+    continue_: Annotated[
+        bool,
+        typer.Option(
+            "--continue",
+            "-c",
+            help="Resume the most recent session.",
+        ),
+    ] = False,
 ):
     """
     无子命令时，默认进入 chat 模式。
     """
+    if resume and continue_:
+        raise typer.BadParameter("--resume and --continue are mutually exclusive.")
+
     approval_mode = resolve_approval_mode(approval, yolo)
+
+    resume_session_id = resume
+    if continue_:
+        sessions_dir = get_navi_home() / "sessions"
+        if sessions_dir.exists():
+            dirs = sorted(
+                [d for d in sessions_dir.iterdir() if d.is_dir()],
+                reverse=True,
+            )
+            if dirs:
+                resume_session_id = dirs[0].name
 
     ctx.obj = {
         "workspace": workspace,
@@ -759,6 +878,7 @@ def main_callback(
         "max_steps": max_steps,
         "no_splash": no_splash,
         "approval_mode": approval_mode,
+        "resume_session_id": resume_session_id or None,
     }
 
     if ctx.invoked_subcommand is None:
@@ -768,6 +888,7 @@ def main_callback(
             max_steps=max_steps,
             no_splash=no_splash,
             approval_mode=approval_mode,
+            resume_session_id=resume_session_id or None,
         )
 
 
@@ -784,6 +905,7 @@ def chat(ctx: typer.Context):
         max_steps=config.get("max_steps", DEFAULT_MAX_STEPS),
         no_splash=config.get("no_splash", False),
         approval_mode=config.get("approval_mode", DEFAULT_APPROVAL_MODE),
+        resume_session_id=config.get("resume_session_id"),
     )
 
 
@@ -809,6 +931,8 @@ def run(
     max_steps = config.get("max_steps", DEFAULT_MAX_STEPS)
     approval_mode = config.get("approval_mode", DEFAULT_APPROVAL_MODE)
 
+    resume_session_id = config.get("resume_session_id")
+
     runtime = AgentRuntime(
         workspace=workspace,
         model=model,
@@ -816,6 +940,7 @@ def run(
         event_handler=print_agent_event,
         approval_mode=approval_mode,
         approval_handler=ask_approval_from_cli,
+        resume_session_id=resume_session_id,
     )
 
     console.print(
@@ -920,16 +1045,7 @@ def sessions(
     """
     List recent sessions.
     """
-    sessions_list = list_sessions_from_navi_home()
-
-    if not sessions_list:
-        console.print("[yellow]No sessions found.[/yellow]")
-        return
-
-    console.print("[bold]Recent sessions[/bold]")
-
-    for session in sessions_list:
-        console.print(f"- {session}")
+    print_sessions_table(limit=20)
 
 
 def main():
