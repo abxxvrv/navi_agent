@@ -12,6 +12,10 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from prompt_toolkit.layout import Layout
+from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout import HSplit, ScrollOffsets, Window
+from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.patch_stdout import run_in_terminal
 from rich.console import Console
 from rich.markdown import Markdown
@@ -172,6 +176,45 @@ def print_error_message(error: str) -> None:
         )
     )
     console.print()
+
+
+def show_scrollable_response(text: str) -> None:
+    """把回复内容放进一个可滚动的框里显示，用户按 Enter/Esc 退出。"""
+    import shutil
+
+    from prompt_toolkit import Application
+
+    terminal_height = shutil.get_terminal_size().lines
+    box_height = max(5, int(terminal_height * 0.8))
+
+    buf = Buffer(read_only=True)
+    buf.text = text
+
+    response_window = Window(
+        content=BufferControl(buffer=buf),
+        height=box_height,
+        scroll_offsets=ScrollOffsets(top=0, bottom=0),
+        wrap_lines=True,
+    )
+
+    hint_window = Window(
+        height=1,
+        content=FormattedTextControl(
+            [("class:hint", " ↑↓/PgUp/PgDn 滚动 │ Enter/Esc 继续 ")]
+        ),
+    )
+
+    layout = Layout(HSplit([response_window, hint_window]))
+
+    kb = KeyBindings()
+
+    @kb.add("enter")
+    @kb.add("escape")
+    def _(event):
+        event.app.exit()
+
+    app = Application(layout=layout, key_bindings=kb, full_screen=False)
+    app.run()
 
 
 def print_status_bar(runtime: AgentRuntime) -> None:
@@ -897,7 +940,9 @@ def start_chat(
 
             # 打印结果
             if result_is_ok(result):
-                print_assistant_message(result_final_answer(result))
+                answer = result_final_answer(result)
+                if answer:
+                    show_scrollable_response(answer)
             else:
                 print_error_message(result_error(result))
 
