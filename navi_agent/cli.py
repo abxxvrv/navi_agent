@@ -874,6 +874,8 @@ def start_chat(
         try:
             console.print("─" * console.width)
             user_input = prompt_session.prompt("You > ")
+            console.print("─" * console.width)
+            print_status_bar(runtime)
             text = user_input.strip()
 
             if not text:
@@ -898,8 +900,6 @@ def start_chat(
                 print_assistant_message(result_final_answer(result))
             else:
                 print_error_message(result_error(result))
-
-            print_status_bar(runtime)
 
         # 中止对话和退出对话
         except KeyboardInterrupt:
