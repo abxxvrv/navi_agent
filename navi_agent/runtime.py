@@ -25,6 +25,7 @@ from .tool import (
     PatchTool,
     ReadFileTool,
     RunCommandTool,
+    SearchFilesTool,
     SearchSessionHistoryTool,
     SkillViewTool,
     WriteFileTool,
@@ -940,5 +941,49 @@ class AgentRuntime:
                 "required": ["query"],
             },
             function=SearchSessionHistoryTool(session_store=self.session_store),
+        )
+
+        # search_files
+        self.tool_registry.register(
+            name="search_files",
+            description=(
+                "在工作区内全文搜索文件内容。支持关键词和正则表达式。"
+                "可用于查找函数定义、变量引用、错误信息、TODO 注释等。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词或正则表达式。",
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "搜索的起始目录，相对于工作区。默认 '.'。",
+                        "default": ".",
+                    },
+                    "glob": {
+                        "type": "string",
+                        "description": "文件名过滤，如 '*.py'、'*.js'。留空搜索所有文件。",
+                        "default": "",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回多少条匹配。默认 30。",
+                        "default": 30,
+                        "minimum": 1,
+                        "maximum": 100,
+                    },
+                    "context_lines": {
+                        "type": "integer",
+                        "description": "匹配行前后各显示几行上下文。默认 0。",
+                        "default": 0,
+                        "minimum": 0,
+                        "maximum": 5,
+                    },
+                },
+                "required": ["query"],
+            },
+            function=SearchFilesTool(workspace=workspace),
         )
     

@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Any
 import difflib
+import json
+import shutil
 import subprocess
 import re
 import time
@@ -809,3 +811,133 @@ class RunCommandTool:
             + "\n\n... 输出已截断 ..."
         )
         return truncated_text, True
+
+
+class SearchFilesTool:
+    """全文搜索工具，优先用 ripgrep，fallback 到纯 Python。"""
+
+    def __init__(self, workspace: str):
+        self.workspace = Path(workspace).resolve()
+
+    def __call__(
+        self,
+        query: str,
+        path: str = ".",
+        glob: str = "",
+        limit: int = 30,
+        context_lines: int = 0,
+    ) -> dict:
+        target = (self.workspace / path).resolve()
+        if not str(target).startswith(str(self.workspace)):
+            return {"ok": False, "error": "路径越界。"}
+        if not target.exists():
+            return {"ok": False, "error": f"路径不存在: {path}"}
+
+        if shutil.which("rg"):
+            return self._search_with_rg(query, target, glob, limit, context_lines)
+        return self._search_with_python(query, target, glob, limit, context_lines)
+
+    def _search_with_rg(self, query, target, glob, limit, context_lines):
+        cmd = ["rg", "--json", "-n"]
+        if context_lines > 0:
+            cmd += ["-C", str(context_lines)]
+        if glob:
+            cmd += ["-g", glob]
+        cmd += [query, str(target)]
+
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=30, cwd=str(self.workspace)
+        )
+        if result.returncode == 2:
+            return {"ok": False, "error": result.stderr.strip()}
+
+        matches = []
+        pending_context: list[tuple[str, int, str]] = []
+
+        for line in result.stdout.strip().split("\n"):
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            etype = entry.get("type")
+
+            if etype == "context" and context_lines > 0:
+                data = entry["data"]
+                rel = str(Path(data["path"]["text"]).relative_to(self.workspace))
+                pending_context.append((rel, data["line_number"],
+                                        data["lines"]["text"].rstrip("\n")))
+
+            elif etype == "match":
+                if len(matches) >= limit:
+                    break
+                data = entry["data"]
+                rel = str(Path(data["path"]["text"]).relative_to(self.workspace))
+                mline = data["line_number"]
+                m = {"path": rel, "line": mline,
+                     "content": data["lines"]["text"].rstrip("\n")}
+                if context_lines > 0:
+                    before = [c for p, l, c in pending_context
+                              if p == rel and l < mline]
+                    m["context_before"] = before
+                    m["context_after"] = []
+                    pending_context = [(p, l, c) for p, l, c in pending_context
+                                       if not (p == rel and l < mline)]
+                matches.append(m)
+
+            elif etype == "end" and context_lines > 0:
+                data = entry.get("data", {})
+                if data.get("path"):
+                    rel = str(Path(data["path"]["text"]).relative_to(self.workspace))
+                    for m in reversed(matches):
+                        if m["path"] == rel and "context_after" in m:
+                            for p, l, c in pending_context:
+                                if p == rel and l > m["line"]:
+                                    m["context_after"].append(c)
+                            break
+                    pending_context = [(p, l, c) for p, l, c in pending_context
+                                       if p != rel]
+
+        if pending_context and matches:
+            for p, l, c in pending_context:
+                for m in reversed(matches):
+                    if m["path"] == p and "context_after" in m and l > m["line"]:
+                        m["context_after"].append(c)
+                        break
+
+        return {"ok": True, "query": query, "matches": matches, "total": len(matches)}
+
+    def _search_with_python(self, query, target, glob, limit, context_lines):
+        pattern = re.compile(query)
+        matches = []
+        skip_dirs = {".git", "node_modules", "__pycache__", ".venv", "venv"}
+        files = sorted(target.rglob(glob) if glob else target.rglob("*"))
+
+        for fpath in files:
+            if len(matches) >= limit:
+                break
+            if not fpath.is_file():
+                continue
+            if any(part in skip_dirs for part in fpath.parts):
+                continue
+            try:
+                text = fpath.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            lines = text.splitlines()
+            for i, line in enumerate(lines):
+                if pattern.search(line):
+                    rel = str(fpath.relative_to(self.workspace))
+                    entry = {"path": rel, "line": i + 1, "content": line}
+                    if context_lines > 0:
+                        s = max(0, i - context_lines)
+                        e = min(len(lines), i + context_lines + 1)
+                        entry["context_before"] = lines[s:i]
+                        entry["context_after"] = lines[i + 1:e]
+                    matches.append(entry)
+                    if len(matches) >= limit:
+                        break
+
+        return {"ok": True, "query": query, "matches": matches, "total": len(matches)}
