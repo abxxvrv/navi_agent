@@ -136,6 +136,13 @@ tool_registry.register(
                 "minimum": 1,
                 "maximum": 500,
             },
+            "max_chars": {
+                "type": "integer",
+                "description": "返回内容的最大字符数，默认 15000，范围 1000-50000。",
+                "default": 15000,
+                "minimum": 1000,
+                "maximum": 50000,
+            },
         },
         "required": ["path"],
     },

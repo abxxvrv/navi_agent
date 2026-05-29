@@ -102,6 +102,7 @@ class ReadFileTool:
         path: str,
         start_line: int = 1,
         max_lines: int = 200,
+        max_chars: int = 15000,
     ) -> dict[str, Any]:
         target = (self.workspace / path).resolve()
 
@@ -136,6 +137,11 @@ class ReadFileTool:
         if max_lines > 500:
             max_lines = 500
 
+        if max_chars < 1000:
+            max_chars = 1000
+        if max_chars > 50000:
+            max_chars = 50000
+
         try:
             text = target.read_text(encoding="utf-8")
         except UnicodeDecodeError:
@@ -158,6 +164,11 @@ class ReadFileTool:
             for line_no, line in enumerate(selected_lines, start=start_line)
         )
 
+        char_truncated = False
+        if len(numbered_content) > max_chars:
+            numbered_content = numbered_content[:max_chars] + "\n[内容已截断]"
+            char_truncated = True
+
         return {
             "ok": True,
             "path": str(target),
@@ -165,7 +176,7 @@ class ReadFileTool:
             "end_line": end_index,
             "total_lines": total_lines,
             "content": numbered_content,
-            "truncated": end_index < total_lines,
+            "truncated": end_index < total_lines or char_truncated,
         }
     
 # 写文件工具
