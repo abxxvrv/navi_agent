@@ -12,12 +12,12 @@ from typing import Annotated, Any, Literal
 
 from dotenv import load_dotenv
 from langgraph.graph import END, START, StateGraph
-from openai import OpenAI
 from typing_extensions import TypedDict
 
 from .context_manager import ContextManager
 from .history_utils import build_turn_record, get_final_assistant_message
-from .paths import get_navi_home
+from .model_router import ModelRouter
+from .paths import get_config_path, get_navi_home
 from .session_store import SessionStore
 from .tool import (
     ListDirTool,
@@ -50,7 +50,6 @@ class AgentRuntime:
     def __init__(
         self,
         workspace: str | Path = ".",
-        model: str = "deepseek-v4-flash",
         max_steps: int = 120,
         event_handler: AgentEventHandler | None = None,
         approval_mode: str = "normal",
@@ -60,7 +59,6 @@ class AgentRuntime:
         load_dotenv()
 
         self.workspace = Path(workspace).resolve()
-        self.model = model
         self.max_steps = max_steps
         self.event_handler = event_handler
         self.approval_handler = approval_handler
@@ -98,10 +96,7 @@ class AgentRuntime:
         self.active_skills: list[str] = []
         self.current_turn_id: int | None = None
 
-        self.client = OpenAI(
-            api_key=os.environ["DEEPSEEK_API_KEY"],
-            base_url=os.environ.get("DEEPSEEK_BASE_URL", "https://api.deepseek.com"),
-        )
+        self.router = ModelRouter(get_config_path())
 
         self._register_tools()
         self.graph = self._compile_graph()
@@ -123,6 +118,16 @@ class AgentRuntime:
 
     def list_tools(self) -> list[str]:
         return list(self.tool_registry._tools.keys())
+
+    def get_model_info(self) -> dict[str, Any]:
+        return {
+            "current": self.router.current_name,
+            "current_model_name": self.router.model_name,
+            "models": self.router.list_models(),
+        }
+
+    def switch_model(self, name: str) -> bool:
+        return self.router.switch_model(name)
     
     # 调用agent，临时任务、对话模式都会用这个
     def _invoke_agent(self, user_input: str, keep_history: bool) -> dict[str, Any]:
@@ -271,12 +276,9 @@ class AgentRuntime:
             extra_instructions=skill_index_prompt,
         )
 
-        response = self.client.chat.completions.create(
-            model=self.model,
+        response = self.router.chat(
             messages=runtime_messages,
             tools=self.tool_registry.to_openai_tools(),
-            reasoning_effort="high",
-            extra_body={"thinking": {"type": "enabled"}},
         )
 
         return {

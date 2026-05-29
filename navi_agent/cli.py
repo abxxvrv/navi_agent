@@ -38,6 +38,7 @@ SLASH_COMMANDS = [
     "/tools",
     "/skills",
     "/sessions",
+    "/model",
     "/approval",
     "/exit",
     "/quit",
@@ -536,6 +537,108 @@ def print_sessions_table(limit: int = 5) -> None:
     console.print(table)
 
 
+def _interactive_select(options: list[str], selected: int = 0) -> int | None:
+    """方向键选择菜单，返回选中索引，Esc 返回 None。"""
+    import platform
+    import sys
+
+    def render():
+        for i, label in enumerate(options):
+            prefix = "❯ " if i == selected else "  "
+            print(f"{prefix}{label}")
+
+    render()
+
+    if platform.system() == "Windows":
+        import msvcrt
+
+        while True:
+            ch = msvcrt.getch()
+            if ch == b'\xe0':
+                ch2 = msvcrt.getch()
+                if ch2 == b'H':
+                    selected = (selected - 1) % len(options)
+                elif ch2 == b'P':
+                    selected = (selected + 1) % len(options)
+            elif ch == b'\r':
+                return selected
+            elif ch == b'\x1b':
+                return None
+            elif ch in [str(i + 1).encode() for i in range(len(options))]:
+                return int(ch.decode()) - 1
+            else:
+                continue
+            sys.stdout.write(f'\033[{len(options)}A\033[J')
+            render()
+            sys.stdout.flush()
+    else:
+        import termios
+        import tty
+
+        fd = sys.stdin.fileno()
+        old_settings = termios.tcgetattr(fd)
+        try:
+            tty.setraw(fd)
+            while True:
+                ch = sys.stdin.read(1)
+                if ch == '\x1b':
+                    ch2 = sys.stdin.read(1)
+                    if ch2 == '[':
+                        ch3 = sys.stdin.read(1)
+                        if ch3 == 'A':
+                            selected = (selected - 1) % len(options)
+                        elif ch3 == 'B':
+                            selected = (selected + 1) % len(options)
+                elif ch in ('\r', '\n'):
+                    return selected
+                elif ch == '\x1b':
+                    return None
+                elif ch.isdigit() and 1 <= int(ch) <= len(options):
+                    return int(ch) - 1
+                else:
+                    continue
+                sys.stdout.write(f'\033[{len(options)}A\033[J')
+                render()
+                sys.stdout.flush()
+        finally:
+            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+
+
+def handle_model_command(runtime: AgentRuntime) -> None:
+    info = runtime.get_model_info()
+    current_name = info["current"]
+    models = info["models"]
+
+    if not models:
+        console.print("[yellow]No models configured. Edit ~/.navi/config.json[/yellow]")
+        return
+
+    providers = sorted(models.keys())
+    current_idx = providers.index(current_name) if current_name in providers else 0
+
+    console.print(f"[bold]Current model[/bold]: {current_name} ({info['current_model_name']})")
+    console.print()
+
+    labels = []
+    for name in providers:
+        entry = models[name]
+        marker = " ◄" if name == current_name else ""
+        labels.append(f"{name} ({entry['model_name']}){marker}")
+
+    selected = _interactive_select(labels, current_idx)
+    if selected is None:
+        return
+
+    provider_name = providers[selected]
+    entry = models[provider_name]
+    model_name = entry["model_name"]
+
+    if runtime.switch_model(provider_name):
+        console.print(f"[green]Switched to {provider_name} ({model_name})[/green]")
+    else:
+        console.print(f"[red]Failed to switch to {provider_name}[/red]")
+
+
 def create_prompt_key_bindings() -> KeyBindings:
     """
     Make Tab accept history auto-suggestions.
@@ -623,6 +726,10 @@ def handle_slash_command(
         console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
+    if command == "/model":
+        handle_model_command(runtime)
+        return True
+
     if command == "/approval":
         mode = getattr(runtime.approval_manager, "mode", None)
         console.print(f"[bold]Approval mode[/bold]: {mode.value if mode else 'unknown'}")
@@ -694,7 +801,6 @@ def print_recent_history(session_id: str, max_chars: int = 3000) -> None:
 
 def start_chat(
     workspace: Path,
-    model: str,
     max_steps: int,
     no_splash: bool,
     approval_mode: str,
@@ -714,7 +820,6 @@ def start_chat(
 
     runtime = AgentRuntime(
         workspace=workspace,
-        model=model,
         max_steps=max_steps,
         event_handler=print_agent_event,
         approval_mode=approval_mode,
@@ -730,7 +835,7 @@ def start_chat(
     if not no_splash and not resume_session_id:
         print_splash(
             workspace=workspace,
-            model=model,
+            model=runtime.router.model_name,
             approval_mode=approval_mode,
         )
 
@@ -884,7 +989,6 @@ def main_callback(
     if ctx.invoked_subcommand is None:
         start_chat(
             workspace=workspace,
-            model=model,
             max_steps=max_steps,
             no_splash=no_splash,
             approval_mode=approval_mode,
@@ -901,7 +1005,6 @@ def chat(ctx: typer.Context):
 
     start_chat(
         workspace=config.get("workspace", Path(".")),
-        model=config.get("model", DEFAULT_MODEL),
         max_steps=config.get("max_steps", DEFAULT_MAX_STEPS),
         no_splash=config.get("no_splash", False),
         approval_mode=config.get("approval_mode", DEFAULT_APPROVAL_MODE),
@@ -927,7 +1030,6 @@ def run(
     config = ctx.obj or {}
 
     workspace = Path(config.get("workspace", Path("."))).resolve()
-    model = config.get("model", DEFAULT_MODEL)
     max_steps = config.get("max_steps", DEFAULT_MAX_STEPS)
     approval_mode = config.get("approval_mode", DEFAULT_APPROVAL_MODE)
 
@@ -935,7 +1037,6 @@ def run(
 
     runtime = AgentRuntime(
         workspace=workspace,
-        model=model,
         max_steps=max_steps,
         event_handler=print_agent_event,
         approval_mode=approval_mode,
@@ -947,7 +1048,7 @@ def run(
         Panel(
             f"[bold]Task[/bold]: {task}\n"
             f"[bold]Workspace[/bold]: {workspace}\n"
-            f"[bold]Model[/bold]: {model}\n"
+            f"[bold]Model[/bold]: {runtime.router.model_name}\n"
             f"[bold]Approval[/bold]: {approval_mode}",
             title="Navi",
             border_style="dim",
@@ -989,7 +1090,6 @@ def tools(
     """
     runtime = AgentRuntime(
         workspace=workspace.resolve(),
-        model=model,
         max_steps=DEFAULT_MAX_STEPS,
     )
 
