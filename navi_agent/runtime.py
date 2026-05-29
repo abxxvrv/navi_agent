@@ -97,6 +97,7 @@ class AgentRuntime:
         self.current_turn_id: int | None = None
 
         self.router = ModelRouter(get_config_path())
+        self.last_usage: dict[str, int] = {}
 
         self._register_tools()
         self.graph = self._compile_graph()
@@ -280,6 +281,7 @@ class AgentRuntime:
             messages=runtime_messages,
             tools=self.tool_registry.to_openai_tools(),
         )
+        self.last_usage = self.router.last_usage
 
         return {
             "messages": [

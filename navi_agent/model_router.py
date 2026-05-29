@@ -69,6 +69,7 @@ class ModelRouter:
         self.config = self._load_config()
         self.current_name: str = self.config.get("current_model", "")
         self._provider = self._build_provider(self.current_name)
+        self.last_usage: dict[str, int] = {}
 
     def _load_config(self) -> dict:
         if self.config_path.is_file():
@@ -101,7 +102,14 @@ class ModelRouter:
     ) -> Any:
         if self._provider is None:
             raise RuntimeError(f"模型未配置或不可用: {self.current_name}")
-        return self._provider.chat(messages, tools, **kwargs)
+        response = self._provider.chat(messages, tools, **kwargs)
+        if hasattr(response, "usage") and response.usage:
+            self.last_usage = {
+                "prompt_tokens": response.usage.prompt_tokens or 0,
+                "completion_tokens": response.usage.completion_tokens or 0,
+                "total_tokens": response.usage.total_tokens or 0,
+            }
+        return response
 
     @property
     def model_name(self) -> str:

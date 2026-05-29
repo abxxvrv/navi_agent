@@ -174,6 +174,24 @@ def print_error_message(error: str) -> None:
     console.print()
 
 
+def print_status_bar(runtime: AgentRuntime) -> None:
+    usage = runtime.last_usage
+    model = runtime.router.model_name
+    turn = runtime.turn_id
+
+    if usage:
+        prompt_t = usage.get("prompt_tokens", 0)
+        comp_t = usage.get("completion_tokens", 0)
+        total_t = usage.get("total_tokens", 0)
+        pct = round(prompt_t / total_t * 100) if total_t else 0
+        console.print(
+            f"[dim]Context: {pct}% | In: {prompt_t} | Out: {comp_t} "
+            f"| [{model}] turn {turn}[/dim]"
+        )
+    else:
+        console.print(f"[dim][{model}] turn {turn}[/dim]")
+
+
 def print_agent_event(event: dict[str, Any]) -> None:
     event_type = event.get("type")
     tool_name = event.get("tool_name")
@@ -854,12 +872,13 @@ def start_chat(
     # 主循环
     while True:
         try:
+            console.print("─" * console.width)
             user_input = prompt_session.prompt("You > ")
             text = user_input.strip()
 
             if not text:
                 continue
-            
+
             # 处理斜杠命令
             handled = handle_slash_command(
                 command=text,
@@ -873,12 +892,14 @@ def start_chat(
             # 发给 Agent 处理
             console.print("[dim]Thinking...[/dim]")
             result = runtime.run_turn(text)
-            
+
             # 打印结果
             if result_is_ok(result):
                 print_assistant_message(result_final_answer(result))
             else:
                 print_error_message(result_error(result))
+
+            print_status_bar(runtime)
 
         # 中止对话和退出对话
         except KeyboardInterrupt:
@@ -888,6 +909,9 @@ def start_chat(
         except EOFError:
             console.print("\n[yellow]Bye.[/yellow]")
             break
+
+    sid = runtime.session_store.session_id
+    console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
 
 
 # =========================
