@@ -125,6 +125,10 @@ class ModelRouter:
             return False
         self._provider = provider
         self.current_name = name
+        self.config["current_model"] = name
+        self.config_path.write_text(
+            json.dumps(self.config, indent=2, ensure_ascii=False)
+        )
         return True
 
     def list_models(self) -> dict[str, dict[str, str]]:
