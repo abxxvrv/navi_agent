@@ -177,19 +177,25 @@ def print_error_message(error: str) -> None:
 def print_status_bar(runtime: AgentRuntime) -> None:
     usage = runtime.last_usage
     model = runtime.router.model_name
-    turn = runtime.turn_id
+    window = runtime.router.context_window
+
+    def fmt(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1000:
+            return f"{n / 1000:.1f}K"
+        return str(n)
 
     if usage:
         prompt_t = usage.get("prompt_tokens", 0)
         comp_t = usage.get("completion_tokens", 0)
-        total_t = usage.get("total_tokens", 0)
-        pct = round(prompt_t / total_t * 100) if total_t else 0
+        pct = round(prompt_t / window * 100) if window else 0
         console.print(
-            f"[dim]Context: {pct}% | In: {prompt_t} | Out: {comp_t} "
-            f"| [{model}] turn {turn}[/dim]"
+            f"[dim]Context: {pct}% | In: {fmt(prompt_t)} / {fmt(window)} "
+            f"| Out: {comp_t} | Model: {model}[/dim]"
         )
     else:
-        console.print(f"[dim][{model}] turn {turn}[/dim]")
+        console.print(f"[dim]Model: {model}[/dim]")
 
 
 def print_agent_event(event: dict[str, Any]) -> None:
@@ -873,6 +879,8 @@ def start_chat(
     while True:
         try:
             console.print("─" * console.width)
+            print_status_bar(runtime)
+            console.print("─" * console.width)
             user_input = prompt_session.prompt("You > ")
             text = user_input.strip()
 
@@ -898,8 +906,6 @@ def start_chat(
                 print_assistant_message(result_final_answer(result))
             else:
                 print_error_message(result_error(result))
-
-            print_status_bar(runtime)
 
         # 中止对话和退出对话
         except KeyboardInterrupt:

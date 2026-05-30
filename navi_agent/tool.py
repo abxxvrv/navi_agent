@@ -104,7 +104,7 @@ class ReadFileTool:
         path: str,
         start_line: int = 1,
         max_lines: int = 200,
-        max_chars: int = 15000,
+        max_chars: int = 30000,
     ) -> dict[str, Any]:
         target = (self.workspace / path).resolve()
 

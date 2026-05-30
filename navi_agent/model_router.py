@@ -9,10 +9,9 @@ from openai import OpenAI
 
 # 创建 OpenAI 客户端、存 model_name 和 max_tokens。定义了 chat() 抽象方法，子类必须实现。
 class BaseProvider(ABC):
-    def __init__(self, api_key: str, base_url: str, model_name: str, max_tokens: int = 4096):
+    def __init__(self, api_key: str, base_url: str, model_name: str):
         self.client = OpenAI(api_key=api_key, base_url=base_url)
         self.model_name = model_name
-        self.max_tokens = max_tokens
 
     @abstractmethod
     def chat(
@@ -35,7 +34,6 @@ class DeepSeekProvider(BaseProvider):
             model=self.model_name,
             messages=messages,
             tools=tools,
-            max_tokens=self.max_tokens,
             reasoning_effort="high",
             extra_body={"thinking": {"type": "enabled"}},
         )
@@ -52,7 +50,6 @@ class MimoProvider(BaseProvider):
             model=self.model_name,
             messages=messages,
             tools=tools,
-            max_tokens=self.max_tokens,
             extra_body={"thinking": {"type": "enabled"}},
         )
 
@@ -91,7 +88,6 @@ class ModelRouter:
             api_key=entry["api_key"],
             base_url=entry["base_url"],
             model_name=entry["model_name"],
-            max_tokens=entry.get("max_tokens", 4096),
         )
 
     def chat(
@@ -116,6 +112,12 @@ class ModelRouter:
         if self._provider:
             return self._provider.model_name
         return self.current_name
+
+    @property
+    def context_window(self) -> int:
+        models = self.config.get("models", {})
+        entry = models.get(self.current_name, {})
+        return entry.get("context_window", 1048576)
 
     def switch_model(self, name: str) -> bool:
         if name == self.current_name:

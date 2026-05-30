@@ -134,7 +134,7 @@ class AgentRuntime:
     # 调用agent，临时任务、对话模式都会用这个
     def _invoke_agent(self, user_input: str, keep_history: bool) -> dict[str, Any]:
         # 1. 清理和校验用户输入
-        user_input = user_input.strip()
+        user_input = user_input.encode("utf-8", "replace").decode("utf-8").strip()
         if not user_input:
             return {
                 "ok": False,
@@ -684,6 +684,7 @@ class AgentRuntime:
                 "读取工作区内的 UTF-8 文本文件。"
                 "当用户要求查看、解释、总结或调试文件时使用。"
                 "路径必须是相对于工作区的路径。"
+                "配合 search_files 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。"
             ),
             parameters={
                 "type": "object",
@@ -707,8 +708,8 @@ class AgentRuntime:
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "返回内容的最大字符数，默认 15000，范围 1000-50000。",
-                        "default": 15000,
+                        "description": "返回内容的最大字符数，默认 30000，范围 1000-50000。",
+                        "default": 30000,
                         "minimum": 1000,
                         "maximum": 50000,
                     },
