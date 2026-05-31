@@ -232,13 +232,8 @@ class AgentRuntime:
 
         # 14. 更新 semantic_history 
         if keep_history and final_answer:
-            self.semantic_history.append(user_message)
-            self.semantic_history.append(
-                {
-                    "role": "assistant",
-                    "content": final_answer,
-                }
-            )
+            # 保留完整消息链，让下一轮能看到上一轮的工具调用和工具结果。
+            self.semantic_history.extend(current_turn_messages)
 
         return { # 返回CLI
             "ok": bool(final_answer),
@@ -681,17 +676,20 @@ class AgentRuntime:
         self.tool_registry.register(
             name="read_file",
             description=(
-                "读取工作区内的 UTF-8 文本文件。"
-                "当用户要求查看、解释、总结或调试文件时使用。"
-                "路径必须是相对于工作区的路径。"
+                "读取文本文件内容。只用于文本文件；图片、视频或其他二进制文件应使用更合适的工具。"
+                "读取结果会像 cat -n 一样在每一行前加上行号。"
+                "默认最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
+                "如果只需要文件的一部分，使用 start_line 和 max_lines。"
+                "如果要搜索内容或模式，优先使用 search_files，而不是直接读取整文件。"
                 "配合 search_files 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。"
+                "工具结果会返回 start_line、end_line、content 和 truncated；如果读取失败会返回错误。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "相对于工作区的文件路径。",
+                        "description": "要读取的文本文件路径，通常是相对于工作区的路径。",
                     },
                     "start_line": {
                         "type": "integer",
@@ -701,17 +699,17 @@ class AgentRuntime:
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "最多读取的行数。",
-                        "default": 200,
+                        "description": "最多读取的行数。默认 1000，最大 1000。",
+                        "default": 1000,
                         "minimum": 1,
-                        "maximum": 500,
+                        "maximum": 1000,
                     },
                     "max_chars": {
                         "type": "integer",
-                        "description": "返回内容的最大字符数，默认 30000，范围 1000-50000。",
-                        "default": 30000,
+                        "description": "返回内容的最大字符数。默认 102400，范围 1000-102400。",
+                        "default": 102400,
                         "minimum": 1000,
-                        "maximum": 50000,
+                        "maximum": 102400,
                     },
                 },
                 "required": ["path"],
@@ -723,9 +721,11 @@ class AgentRuntime:
         self.tool_registry.register(
             name="write_file",
             description=(
-                "向工作区内的文本文件写入内容。"
-                "用于创建新文件、追加内容，或者在明确需要时替换整个文件。"
-                "小范围修改已有文件时优先使用 patch_file。"
+                "向文本文件写入内容。"
+                "提示：如果文件不存在会创建文件；如果父目录不存在会自动创建。"
+                "写代码到文件时必须使用此工具，不要把回复里的代码当作实际写入。"
+                "修改已有文件时，尽可能优先使用 patch_file；只有创建新文件、追加内容或完整重写文件时才使用 write_file。"
+                "该工具会返回 changed、added_lines、removed_lines 和 diff，便于检查实际改动。"
             ),
             parameters={
                 "type": "object",
@@ -757,8 +757,12 @@ class AgentRuntime:
         self.tool_registry.register(
             name="patch_file",
             description=(
-                "对工作区内已有文本文件进行局部修改。"
-                "通过精确匹配 old_text 并替换为 new_text 来修改文件。"
+                "在已有文本文件中替换特定字符串。"
+                "提示：使用该工具对已有文件进行定向修改。"
+                "old_text 必须精确匹配，包括空格和缩进。"
+                "默认要求 old_text 在文件中唯一；如果出现多次会失败，除非明确设置 replace_all=true。"
+                "如果是创建新文件、追加内容或完整重写文件，请使用 write_file。"
+                "该工具会返回 changed、replacements、added_lines、removed_lines 和 diff，便于检查实际改动。"
             ),
             parameters={
                 "type": "object",
@@ -855,15 +859,19 @@ class AgentRuntime:
         self.tool_registry.register(
             name="run_command",
             description=(
-                "在工作区内运行一个短时间、非交互式的终端命令。"
-                "主要用于验证代码、运行测试、检查语法或查看错误信息。"
+                "使用 Git Bash 运行短时间、非交互式的 Bash 命令。"
+                "提示：写完代码后，使用该工具运行测试、检查语法或查看错误信息。"
+                "命令应使用 Bash 语法，不是 PowerShell 或 cmd 语法。"
+                "该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。"
+                "不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。"
+                "对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。"
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "要运行的短时间、非交互式命令。",
+                        "description": "要运行的短时间、非交互式 Bash 命令。",
                     },
                     "cwd": {
                         "type": "string",
@@ -948,8 +956,11 @@ class AgentRuntime:
         self.tool_registry.register(
             name="search_files",
             description=(
-                "在工作区内全文搜索文件内容。支持关键词和正则表达式。"
-                "可用于查找函数定义、变量引用、错误信息、TODO 注释等。"
+                "在文件中搜索特定内容或模式。"
+                "提示：搜索内容时优先使用该工具，而不是 read_file。"
+                "支持关键词和正则表达式，可用于查找函数定义、变量引用、错误信息、TODO 注释等。"
+                "使用 path 缩小搜索范围，使用 glob 过滤文件名，例如 '*.py' 或 '*.js'。"
+                "使用 context_lines 返回匹配行前后上下文；搜索结果中的 line 可作为 read_file 的 start_line。"
             ),
             parameters={
                 "type": "object",

@@ -2,6 +2,7 @@ from pathlib import Path
 from typing import Any
 import difflib
 import json
+import os
 import shutil
 import subprocess
 import re
@@ -103,8 +104,8 @@ class ReadFileTool:
         self,
         path: str,
         start_line: int = 1,
-        max_lines: int = 200,
-        max_chars: int = 30000,
+        max_lines: int = 1000,
+        max_chars: int = 100 * 1024,
     ) -> dict[str, Any]:
         target = (self.workspace / path).resolve()
 
@@ -136,49 +137,55 @@ class ReadFileTool:
                 "path": path,
             }
 
-        if max_lines > 500:
-            max_lines = 500
+        if max_lines > 1000:
+            max_lines = 1000
 
         if max_chars < 1000:
             max_chars = 1000
-        if max_chars > 50000:
-            max_chars = 50000
+        if max_chars > 100 * 1024:
+            max_chars = 100 * 1024
 
+        lines: list[str] = []
+        truncated = False
+        current_chars = 0
+        end_line: int | None = None
         try:
-            text = target.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return {
-                "ok": False,
-                "error": "文件不是有效的 UTF-8 文本。",
-                "path": path,
-            }
+            with target.open(encoding="utf-8", errors="replace") as f:
+                for i, line in enumerate(f, start=1):
+                    if i < start_line:
+                        continue
+                    if len(lines) >= max_lines:
+                        truncated = True
+                        break
 
-        lines = text.splitlines() # 划分成每一行
-        total_lines = len(lines)
+                    line_text = line.rstrip("\r\n")[:2000]
+                    rendered = f"{i} | {line_text}"
+                    separator_len = 1 if lines else 0
+                    remaining_chars = max_chars - current_chars
 
-        start_index = start_line - 1
-        end_index = min(start_index + max_lines, total_lines)
+                    if separator_len + len(rendered) > remaining_chars:
+                        available = remaining_chars - separator_len
+                        if available > 0:
+                            lines.append(rendered[:available])
+                            end_line = i
+                        truncated = True
+                        break
 
-        selected_lines = lines[start_index:end_index] # 可选行号
+                    lines.append(rendered)
+                    current_chars += separator_len + len(rendered)
+                    end_line = i
+        except Exception as exc:
+            return {"ok": False, "error": str(exc), "path": path}
 
-        numbered_content = "\n".join(
-            f"{line_no} | {line}"
-            for line_no, line in enumerate(selected_lines, start=start_line)
-        )
-
-        char_truncated = False
-        if len(numbered_content) > max_chars:
-            numbered_content = numbered_content[:max_chars] + "\n[内容已截断]"
-            char_truncated = True
+        numbered_content = "\n".join(lines)
 
         return {
             "ok": True,
             "path": str(target),
             "start_line": start_line,
-            "end_line": end_index,
-            "total_lines": total_lines,
+            "end_line": end_line,
             "content": numbered_content,
-            "truncated": end_index < total_lines or char_truncated,
+            "truncated": truncated,
         }
     
 # 写文件工具
@@ -594,20 +601,19 @@ class RunCommandTool:
     def __init__(
         self,
         workspace: str = ".",
-        default_timeout: int = 10,
-        max_timeout: int = 30,
+        default_timeout: int = 60,
+        max_timeout: int = 300,
         max_output_chars: int = 8000,
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
         self.max_timeout = max_timeout
         self.max_output_chars = max_output_chars
+        self.bash_path = self._resolve_bash_path()
 
         # 第一版先做保守限制：禁止危险命令和长期运行命令
         self.blocked_contains = [
             "rm -rf",
-            "del /s",
-            "rmdir /s",
             "format ",
             "shutdown",
             "reboot",
@@ -616,12 +622,12 @@ class RunCommandTool:
             "uvicorn",
             "flask run",
             "django runserver",
-            "dir /s",
         ]
 
         # 这些命令单独运行时通常会进入交互模式或打开 shell
         self.blocked_exact = {
             "python",
+            "python3",
             "python.exe",
             "py",
             "node",
@@ -703,11 +709,20 @@ class RunCommandTool:
                 }
 
             # 4. 执行命令
+            if self.bash_path is None:
+                return {
+                    "ok": False,
+                    "error": "未找到 Git Bash bash.exe，请安装 Git for Windows 或设置 GIT_BASH。",
+                    "command": command,
+                    "cwd": str(target_cwd),
+                    "shell": "git-bash",
+                }
+
             started_at = time.perf_counter()
             completed = subprocess.run(
-                command,
+                [self.bash_path, "-lc", command],
                 cwd=str(target_cwd),
-                shell=True,
+                shell=False,
                 capture_output=True,
                 text=True,
                 encoding=encoding,
@@ -726,6 +741,7 @@ class RunCommandTool:
                 "ok": completed.returncode == 0,
                 "command": command,
                 "cwd": str(target_cwd),
+                "shell": "git-bash",
                 "exit_code": completed.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -752,6 +768,7 @@ class RunCommandTool:
                 "ok": False,
                 "command": command,
                 "cwd": cwd,
+                "shell": "git-bash",
                 "exit_code": None,
                 "stdout": stdout,
                 "stderr": stderr,
@@ -767,7 +784,27 @@ class RunCommandTool:
                 "error": str(e),
                 "command": command,
                 "cwd": cwd,
+                "shell": "git-bash",
             }
+
+    def _resolve_bash_path(self) -> str | None:
+        env_path = os.environ.get("GIT_BASH")
+        if env_path and Path(env_path).is_file():
+            return env_path
+
+        path = shutil.which("bash")
+        if path:
+            return path
+
+        for candidate in (
+            r"C:\Program Files\Git\bin\bash.exe",
+            r"C:\Program Files\Git\usr\bin\bash.exe",
+            r"C:\Program Files (x86)\Git\bin\bash.exe",
+        ):
+            if Path(candidate).is_file():
+                return candidate
+
+        return None
 
     def _check_command_safety(self, command: str) -> str | None:
         normalized = " ".join(command.lower().strip().split())
@@ -828,8 +865,6 @@ class SearchFilesTool:
         context_lines: int = 0,
     ) -> dict:
         target = (self.workspace / path).resolve()
-        if not str(target).startswith(str(self.workspace)):
-            return {"ok": False, "error": "路径越界。"}
         if not target.exists():
             return {"ok": False, "error": f"路径不存在: {path}"}
 
