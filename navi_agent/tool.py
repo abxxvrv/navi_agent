@@ -12,6 +12,17 @@ import time
 MAX_DIFF_CHARS = 12000
 
 
+def resolve_path(workspace: Path, path: str) -> Path:
+    """解析路径。相对路径必须在工作区内，绝对路径直接使用。"""
+    p = Path(path)
+    if p.is_absolute():
+        return p.resolve()
+    resolved = (workspace / p).resolve()
+    if not resolved.is_relative_to(workspace):
+        raise ValueError("相对路径不能指向工作区外。工作区外的文件请使用绝对路径。")
+    return resolved
+
+
 def make_unified_diff(old_text: str, new_text: str, path: str) -> str:
     return "".join(
         difflib.unified_diff(
@@ -54,7 +65,10 @@ class ListDirTool:
         show_hidden: bool = False,
         max_items: int = 100,
     ) -> dict[str, Any]:
-        target = (self.workspace / path).resolve()
+        try:
+            target = resolve_path(self.workspace, path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "path": path}
 
         if not target.exists():
             return {
@@ -107,7 +121,10 @@ class ReadFileTool:
         max_lines: int = 1000,
         max_chars: int = 100 * 1024,
     ) -> dict[str, Any]:
-        target = (self.workspace / path).resolve()
+        try:
+            target = resolve_path(self.workspace, path)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "path": path}
 
         if not target.exists():
             return {
@@ -210,7 +227,10 @@ class WriteFileTool:
         try:
             input_path = Path(path)
 
-            target = (self.workspace / input_path).resolve()
+            try:
+                target = resolve_path(self.workspace, str(input_path))
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc), "path": path}
 
             if mode not in ("overwrite", "append"):
                 return {
@@ -288,7 +308,10 @@ class PatchTool:
         try:
             input_path = Path(path)
 
-            target = (self.workspace / input_path).resolve()
+            try:
+                target = resolve_path(self.workspace, str(input_path))
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc), "path": path}
 
             if not target.exists():
                 return {
@@ -674,7 +697,10 @@ class RunCommandTool:
             command = command.strip()
 
             input_cwd = Path(cwd)
-            target_cwd = (self.workspace / input_cwd).resolve()
+            try:
+                target_cwd = resolve_path(self.workspace, str(input_cwd))
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc), "cwd": cwd}
 
             if not target_cwd.exists():
                 return {
@@ -855,6 +881,76 @@ class RunCommandTool:
             + "\n\n... 输出已截断 ..."
         )
         return truncated_text, True
+
+
+
+class GlobTool:
+    """文件名匹配工具，用 glob 模式查找文件和目录。"""
+
+    MAX_MATCHES = 1000
+
+    def __init__(self, workspace: str = "."):
+        self.workspace = Path(workspace).resolve()
+
+    def __call__(
+        self,
+        pattern: str,
+        directory: str = ".",
+        include_dirs: bool = True,
+    ) -> dict:
+        if not pattern or not pattern.strip():
+            return {"ok": False, "error": "pattern 不能为空。"}
+
+        pattern = pattern.strip()
+
+        if pattern.startswith("**"):
+            return {
+                "ok": False,
+                "error": "pattern 不能以 ** 开头，请用更具体的模式如 src/**/*.py。",
+            }
+
+        try:
+            target = resolve_path(self.workspace, directory)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "directory": directory}
+
+        if not target.exists():
+            return {"ok": False, "error": f"目录不存在: {directory}", "directory": directory}
+
+        if not target.is_dir():
+            return {"ok": False, "error": f"不是目录: {directory}", "directory": directory}
+
+        try:
+            matches = sorted(target.glob(pattern))
+        except Exception as exc:
+            return {"ok": False, "error": f"无效的 glob 模式: {exc}", "pattern": pattern}
+
+        if not include_dirs:
+            matches = [p for p in matches if p.is_file()]
+
+        truncated = len(matches) > self.MAX_MATCHES
+        if truncated:
+            matches = matches[: self.MAX_MATCHES]
+
+        files = []
+        for p in matches:
+            rel = str(p.relative_to(self.workspace))
+            entry = {"path": rel, "type": "directory" if p.is_dir() else "file"}
+            if p.is_file():
+                try:
+                    entry["size"] = p.stat().st_size
+                except OSError:
+                    pass
+            files.append(entry)
+
+        return {
+            "ok": True,
+            "pattern": pattern,
+            "directory": str(target),
+            "files": files,
+            "total": len(files),
+            "truncated": truncated,
+        }
 
 
 class SearchFilesTool:

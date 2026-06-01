@@ -20,6 +20,7 @@ from .model_router import ModelRouter
 from .paths import get_config_path, get_navi_home
 from .session_store import SessionStore
 from .tool import (
+    GlobTool,
     ListDirTool,
     LoadSkillTool,
     PatchTool,
@@ -651,7 +652,7 @@ class AgentRuntime:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "相对于工作区的目录路径。使用 '.' 表示工作区根目录。",
+                        "description": "目录路径。默认相对于工作区；工作区外的目录请使用绝对路径。使用 '.' 表示工作区根目录。",
                         "default": ".",
                     },
                     "show_hidden": {
@@ -690,7 +691,7 @@ class AgentRuntime:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要读取的文本文件路径，通常是相对于工作区的路径。",
+                        "description": "文件路径。默认相对于工作区；工作区外的文件请使用绝对路径。",
                     },
                     "start_line": {
                         "type": "integer",
@@ -733,7 +734,7 @@ class AgentRuntime:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "要写入的工作区相对路径。",
+                        "description": "文件路径。默认相对于工作区；工作区外的文件请使用绝对路径。",
                     },
                     "content": {
                         "type": "string",
@@ -770,7 +771,7 @@ class AgentRuntime:
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "相对于工作区的文件路径。",
+                        "description": "文件路径。默认相对于工作区；工作区外的文件请使用绝对路径。",
                     },
                     "old_text": {
                         "type": "string",
@@ -876,7 +877,7 @@ class AgentRuntime:
                     },
                     "cwd": {
                         "type": "string",
-                        "description": "命令运行目录，必须是工作区内相对路径。",
+                        "description": "命令运行目录。默认相对于工作区；工作区外的目录请使用绝对路径。",
                         "default": ".",
                     },
                     "timeout_seconds": {
@@ -951,6 +952,46 @@ class AgentRuntime:
                 "required": ["query"],
             },
             function=SearchSessionHistoryTool(session_store=self.session_store),
+        )
+
+        # glob
+        self.tool_registry.register(
+            name="glob",
+            description=(
+                "使用 glob 模式查找文件和目录。"
+                "When to use: 查找匹配特定模式的文件（如所有 Python 文件 '*.py'）；"
+                "在子目录中递归搜索文件（如 'src/**/*.js'）；"
+                "定位配置文件（如 '*.config.*'、'*.json'）；"
+                "查找测试文件（如 'test_*.py'、'*_test.go'）。"
+                "Example patterns: '*.py'（当前目录所有 Python 文件）、"
+                "'src/**/*.js'（src 目录下所有 JS 文件递归）、"
+                "'test_*.py'（以 test_ 开头的 Python 文件）、"
+                "'*.{py,js}'（多种扩展名）。"
+                "Bad patterns: 以 ** 开头的模式会被拒绝，因为会递归搜索所有目录导致结果过大，"
+                "请用更具体的模式如 'src/**/*.py'。"
+                "如果要搜索文件内容，请使用 search_files。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "description": "glob 匹配模式，如 '*.py'、'src/**/*.ts'。不能以 ** 开头。",
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "搜索目录。默认相对于工作区；工作区外的目录请使用绝对路径。默认 '.'。",
+                        "default": ".",
+                    },
+                    "include_dirs": {
+                        "type": "boolean",
+                        "description": "结果是否包含目录。默认 true。",
+                        "default": True,
+                    },
+                },
+                "required": ["pattern"],
+            },
+            function=GlobTool(workspace=workspace),
         )
 
         # search_files
