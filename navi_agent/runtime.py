@@ -64,8 +64,12 @@ class AgentRuntime:
         self.max_steps = max_steps
         self.event_handler = event_handler
         self.approval_handler = approval_handler
-        self.approval_manager = ApprovalManager(mode=approval_mode)
         self.navi_home = get_navi_home()
+        self.approval_manager = ApprovalManager(
+            mode=approval_mode,
+            workspace=self.workspace,
+            navi_home=self.navi_home,
+        )
 
         sessions_root = str(self.navi_home / "sessions")
 
@@ -273,7 +277,13 @@ class AgentRuntime:
             active_skills=state.get("active_skills", []),
             extra_instructions=skill_index_prompt,
         )
-
+        # 打印第一轮系统提示词
+        # if self.turn_id == 0:
+        #     print("=" * 80)
+        #     print("SYSTEM PROMPT:")
+        #     print("=" * 80)
+        #     print(runtime_messages[0]["content"])
+        #     print("=" * 80)
         response = self.router.chat(
             messages=runtime_messages,
             tools=self.tool_registry.to_openai_tools(),
@@ -685,6 +695,8 @@ class AgentRuntime:
                 "如果要搜索内容或模式，优先使用 search_files，而不是直接读取整文件。"
                 "配合 search_files 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。"
                 "工具结果会返回 start_line、end_line、content、truncated 和 truncated_lines；如果读取失败会返回错误。"
+                "truncated=false 表示本次读取没有因为 max_lines 或 max_chars 提前停止；如果 end_line 已覆盖目标行，应复用已有内容，不要重复读取。"
+                "truncated=true 表示结果被行数或字符数限制截断，需要按 end_line 继续读取后续内容。"
             ),
             parameters={
                 "type": "object",
@@ -883,9 +895,8 @@ class AgentRuntime:
                     "timeout_seconds": {
                         "type": "integer",
                         "description": "命令超时时间，单位秒。",
-                        "default": 10,
-                        "minimum": 1,
-                        "maximum": 30,
+                        "default": 60,
+                        "maximum": 300,
                     },
                     "encoding": {
                         "type": "string",

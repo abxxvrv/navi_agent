@@ -633,7 +633,7 @@ class RunCommandTool:
         workspace: str = ".",
         default_timeout: int = 60,
         max_timeout: int = 300,
-        max_output_chars: int = 8000,
+        max_output_chars: int = 50_000,
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
@@ -641,43 +641,8 @@ class RunCommandTool:
         self.max_output_chars = max_output_chars
         self.bash_path = self._resolve_bash_path()
 
-        # 第一版先做保守限制：禁止危险命令和长期运行命令
-        self.blocked_contains = [
-            "rm -rf",
-            "format ",
-            "shutdown",
-            "reboot",
-            "npm run dev",
-            "python -m http.server",
-            "uvicorn",
-            "flask run",
-            "django runserver",
-        ]
-
-        # 这些命令单独运行时通常会进入交互模式或打开 shell
-        self.blocked_exact = {
-            "python",
-            "python3",
-            "python.exe",
-            "py",
-            "node",
-            "cmd",
-            "cmd.exe",
-            "powershell",
-            "powershell.exe",
-            "bash",
-            "sh",
-        }
-
-        # 第一版不允许复杂 shell 拼接，降低误操作风险
-        self.blocked_operators = [
-            "&&",
-            "||",
-            ";",
-            "|",
-            "`",
-            "$(",
-        ]
+        # 打印找到的 git bash 路径
+        # print(f"[navi] run_command bash_path={self.bash_path}")
 
     def __call__(
         self,
@@ -732,16 +697,7 @@ class RunCommandTool:
             if timeout_seconds > self.max_timeout:
                 timeout_seconds = self.max_timeout
 
-            # 3. 安全检查
-            safety_error = self._check_command_safety(command)
-            if safety_error is not None:
-                return {
-                    "ok": False,
-                    "error": safety_error,
-                    "command": command,
-                }
-
-            # 4. 执行命令
+            # 3. 执行命令
             if self.bash_path is None:
                 return {
                     "ok": False,
@@ -825,47 +781,70 @@ class RunCommandTool:
         if env_path and Path(env_path).is_file():
             return env_path
 
-        path = shutil.which("bash")
-        if path:
-            return path
+        git_paths: list[Path] = []
+        try:
+            where_result = subprocess.run(
+                ["where.exe", "git"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=5,
+            )
+            if where_result.returncode == 0:
+                for line in where_result.stdout.splitlines():
+                    git_path = Path(line.strip())
+                    if git_path.is_file():
+                        git_paths.append(git_path)
+        except Exception:
+            pass
+
+        for git_path in git_paths:
+            git_root = git_path.parent.parent
+            for candidate in (
+                git_root / "bin" / "bash.exe",
+                git_root / "usr" / "bin" / "bash.exe",
+            ):
+                if candidate.is_file():
+                    return str(candidate)
+
+        for git_path in git_paths:
+            try:
+                exec_result = subprocess.run(
+                    [str(git_path), "--exec-path"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                )
+            except Exception:
+                continue
+
+            if exec_result.returncode != 0:
+                continue
+
+            exec_path = Path(exec_result.stdout.strip())
+            if not exec_path:
+                continue
+
+            for parent in (exec_path, *exec_path.parents):
+                for candidate in (
+                    parent / "bin" / "bash.exe",
+                    parent / "usr" / "bin" / "bash.exe",
+                ):
+                    if candidate.is_file():
+                        return str(candidate)
 
         for candidate in (
+            r"D:\Git\bin\bash.exe",
+            r"D:\Git\usr\bin\bash.exe",
             r"C:\Program Files\Git\bin\bash.exe",
             r"C:\Program Files\Git\usr\bin\bash.exe",
             r"C:\Program Files (x86)\Git\bin\bash.exe",
         ):
             if Path(candidate).is_file():
                 return candidate
-
-        return None
-
-    def _check_command_safety(self, command: str) -> str | None:
-        normalized = " ".join(command.lower().strip().split())
-
-        if normalized in self.blocked_exact:
-            return (
-                "这个命令看起来是交互式命令，或者会打开 shell。"
-                "只允许运行短时间、非交互式命令。"
-            )
-
-        # for operator in self.blocked_operators:
-        #     if operator in command:
-        #         return (
-        #             f"第一版不允许使用 shell 操作符 '{operator}'。"
-        #             "一次只运行一个简单命令。"
-        #         )
-
-        for blocked in self.blocked_contains:
-            if blocked in normalized:
-                return f"已阻止可能危险或暂不支持的命令：{blocked}"
-
-        # 禁止用 .. 逃出工作区
-        if ".." in command:
-            return "命令中不允许使用 '..' 进行路径穿越。"
-
-        # 禁止用户目录简写
-        if "~" in command:
-            return "命令中不允许使用用户目录简写 '~'。"
 
         return None
 

@@ -6,6 +6,7 @@ import shlex
 import unicodedata
 from dataclasses import dataclass
 from enum import Enum
+from pathlib import Path
 from typing import Any, Iterable
 
 # 三个枚举类
@@ -90,13 +91,7 @@ class ApprovalManager:
     """
 
     COMMAND_TOOLS = {
-        "run_command",
-        "shell",
-        "bash",
-        "powershell",
-        "terminal",
-        "exec",
-        "execute_command",
+        "run_command"
     }
 
     READ_ONLY_TOOLS = {
@@ -129,13 +124,9 @@ class ApprovalManager:
         "apply_patch",
     }
 
-    # 命令参数列表：目前只有 command 被使用了
+    # 命令参数列表
     COMMAND_ARG_KEYS = (
         "command",
-        "cmd",
-        "script",
-        "input",
-        "args",
     )
 
     PATH_ARG_KEYS = (
@@ -337,8 +328,15 @@ class ApprovalManager:
         ),
     ]
 
-    def __init__(self, mode: str | ApprovalMode = ApprovalMode.NORMAL) -> None:
+    def __init__(
+        self,
+        mode: str | ApprovalMode = ApprovalMode.NORMAL,
+        workspace: str | Path = ".",
+        navi_home: str | Path | None = None,
+    ) -> None:
         self.mode = self._coerce_mode(mode)
+        self.workspace = Path(workspace).resolve()
+        self.navi_home = Path(navi_home).resolve() if navi_home is not None else None
         self.session_allowlist: set[str] = set()
 
     # 入口函数，根据工具名分派到四种处理
@@ -367,7 +365,15 @@ class ApprovalManager:
         if normalized_tool_name in self.WRITE_TOOLS:
             return self._check_write_tool(normalized_tool_name, tool_name, args)
 
-        return self._check_unknown_tool(normalized_tool_name, tool_name, args)
+        # 未分类工具
+        return ApprovalDecision(
+            action=ApprovalAction.DENY,
+            risk=RiskLevel.HARD_DENY,
+            reason="工具未在审批分类中，拒绝执行。",
+            tool_name=tool_name,
+            tool_args=args,
+            approval_key=None,
+        )
 
     # 把用户选择转换成 bool，同时处理"本会话允许"的白名单逻辑。
     def resolve_user_choice(
@@ -411,25 +417,56 @@ class ApprovalManager:
 
         return RiskLevel.UNKNOWN, "未知 shell 命令，保守起见需要用户确认。"
 
-    # 生成白名单的指纹键，用来标识"这个操作的类型和目标"。
-    def make_approval_key(
-        self,
-        tool_name: str,
-        tool_args: dict[str, Any],
-        command: str | None = None,
-    ) -> str:
-        normalized_tool_name = self._normalize_tool_name(tool_name)
+    # 生成命令行工具的白名单 key。常见重复命令使用 scope，其他命令回退到 exact。
+    def make_command_approval_key(self, command: str) -> str:
+        normalized_command = self._normalize_command(command)
+        try:
+            tokens = shlex.split(normalized_command, posix=False)
+        except ValueError:
+            tokens = normalized_command.split()
 
-        if command is not None:
-            normalized_command = self._normalize_command(command)
-            return f"shell:exact:{normalized_command}"
+        normalized_tokens = [token.strip("\"'").lower() for token in tokens]
+        scopes = [
+            (("pip", "install"), "shell:scope:pip install"),
+            (("pip3", "install"), "shell:scope:pip install"),
+            (("python", "-m", "pip", "install"), "shell:scope:pip install"),
+            (("python3", "-m", "pip", "install"), "shell:scope:pip install"),
+            (("py", "-m", "pip", "install"), "shell:scope:pip install"),
+            (("uv", "pip", "install"), "shell:scope:uv pip install"),
+            (("npm", "install"), "shell:scope:npm install"),
+            (("npm", "i"), "shell:scope:npm install"),
+            (("pnpm", "install"), "shell:scope:pnpm install"),
+            (("pnpm", "add"), "shell:scope:pnpm add"),
+            (("yarn", "install"), "shell:scope:yarn install"),
+            (("yarn", "add"), "shell:scope:yarn add"),
+            (("git", "add"), "shell:scope:git add"),
+            (("git", "commit"), "shell:scope:git commit"),
+            (("git", "push"), "shell:scope:git push"),
+        ]
 
+        for prefix, approval_key in scopes:
+            if tuple(normalized_tokens[: len(prefix)]) == prefix:
+                return approval_key
+
+        return f"shell:exact:{normalized_command}"
+
+    def make_write_approval_key(self, tool_args: dict[str, Any]) -> str:
         path = self._extract_path(tool_args)
-        if path:
-            return f"tool:{normalized_tool_name}:path:{path}"
+        if not path:
+            args_fingerprint = self._stable_args_fingerprint(tool_args)
+            return f"tool:write:args:{args_fingerprint}"
 
-        args_fingerprint = self._stable_args_fingerprint(tool_args)
-        return f"tool:{normalized_tool_name}:args:{args_fingerprint}"
+        input_path = Path(path)
+        target = input_path.resolve() if input_path.is_absolute() else (self.workspace / input_path).resolve()
+
+        if self.navi_home is not None and target.is_relative_to(self.navi_home):
+            return "tool:write:scope:navi_home"
+
+        if target.is_relative_to(self.workspace):
+            return "tool:write:scope:workspace"
+
+        external_scope = target if target.exists() and target.is_dir() else target.parent
+        return f"tool:write:scope:external:{external_scope}"
 
     def is_session_allowed(self, approval_key: str | None) -> bool:
         if not approval_key:
@@ -444,11 +481,7 @@ class ApprovalManager:
     ) -> ApprovalDecision:
         command = self._extract_command(args)
         risk, reason = self.classify_command(command)
-        approval_key = self.make_approval_key(
-            normalized_tool_name,
-            args,
-            command=command,
-        )
+        approval_key = self.make_command_approval_key(command)
 
         if risk == RiskLevel.HARD_DENY:
             return ApprovalDecision(
@@ -521,7 +554,7 @@ class ApprovalManager:
         original_tool_name: str,
         args: dict[str, Any],
     ) -> ApprovalDecision:
-        approval_key = self.make_approval_key(normalized_tool_name, args)
+        approval_key = self.make_write_approval_key(args)
 
         if self.mode == ApprovalMode.OPEN:
             return ApprovalDecision(
@@ -547,43 +580,6 @@ class ApprovalManager:
             action=ApprovalAction.ASK,
             risk=RiskLevel.RISKY,
             reason="该工具会修改文件系统，需要用户审批。",
-            tool_name=original_tool_name,
-            tool_args=args,
-            approval_key=approval_key,
-        )
-
-    def _check_unknown_tool(
-        self,
-        normalized_tool_name: str,
-        original_tool_name: str,
-        args: dict[str, Any],
-    ) -> ApprovalDecision:
-        approval_key = self.make_approval_key(normalized_tool_name, args)
-
-        if self.mode == ApprovalMode.OPEN:
-            return ApprovalDecision(
-                action=ApprovalAction.ALLOW,
-                risk=RiskLevel.UNKNOWN,
-                reason="open 模式：未知工具默认允许。",
-                tool_name=original_tool_name,
-                tool_args=args,
-                approval_key=approval_key,
-            )
-
-        if self.is_session_allowed(approval_key):
-            return ApprovalDecision(
-                action=ApprovalAction.ALLOW,
-                risk=RiskLevel.UNKNOWN,
-                reason="该未知工具调用已在本会话中被允许。",
-                tool_name=original_tool_name,
-                tool_args=args,
-                approval_key=approval_key,
-            )
-
-        return ApprovalDecision(
-            action=ApprovalAction.ASK,
-            risk=RiskLevel.UNKNOWN,
-            reason="未知工具类型，保守起见需要用户审批。",
             tool_name=original_tool_name,
             tool_args=args,
             approval_key=approval_key,
