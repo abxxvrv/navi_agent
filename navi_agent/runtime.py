@@ -679,10 +679,11 @@ class AgentRuntime:
                 "读取文本文件内容。只用于文本文件；图片、视频或其他二进制文件应使用更合适的工具。"
                 "读取结果会像 cat -n 一样在每一行前加上行号。"
                 "默认最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
+                "单行超过 2000 字符会被截断并用 ... 标记，截断的行号会在 truncated_lines 中返回。"
                 "如果只需要文件的一部分，使用 start_line 和 max_lines。"
                 "如果要搜索内容或模式，优先使用 search_files，而不是直接读取整文件。"
                 "配合 search_files 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。"
-                "工具结果会返回 start_line、end_line、content 和 truncated；如果读取失败会返回错误。"
+                "工具结果会返回 start_line、end_line、content、truncated 和 truncated_lines；如果读取失败会返回错误。"
             ),
             parameters={
                 "type": "object",

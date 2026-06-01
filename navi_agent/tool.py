@@ -147,6 +147,7 @@ class ReadFileTool:
 
         lines: list[str] = []
         truncated = False
+        truncated_lines: list[int] = []
         current_chars = 0
         end_line: int | None = None
         try:
@@ -158,7 +159,12 @@ class ReadFileTool:
                         truncated = True
                         break
 
-                    line_text = line.rstrip("\r\n")[:2000]
+                    raw = line.rstrip("\r\n")
+                    if len(raw) > 2000:
+                        line_text = raw[:2000] + "..."
+                        truncated_lines.append(i)
+                    else:
+                        line_text = raw
                     rendered = f"{i} | {line_text}"
                     separator_len = 1 if lines else 0
                     remaining_chars = max_chars - current_chars
@@ -186,6 +192,7 @@ class ReadFileTool:
             "end_line": end_line,
             "content": numbered_content,
             "truncated": truncated,
+            "truncated_lines": truncated_lines,
         }
     
 # 写文件工具

@@ -4,8 +4,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-import psutil
-
 
 class ContextManager:
     """
@@ -18,13 +16,11 @@ class ContextManager:
     def __init__(
         self,
         workspace: str = ".",
-        soul_filename: str = ".navi/SOUL.md",
         system_filename: str = "system.md",
         agents_filename: str = "AGENTS.md",
         skills_dirname: str = "skills",
         skills_path: str | None = None,
         navi_home: str | None = None,
-        max_soul_chars: int = 12000,
     ):
         self.workspace = Path(workspace).resolve()
         self.navi_home = Path(navi_home).resolve() if navi_home is not None else None
@@ -39,25 +35,12 @@ class ContextManager:
             if skills_path is not None
             else self.workspace / skills_dirname
         )
-        self.max_soul_chars = max_soul_chars
 
     def load_system_prompt_md(self) -> str:
         return self._read_text_file(self.system_prompt_path, None)
 
     def load_agents_md(self) -> str:
         return self._read_text_file(self.agents_path, None)
-
-    def build_environment_prompt(self) -> str:
-        return "\n".join(
-            [
-                f"当前系统: {platform.system()}",
-                f"当前工作目录: {self.workspace}",
-                f"Navi home: {self.navi_home}" if self.navi_home else "",
-                f"技能目录: {self.skills_path}",
-                f"会话目录: {self.navi_home / 'sessions'}" if self.navi_home else "",
-                f"运行终端: {self._detect_terminal()}",
-            ]
-        )
 
     def load_skill_md(self, skill_name: str) -> str:
         if not self._is_safe_skill_name(skill_name):
@@ -311,30 +294,6 @@ class ContextManager:
 
     def _wrap_block(self, name: str, content: str) -> str:
         return f"<{name}>\n{content}\n</{name}>"
-
-    def _detect_terminal(self) -> str:
-        try:
-            parent = psutil.Process().parent()
-        except psutil.Error:
-            return "unknown"
-
-        if parent is None:
-            return "unknown"
-
-        name = parent.name()
-        lower_name = name.lower()
-        labels = {
-            "powershell.exe": "PowerShell",
-            "pwsh.exe": "PowerShell",
-            "cmd.exe": "Command Prompt",
-            "bash.exe": "Bash",
-            "zsh": "Zsh",
-        }
-        label = labels.get(lower_name)
-        if label:
-            return f"{label} ({name})"
-
-        return name
 
     def _dedupe(self, items: list[str]) -> list[str]:
         seen = set()
