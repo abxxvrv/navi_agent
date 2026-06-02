@@ -74,11 +74,7 @@ class AgentRuntime:
         if resume_session_id:
             session_dir = Path(sessions_root) / resume_session_id
             self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
-            self.semantic_history = [
-                message
-                for message in self.session_store.messages
-                if message.get("role") != "system"
-            ]
+            self.semantic_history = self._valid_message_prefix(self.session_store.messages)
         else:
             self.session_store = SessionStore(
                 root=sessions_root,
@@ -126,7 +122,56 @@ class AgentRuntime:
 
     def switch_model(self, name: str) -> bool:
         return self.router.switch_model(name)
-    
+
+    @staticmethod
+    def _valid_message_prefix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        safe_messages: list[dict[str, Any]] = []
+        i = 0
+
+        while i < len(messages):
+            message = messages[i]
+            role = message.get("role")
+            if role == "system":
+                i += 1
+                continue
+            if role == "tool":
+                break
+
+            tool_calls = message.get("tool_calls") or []
+            if role != "assistant" or not tool_calls:
+                safe_messages.append(message)
+                i += 1
+                continue
+
+            required_ids = [
+                tool_call.get("id")
+                for tool_call in tool_calls
+                if isinstance(tool_call, dict) and tool_call.get("id")
+            ]
+            if len(required_ids) != len(tool_calls):
+                break
+
+            tool_messages: list[dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            i += 1
+            while i < len(messages) and messages[i].get("role") == "tool":
+                tool_call_id = messages[i].get("tool_call_id")
+                if tool_call_id not in required_ids or tool_call_id in seen_ids:
+                    return safe_messages
+                tool_messages.append(messages[i])
+                seen_ids.add(tool_call_id)
+                i += 1
+                if len(seen_ids) == len(required_ids):
+                    break
+
+            if len(seen_ids) != len(required_ids):
+                break
+
+            safe_messages.append(message)
+            safe_messages.extend(tool_messages)
+
+        return safe_messages
+
     # 调用agent，临时任务、对话模式都会用这个
     def _invoke_agent(self, user_input: str, keep_history: bool) -> dict[str, Any]:
         # 1. 清理和校验用户输入
@@ -146,6 +191,7 @@ class AgentRuntime:
             "content": user_input,
         }
         self._ensure_persisted_system_message()
+        snapshot_len = len(self.session_store.messages)
         self.session_store.append_message(user_message)
 
         # 4. 构造 graph 初始状态
@@ -159,6 +205,13 @@ class AgentRuntime:
                 turn_state,
                 config={"recursion_limit": self.max_steps},
             )
+        except KeyboardInterrupt:
+            new_messages = self._valid_message_prefix(
+                self.session_store.messages[snapshot_len:]
+            )
+            if keep_history and new_messages:
+                self.semantic_history.extend(new_messages)
+            raise
         # 6. graph 异常处理
         except Exception as exc:
             return {
@@ -530,6 +583,7 @@ class AgentRuntime:
                 "读取文本文件内容。只用于文本文件；图片、视频或其他二进制文件应使用更合适的工具。"
                 "读取结果会像 cat -n 一样在每一行前加上行号。"
                 "默认最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
+                "本工具很适合并行调用，应该先并行调用 search_files 确定要读内容，然后并行阅读"
                 "单行超过 2000 字符会被截断并用 ... 标记，截断的行号会在 truncated_lines 中返回。"
                 "如果只需要文件的一部分，使用 start_line 和 max_lines。"
                 "如果要搜索内容或模式，优先使用 search_files，而不是直接读取整文件。"
@@ -613,8 +667,8 @@ class AgentRuntime:
             description=(
                 "在已有文本文件中替换特定字符串。"
                 "提示：使用该工具对已有文件进行定向修改。"
-                "old_text 必须精确匹配，包括空格和缩进。"
-                "默认要求 old_text 在文件中唯一；如果出现多次会失败，除非明确设置 replace_all=true。"
+                "old_text 必须精确匹配，包括空格和缩进。可以适当多一些内容以保证匹配唯一。"
+                "默认要求 old_text 在文件中唯一；如果出现多个匹配结果会失败，除非明确设置 replace_all=true。"
                 "如果是创建新文件、追加内容或完整重写文件，请使用 write_file。"
                 "该工具会返回 changed、replacements、added_lines、removed_lines 和 diff，便于检查实际改动。"
             ),
@@ -653,8 +707,8 @@ class AgentRuntime:
         self.tool_registry.register(
             name="skill_view",
             description=(
-                "查看指定技能的 SKILL.md 内容，但不激活该技能。"
-                "当用户想查看、解释、总结、检查或调试某个技能时使用。"
+                "本工具可以查看指定技能的 SKILL.md 内容"
+                "当你要调用某个技能或者非常需要查看具体的技能文件时使用。"
             ),
             parameters={
                 "type": "object",
@@ -729,6 +783,7 @@ class AgentRuntime:
             name="glob",
             description=(
                 "使用 glob 模式查找文件和目录。"
+                "本工具很适合并行调用"
                 "When to use: 查找匹配特定模式的文件（如所有 Python 文件 '*.py'）；"
                 "在子目录中递归搜索文件（如 'src/**/*.js'）；"
                 "定位配置文件（如 '*.config.*'、'*.json'）；"
@@ -769,6 +824,7 @@ class AgentRuntime:
             name="search_files",
             description=(
                 "在文件中搜索特定内容或模式。"
+                "本工具很适合并行使用，可以与 read_file 搭配，先并行搜索，再并行阅读"
                 "提示：搜索内容时优先使用该工具，而不是 read_file。"
                 "支持关键词和正则表达式，可用于查找函数定义、变量引用、错误信息、TODO 注释等。"
                 "使用 path 缩小搜索范围，使用 glob 过滤文件名，例如 '*.py' 或 '*.js'。"
