@@ -164,6 +164,7 @@ class ContextManager:
             "${NAVI_SHELL}": "Git Bash",
             "${NAVI_NOW}": datetime.now().isoformat(timespec="seconds"),
             "${NAVI_WORK_DIR}": str(self.workspace),
+            "${NAVI_HOME}": str(self.navi_home),
             "${NAVI_WORK_DIR_LS}": self._build_work_dir_listing(),
             "${NAVI_ADDITIONAL_DIRS_INFO}": additional_dirs_info,
             "${NAVI_AGENTS_MD}": agents_md,

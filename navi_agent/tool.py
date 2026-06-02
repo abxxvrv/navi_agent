@@ -6,7 +6,6 @@ import os
 import shutil
 import subprocess
 import re
-import time
 
 
 MAX_DIFF_CHARS = 12000
@@ -425,12 +424,7 @@ class SkillViewTool:
             else self.workspace / "skills"
         )
 
-    def __call__(
-        self,
-        name: str,
-        max_chars: int = 20000,
-        encoding: str = "utf-8",
-    ) -> dict[str, Any]:
+    def __call__(self, name: str) -> dict[str, Any]:
         try:
             skill_name = name.strip()
 
@@ -474,12 +468,7 @@ class SkillViewTool:
                     "path": str(skill_file),
                 }
 
-            content = skill_file.read_text(encoding=encoding)
-
-            truncated = False
-            if max_chars > 0 and len(content) > max_chars:
-                content = content[:max_chars]
-                truncated = True
+            content = skill_file.read_text(encoding="utf-8")
 
             resources: list[str] = []
             for child in sorted(skill_dir.iterdir()):
@@ -495,14 +484,13 @@ class SkillViewTool:
                 "name": skill_name,
                 "path": str(skill_file),
                 "content": content,
-                "truncated": truncated,
                 "resources": resources,
             }
 
         except UnicodeDecodeError as exc:
             return {
                 "ok": False,
-                "error": f"读取技能文件失败，编码可能不是 {encoding}: {exc}",
+                "error": f"读取技能文件失败，编码可能不是 utf-8: {exc}",
                 "name": name,
             }
         except Exception as exc:
@@ -594,7 +582,6 @@ class RunCommandTool:
                     "shell": "git-bash",
                 }
 
-            started_at = time.perf_counter()
             completed = subprocess.run(
                 [self.bash_path, "-lc", command],
                 cwd=str(target_cwd),
@@ -605,7 +592,6 @@ class RunCommandTool:
                 errors="replace",
                 timeout=timeout_seconds,
             )
-            duration_seconds = time.perf_counter() - started_at
 
             stdout, stdout_truncated = self._truncate_output(completed.stdout)
             stderr, stderr_truncated = self._truncate_output(completed.stderr)
@@ -615,16 +601,8 @@ class RunCommandTool:
 
             return {
                 "ok": completed.returncode == 0,
-                "command": command,
-                "cwd": str(target_cwd),
-                "shell": "git-bash",
                 "exit_code": completed.returncode,
-                "stdout": stdout,
-                "stderr": stderr,
                 "output": output,
-                "timed_out": False,
-                "timeout_seconds": timeout_seconds,
-                "duration_seconds": round(duration_seconds, 3),
                 "output_truncated": stdout_truncated or stderr_truncated,
             }
 
@@ -639,17 +617,14 @@ class RunCommandTool:
 
             stdout, stdout_truncated = self._truncate_output(stdout)
             stderr, stderr_truncated = self._truncate_output(stderr)
+            output = stdout
+            if stderr:
+                output = f"{stdout}\n{stderr}" if stdout else stderr
 
             return {
                 "ok": False,
-                "command": command,
-                "cwd": cwd,
-                "shell": "git-bash",
                 "exit_code": None,
-                "stdout": stdout,
-                "stderr": stderr,
-                "timed_out": True,
-                "timeout_seconds": timeout_seconds,
+                "output": output,
                 "output_truncated": stdout_truncated or stderr_truncated,
                 "error": "命令执行超时。",
             }
@@ -658,9 +633,6 @@ class RunCommandTool:
             return {
                 "ok": False,
                 "error": str(e),
-                "command": command,
-                "cwd": cwd,
-                "shell": "git-bash",
             }
 
     def _resolve_bash_path(self) -> str | None:

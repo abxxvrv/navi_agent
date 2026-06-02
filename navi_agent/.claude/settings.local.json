@@ -13,7 +13,10 @@
       "Bash(git add *)",
       "Bash(awk -F'\"type\":\"' '{print $2}')",
       "Bash(awk -F'\"' '{print $2}')",
-      "Bash(python -c ' *)"
+      "Bash(python -c ' *)",
+      "Bash(git commit -m ' *)",
+      "Bash(python -c \"import sys,json; [print\\(json.dumps\\({k:v for k,v in json.loads\\(l\\).items\\(\\) if k in \\('role','content','tool_calls'\\)}, ensure_ascii=False, indent=2\\)\\) for l in sys.stdin]\")",
+      "Bash(python *)"
     ]
   }
 }

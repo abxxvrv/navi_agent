@@ -270,6 +270,9 @@ def print_agent_event(event: dict[str, Any]) -> None:
     elif event_type == "tool_error":
         console.print(f"[red]• Tool error {tool_name}:[/red] {event.get('error')}")
 
+    elif event_type == "assistant_content":
+        print_assistant_message(event.get("content", ""))
+
 
 def ask_approval_from_cli(decision: ApprovalDecision) -> UserApprovalChoice:
     """

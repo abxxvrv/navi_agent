@@ -6,7 +6,6 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 import operator
 import os
-from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 
@@ -74,7 +73,7 @@ class AgentRuntime:
         if resume_session_id:
             session_dir = Path(sessions_root) / resume_session_id
             self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
-            self.semantic_history = self._valid_message_prefix(self.session_store.messages)
+            self.semantic_history = self._valid_messages(self.session_store.messages)
         else:
             self.session_store = SessionStore(
                 root=sessions_root,
@@ -124,7 +123,7 @@ class AgentRuntime:
         return self.router.switch_model(name)
 
     @staticmethod
-    def _valid_message_prefix(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _valid_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         safe_messages: list[dict[str, Any]] = []
         i = 0
 
@@ -135,7 +134,8 @@ class AgentRuntime:
                 i += 1
                 continue
             if role == "tool":
-                break
+                i += 1
+                continue
 
             tool_calls = message.get("tool_calls") or []
             if role != "assistant" or not tool_calls:
@@ -149,26 +149,32 @@ class AgentRuntime:
                 if isinstance(tool_call, dict) and tool_call.get("id")
             ]
             if len(required_ids) != len(tool_calls):
-                break
+                i += 1
+                continue
 
             tool_messages: list[dict[str, Any]] = []
             seen_ids: set[str] = set()
-            i += 1
-            while i < len(messages) and messages[i].get("role") == "tool":
-                tool_call_id = messages[i].get("tool_call_id")
+            j = i + 1
+            is_valid = True
+            while j < len(messages) and messages[j].get("role") == "tool":
+                tool_call_id = messages[j].get("tool_call_id")
                 if tool_call_id not in required_ids or tool_call_id in seen_ids:
-                    return safe_messages
-                tool_messages.append(messages[i])
+                    is_valid = False
+                    j += 1
+                    break
+                tool_messages.append(messages[j])
                 seen_ids.add(tool_call_id)
-                i += 1
+                j += 1
                 if len(seen_ids) == len(required_ids):
                     break
 
-            if len(seen_ids) != len(required_ids):
-                break
+            if not is_valid or len(seen_ids) != len(required_ids):
+                i = j
+                continue
 
             safe_messages.append(message)
             safe_messages.extend(tool_messages)
+            i = j
 
         return safe_messages
 
@@ -206,7 +212,29 @@ class AgentRuntime:
                 config={"recursion_limit": self.max_steps},
             )
         except KeyboardInterrupt:
-            new_messages = self._valid_message_prefix(
+            turn_messages = self.session_store.messages[snapshot_len:]
+            responded_ids = {
+                m["tool_call_id"]
+                for m in turn_messages
+                if m.get("role") == "tool" and m.get("tool_call_id")
+            }
+            for m in turn_messages:
+                if m.get("role") != "assistant":
+                    continue
+                for tc in m.get("tool_calls") or []:
+                    tc_id = tc.get("id")
+                    if tc_id and tc_id not in responded_ids:
+                        cancelled = {
+                            "role": "tool",
+                            "tool_call_id": tc_id,
+                            "content": json.dumps(
+                                {"ok": False, "error": "用户中断"},
+                                ensure_ascii=False,
+                            ),
+                        }
+                        self.session_store.append_message(cancelled)
+
+            new_messages = self._valid_messages(
                 self.session_store.messages[snapshot_len:]
             )
             if keep_history and new_messages:
@@ -304,6 +332,8 @@ class AgentRuntime:
             assistant_message["reasoning_content"] = reasoning_content
 
         if message.tool_calls:
+            if assistant_message["content"]:
+                self._emit({"type": "assistant_content", "content": assistant_message["content"]})
             assistant_message["tool_calls"] = [
                 tool_call.model_dump(exclude_none=True)
                 for tool_call in message.tool_calls
@@ -514,38 +544,7 @@ class AgentRuntime:
     def _register_tools(self) -> None:
         workspace = str(self.workspace)
         
-        # get_date
-        self.tool_registry.register(
-            name="get_date",
-            description="获取当前日期。",
-            parameters={
-                "type": "object",
-                "properties": {},
-            },
-            function=lambda: datetime.now().strftime("%Y-%m-%d"),
-        )
-        
-        # get_weather
-        self.tool_registry.register(
-            name="get_weather",
-            description="获取指定地点在指定日期的天气。用户需要提供地点和日期。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "location": {
-                        "type": "string",
-                        "description": "城市名称。",
-                    },
-                    "date": {
-                        "type": "string",
-                        "description": "日期，格式为 YYYY-mm-dd。",
-                    },
-                },
-                "required": ["location", "date"],
-            },
-            function=lambda location, date: f"{location} 在 {date} 的天气：多云，7~13°C",
-        )
-        
+
         # list_dir
         self.tool_registry.register(
             name="list_dir",
@@ -715,19 +714,7 @@ class AgentRuntime:
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "技能文件夹名称，例如 skill-creator、docx、safe-refactor。",
-                    },
-                    "max_chars": {
-                        "type": "integer",
-                        "description": "最多返回多少字符，防止技能文件过长。",
-                        "default": 20000,
-                        "minimum": 1000,
-                        "maximum": 100000,
-                    },
-                    "encoding": {
-                        "type": "string",
-                        "description": "文本编码，通常使用 utf-8。",
-                        "default": "utf-8",
+                        "description": "技能名称，例如 skill-creator、docx",
                     },
                 },
                 "required": ["name"],

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
-from openai import OpenAI
+from openai import OpenAI, RateLimitError
 
 # 创建 OpenAI 客户端、存 model_name 和 max_tokens。定义了 chat() 抽象方法，子类必须实现。
 class BaseProvider(ABC):
@@ -94,18 +95,28 @@ class ModelRouter:
         self,
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]],
+        max_retries: int = 5,
         **kwargs: Any,
     ) -> Any:
         if self._provider is None:
             raise RuntimeError(f"模型未配置或不可用: {self.current_name}")
-        response = self._provider.chat(messages, tools, **kwargs)
-        if hasattr(response, "usage") and response.usage:
-            self.last_usage = {
-                "prompt_tokens": response.usage.prompt_tokens or 0,
-                "completion_tokens": response.usage.completion_tokens or 0,
-                "total_tokens": response.usage.total_tokens or 0,
-            }
-        return response
+
+        for attempt in range(max_retries):
+            try:
+                response = self._provider.chat(messages, tools, **kwargs)
+                if hasattr(response, "usage") and response.usage:
+                    self.last_usage = {
+                        "prompt_tokens": response.usage.prompt_tokens or 0,
+                        "completion_tokens": response.usage.completion_tokens or 0,
+                        "total_tokens": response.usage.total_tokens or 0,
+                    }
+                return response
+            except RateLimitError:
+                if attempt == max_retries - 1:
+                    raise
+                wait = 2 ** (attempt + 1)
+                time.sleep(wait)
+        raise RuntimeError("unreachable")
 
     @property
     def model_name(self) -> str:
