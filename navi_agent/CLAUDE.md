@@ -22,10 +22,10 @@ Entry point: `navi_agent/cli:main` (console script `navi`).
 ## Architecture
 
 ```
-cli.py  →  runtime.py  →  context_manager.py  (system prompt: SOUL.md, AGENTS.md, skills)
+cli.py  →  runtime.py  →  context_manager.py  (system prompt, AGENTS.md, skills)
                         →  tool_registry.py   (ToolSpec → OpenAI tools format)
-                        →  tool.py            (list_dir, read_file, write_file, patch_file, run_command, load_skill, skill_view, search_session_history)
-                        →  session_store.py   (turns.jsonl + events.jsonl per session)
+                        →  tool.py            (list_dir, read_file, write_file, patch_file, run_command, skill_view)
+                        →  session_store.py   (session metadata and index)
                         →  approval.py        (strict/normal/open risk-based approval)
 ```
 
@@ -37,7 +37,7 @@ cli.py  →  runtime.py  →  context_manager.py  (system prompt: SOUL.md, AGENT
 | Path | Content |
 |------|---------|
 | `~/.navi/skills/` | Skills (`<name>/SKILL.md`) |
-| `~/.navi/sessions/` | History (`meta.json`, `turns.jsonl`, `events.jsonl`, `index.jsonl`) |
+| `~/.navi/sessions/` | Session metadata (`meta.json`, `index.jsonl`) |
 | `~/.navi/chat_history.txt` | prompt_toolkit input history |
 | `<workspace>/AGENTS.md` | LLM behavioral guidelines |
 

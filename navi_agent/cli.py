@@ -217,9 +217,6 @@ def print_agent_event(event: dict[str, Any]) -> None:
         elif tool_name == "list_dir":
             path = tool_args.get("path", ".")
             console.print(f"\n[dim]• Listed[/dim] [bold]{path}[/bold]")
-        elif tool_name == "load_skill":
-            name = tool_args.get("name", "")
-            console.print(f"\n[dim]• Loading skill[/dim] [bold]{name}[/bold]")
         elif tool_name == "skill_view":
             name = tool_args.get("name", "")
             console.print(f"\n[dim]• Viewing skill[/dim] [bold]{name}[/bold]")
@@ -262,16 +259,6 @@ def print_agent_event(event: dict[str, Any]) -> None:
 
             if output.strip():
                 console.print(Syntax(output[-4000:], "text", word_wrap=True))
-
-        elif tool_name == "load_skill":
-            if tool_result.get("ok"):
-                skill_name = tool_result.get("skill_name") or tool_args.get("name")
-                console.print(f"[green]  └ loaded {skill_name}[/green]")
-            else:
-                console.print(
-                    f"[red]  └ failed:[/red] "
-                    f"{tool_result.get('error', 'Unknown error')}"
-                )
 
         else:
             if tool_result.get("ok") is False:
@@ -478,7 +465,6 @@ def list_runtime_tools(runtime: AgentRuntime) -> list[str]:
         "write_file",
         "patch_file",
         "run_command",
-        "load_skill",
     ]
 
 
@@ -777,52 +763,6 @@ def handle_slash_command(
 # Chat mode
 # =========================
 
-# 开始对话
-def print_recent_history(session_id: str, max_chars: int = 3000) -> None:
-    """
-    恢复会话时，输出最近几轮对话内容。
-    """
-    import json as _json
-
-    turns_path = get_navi_home() / "sessions" / session_id / "turns.jsonl"
-    if not turns_path.is_file():
-        return
-
-    turns: list[dict] = []
-    try:
-        for line in turns_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if line:
-                turns.append(_json.loads(line))
-    except Exception:
-        return
-
-    if not turns:
-        return
-
-    # 从后往前截取，保证最后一轮完整
-    lines: list[str] = []
-    total = 0
-    for turn in reversed(turns):
-        user = turn.get("user", "")
-        assistant = turn.get("final_answer", "")
-        block = f"You: {user}\n\nNavi: {assistant}\n"
-        if total + len(block) > max_chars and lines:
-            break
-        lines.append(block)
-        total += len(block)
-
-    lines.reverse()
-
-    console.print()
-    console.print(Panel(
-        "\n---\n".join(lines),
-        title="Resumed session",
-        border_style="dim",
-    ))
-    console.print()
-
-
 def start_chat(
     workspace: Path,
     max_steps: int,
@@ -850,10 +790,6 @@ def start_chat(
         approval_handler=ask_approval_from_cli,
         resume_session_id=resume_session_id,
     )
-
-    # 恢复会话时显示历史
-    if resume_session_id:
-        print_recent_history(resume_session_id)
 
     # 打印启动信息（恢复会话时跳过）
     if not no_splash and not resume_session_id:

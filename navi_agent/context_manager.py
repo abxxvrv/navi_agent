@@ -36,29 +36,13 @@ class ContextManager:
             else self.workspace / skills_dirname
         )
 
+    # 加载系统提示词.md
     def load_system_prompt_md(self) -> str:
         return self._read_text_file(self.system_prompt_path, None)
 
+    # 加载 AGENTS.md
     def load_agents_md(self) -> str:
         return self._read_text_file(self.agents_path, None)
-
-    def load_skill_md(self, skill_name: str) -> str:
-        if not self._is_safe_skill_name(skill_name):
-            return ""
-
-        skill_path = self.skills_path / skill_name / "SKILL.md"
-        return self._read_text_file(skill_path, None)
-
-    def list_available_skills(self) -> list[str]:
-        if not self.skills_path.exists() or not self.skills_path.is_dir():
-            return []
-
-        skills = []
-        for item in self.skills_path.iterdir():
-            if item.is_dir() and (item / "SKILL.md").is_file():
-                skills.append(item.name)
-
-        return sorted(skills)
 
     def scan_skill_index(self) -> list[dict[str, str]]:
         if not self.skills_path.exists() or not self.skills_path.is_dir():
@@ -105,73 +89,31 @@ class ContextManager:
 
         return "\n".join(lines)
 
-    def build_system_message(
-        self,
-        active_skills: list[str] | None = None,
-        extra_instructions: str = "",
-    ) -> dict[str, str]:
-        content = self.build_system_prompt(
-            active_skills=active_skills,
-            extra_instructions=extra_instructions,
-        )
-
-        return {
-            "role": "system",
-            "content": content,
-        }
-
-    def build_system_prompt(
-        self,
-        active_skills: list[str] | None = None,
-        extra_instructions: str = "",
-    ) -> str:
-        agents_md = self.load_agents_md()
-        system_md = self.load_system_prompt_md()
-        if not system_md:
-            system_md = "你是 Navi Code CLI，一个运行在用户电脑上的交互式通用 AI Agent。"
-
-        parts = [
-            self._render_system_prompt_template(
-                system_md,
-                agents_md=agents_md,
-                skills_prompt=extra_instructions,
-            )
-        ]
-        
-        # skill_blocks = 已加载技能的完整正文
-        # extra_instructions = 可用技能索引，会通过 system.md 的 ${NAVI_SKILLS} 注入
-        skill_blocks = self._load_skill_blocks(active_skills or [])
-        if skill_blocks:
-            parts.extend(skill_blocks)
-
-        return "\n\n".join(parts)
-
+    # 构造运行时候信息，llm code 先走到这
     def build_runtime_messages(
         self,
         messages: list[dict[str, Any]],
-        active_skills: list[str] | None = None,
         extra_instructions: str = "",
     ) -> list[dict[str, Any]]:
+        agents_md = self.load_agents_md() # 加载 AGENTS.md
+        system_md = self.load_system_prompt_md() # 加载系统提示词.md
+        if not system_md:
+            system_md = "你是 Navi Code CLI，一个运行在用户电脑上的交互式通用 AI Agent。"
+
+        system_content = self._render_system_prompt_template( # 构造系统提示词
+            system_md,
+            agents_md=agents_md,
+            skills_prompt=extra_instructions,
+        )
         return [
-            self.build_system_message(
-                active_skills=active_skills,
-                extra_instructions=extra_instructions,
-            ),
+            {
+                "role": "system",
+                "content": system_content,
+            },
             *messages,
         ]
 
-    def _load_skill_blocks(self, active_skills: list[str]) -> list[str]:
-        blocks = []
-
-        for skill_name in self._dedupe(active_skills):
-            content = self.load_skill_md(skill_name)
-            if not content:
-                continue
-
-            blocks.append(self._wrap_block(f"SKILL name={skill_name}", content))
-
-        return blocks
-
+    # 读文件工具函数
     def _read_text_file(self, path: Path, max_chars: int | None) -> str:
         resolved = path.resolve()
 
@@ -188,6 +130,7 @@ class ContextManager:
 
         return text
 
+    # 模板渲染函数
     def _render_system_prompt_template(
         self,
         template: str,
@@ -284,25 +227,3 @@ class ContextManager:
                 metadata[key] = value
 
         return metadata
-
-    def _is_safe_skill_name(self, skill_name: str) -> bool:
-        if not skill_name or skill_name in {".", ".."}:
-            return False
-
-        path = Path(skill_name)
-        return not path.is_absolute() and len(path.parts) == 1
-
-    def _wrap_block(self, name: str, content: str) -> str:
-        return f"<{name}>\n{content}\n</{name}>"
-
-    def _dedupe(self, items: list[str]) -> list[str]:
-        seen = set()
-        result = []
-
-        for item in items:
-            if item in seen:
-                continue
-            seen.add(item)
-            result.append(item)
-
-        return result

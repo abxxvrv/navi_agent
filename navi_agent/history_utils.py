@@ -1,4 +1,3 @@
-from datetime import datetime
 from typing import Any
 
 # 从当前轮的所有 messages 里，倒着找出最后一个“真正的 assistant 最终回复”
@@ -35,17 +34,3 @@ def is_internal_status_message(content: str) -> bool:
     ]
 
     return any(pattern in content for pattern in patterns)
-
-
-# 构造 turn 信息
-def build_turn_record(
-    turn_id: int,
-    user_input: str,
-    final_message: dict[str, Any],
-) -> dict[str, Any]:
-    return {
-        "turn_id": turn_id,
-        "created_at": datetime.now().isoformat(timespec="seconds"),
-        "user": user_input,
-        "final_answer": final_message.get("content", ""),
-    }

@@ -105,10 +105,8 @@ class ApprovalManager:
         "glob",
         "view_file",
         "skill_view",
-        "load_skill",
         "list_skills",
         "list_sessions",
-        "search_session_history",
     }
 
     WRITE_TOOLS = {

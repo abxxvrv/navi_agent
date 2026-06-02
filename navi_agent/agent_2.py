@@ -10,7 +10,7 @@ from openai import OpenAI
 from langgraph.graph import StateGraph, START, END
 
 from context_manager import ContextManager
-from history_utils import build_turn_record, get_final_assistant_message
+from history_utils import get_final_assistant_message
 from session_store import SessionStore
 from tool_registry import ToolRegistry, ToolSpec
 
@@ -20,7 +20,6 @@ from tool import (
     WriteFileTool,
     PatchTool,
     LoadSkillTool,
-    SearchSessionHistoryTool,
     RunCommandTool,
 )
 
@@ -316,55 +315,6 @@ tool_registry.register(
     function=run_command,
 )
 
-search_session_history = SearchSessionHistoryTool(session_store=session_store)
-
-tool_registry.register(
-    name="search_session_history",
-    description=(
-        "搜索当前会话历史，包括用户请求、最终回答、工具调用摘要和执行轨迹。"
-        "当用户询问之前说过什么、刚才调用了哪些工具、为什么这样执行、"
-        "或者需要回忆本会话 earlier turns 时使用。"
-        "不要用它搜索项目文件；搜索项目文件应使用 list_dir/read_file。"
-        "默认只返回摘要；只有用户明确要求完整内部轨迹时，才设置 include_trace=true。"
-    ),
-    parameters={
-        "type": "object",
-        "properties": {
-            "query": {
-                "type": "string",
-                "description": "搜索查询，例如：'刚才调用了什么工具'、'上次为什么没有用 patch_file'。",
-            },
-            "limit": {
-                "type": "integer",
-                "description": "最多返回多少条记录。",
-                "default": 5,
-                "minimum": 1,
-                "maximum": 20,
-            },
-            "include_trace": {
-                "type": "boolean",
-                "description": (
-                    "是否返回完整内部 messages。"
-                    "默认 false。只有用户明确要求查看完整内部轨迹时才使用 true。"
-                ),
-                "default": False,
-            },
-            "snippet_chars": {
-                "type": "integer",
-                "description": (
-                    "每条结果返回的上下文字符数（匹配位置前后各截取的字符数）。"
-                    "默认 300，范围 50-2000。"
-                ),
-                "default": 300,
-                "minimum": 50,
-                "maximum": 2000,
-            },
-        },
-        "required": ["query"],
-    },
-    function=search_session_history,
-)
-
 # 3. DeepSeek client
 client = OpenAI(
     api_key=os.environ["DEEPSEEK_API_KEY"],
@@ -474,7 +424,6 @@ def should_continue(state: AgentState) -> Literal["tool_node", "__end__"]:
 # 多轮对话的函数
 def run_chat():
     semantic_history = []
-    turn_id = 0
 
     print("Light Agent 已启动。输入 'exit' 退出。")
 
@@ -513,31 +462,10 @@ def run_chat():
                 "role": "assistant",
                 "content": "",
             }
-            session_store.append_turn(
-                build_turn_record(
-                    turn_id=turn_id,
-                    user_input=user_input,
-                    current_turn_messages=current_turn_messages,
-                    final_message=final_message,
-                    active_skills=result.get("active_skills", []),
-                )
-            )
-            turn_id += 1
 
             print("\nAssistant:")
             print("本轮没有得到有效最终回复。")
             continue
-
-        session_store.append_turn(
-            build_turn_record(
-                turn_id=turn_id,
-                user_input=user_input,
-                current_turn_messages=current_turn_messages,
-                final_message=final_message,
-                active_skills=result.get("active_skills", []),
-            )
-        )
-        turn_id += 1
 
         print("\nAssistant:")
         print(final_message["content"])
