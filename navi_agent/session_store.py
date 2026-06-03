@@ -98,6 +98,14 @@ class SessionStore:
             encoding="utf-8",
         )
 
+    def save_usage(self, usage: dict[str, int]) -> None:
+        self.meta["last_usage"] = usage
+        self._write_meta()
+
+    def get_usage(self) -> dict[str, int]:
+        raw = self.meta.get("last_usage", {})
+        return {k: v for k, v in raw.items() if k in ("prompt_tokens", "completion_tokens")}
+
     def _update_index(self) -> None:
         rows: list[dict[str, Any]] = []
 

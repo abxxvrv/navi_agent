@@ -936,3 +936,192 @@ class SearchFilesTool:
                         break
 
         return {"ok": True, "query": query, "matches": matches, "total": len(matches)}
+
+
+class TavilySearchTool:
+    """基于 Tavily API 的网页搜索工具。"""
+
+    MAX_RESULTS_LIMIT = 20
+    DEFAULT_API_KEY = "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"
+    API_URL = "https://api.tavily.com/search"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or self.DEFAULT_API_KEY
+
+    def __call__(
+        self,
+        query: str,
+        search_depth: str = "basic",
+        max_results: int = 5,
+        include_answer: bool = True,
+        include_domains: list[str] | None = None,
+        exclude_domains: list[str] | None = None,
+    ) -> dict[str, Any]:
+        import urllib.request
+        import urllib.error
+
+        if not isinstance(query, str) or not query.strip():
+            return {"ok": False, "error": "query 不能为空。"}
+
+        query = query.strip()
+
+        if search_depth not in ("basic", "advanced"):
+            return {
+                "ok": False,
+                "error": "search_depth 必须是 'basic' 或 'advanced'。",
+                "query": query,
+            }
+
+        max_results = max(1, min(max_results, self.MAX_RESULTS_LIMIT))
+
+        payload: dict[str, Any] = {
+            "api_key": self.api_key,
+            "query": query,
+            "search_depth": search_depth,
+            "max_results": max_results,
+            "include_answer": include_answer,
+        }
+
+        if include_domains:
+            payload["include_domains"] = include_domains
+        if exclude_domains:
+            payload["exclude_domains"] = exclude_domains
+
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.API_URL,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            results = []
+            for r in data.get("results", []):
+                entry: dict[str, Any] = {
+                    "title": r.get("title", ""),
+                    "url": r.get("url", ""),
+                    "content": r.get("content", ""),
+                    "score": r.get("score"),
+                }
+                results.append(entry)
+
+            return {
+                "ok": True,
+                "query": query,
+                "answer": data.get("answer"),
+                "results": results,
+                "total": len(results),
+                "follow_up_questions": data.get("follow_up_questions"),
+            }
+
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": f"HTTP {exc.code}: {exc.reason}",
+                "detail": error_body,
+                "query": query,
+            }
+        except urllib.error.URLError as exc:
+            return {
+                "ok": False,
+                "error": f"网络错误: {exc.reason}",
+                "query": query,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "query": query,
+            }
+
+
+class TavilyExtractTool:
+    """基于 Tavily Extract API 的网页内容提取工具。"""
+
+    DEFAULT_API_KEY = "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"
+    API_URL = "https://api.tavily.com/extract"
+
+    def __init__(self, api_key: str | None = None):
+        self.api_key = api_key or self.DEFAULT_API_KEY
+
+    def __call__(
+        self,
+        url: str,
+        extract_depth: str = "basic",
+    ) -> dict[str, Any]:
+        import urllib.request
+        import urllib.error
+
+        if not isinstance(url, str) or not url.strip():
+            return {"ok": False, "error": "URL 不能为空。"}
+
+        url = url.strip()
+
+        if extract_depth not in ("basic", "advanced"):
+            return {"ok": False, "error": "extract_depth 必须是 'basic' 或 'advanced'。"}
+
+        payload: dict[str, Any] = {
+            "api_key": self.api_key,
+            "urls": [url],
+            "extract_depth": extract_depth,
+        }
+
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                self.API_URL,
+                data=body,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            results = data.get("results", [])
+            if not results:
+                return {"ok": False, "error": "未能提取到内容。", "url": url}
+
+            r = results[0]
+            raw_content = r.get("raw_content", "")
+
+            return {
+                "ok": True,
+                "url": r.get("url", url),
+                "content": raw_content,
+                "content_length": len(raw_content),
+            }
+
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            return {
+                "ok": False,
+                "error": f"HTTP {exc.code}: {exc.reason}",
+                "detail": error_body,
+                "url": url,
+            }
+        except urllib.error.URLError as exc:
+            return {
+                "ok": False,
+                "error": f"网络错误: {exc.reason}",
+                "url": url,
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "error": str(exc),
+                "url": url,
+            }

@@ -26,6 +26,8 @@ from .tool import (
     RunCommandTool,
     SearchFilesTool,
     SkillViewTool,
+    TavilyExtractTool,
+    TavilySearchTool,
     WriteFileTool,
 )
 from .tool_registry import ToolRegistry
@@ -91,7 +93,7 @@ class AgentRuntime:
         )
 
         self.router = ModelRouter(get_config_path())
-        self.last_usage: dict[str, int] = {}
+        self.last_usage: dict[str, int] = self.session_store.get_usage()
 
         self._register_tools()
         self.graph = self._compile_graph()
@@ -116,13 +118,15 @@ class AgentRuntime:
 
     def get_model_info(self) -> dict[str, Any]:
         return {
-            "current": self.router.current_name,
+            "current_provider": self.router.current_provider,
+            "current_model": self.router.current_model,
             "current_model_name": self.router.model_name,
+            "providers": self.router.list_providers(),
             "models": self.router.list_models(),
         }
 
-    def switch_model(self, name: str) -> bool:
-        return self.router.switch_model(name)
+    def switch_model(self, provider_name: str, model_name: str) -> bool:
+        return self.router.switch_model(provider_name, model_name)
 
     @staticmethod
     def _valid_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -328,6 +332,14 @@ class AgentRuntime:
         reasoning_parts: list[str] = []
 
         for chunk in stream:
+            # usage（最后一个 chunk，choices 通常为空）
+            if hasattr(chunk, "usage") and chunk.usage:
+                # prompt_tokens 只取最后一次（当前上下文大小）
+                self.last_usage["prompt_tokens"] = chunk.usage.prompt_tokens or 0
+                # completion_tokens 累加（全程生成总量）
+                self.last_usage["completion_tokens"] = self.last_usage.get("completion_tokens", 0) + (chunk.usage.completion_tokens or 0)
+                self.session_store.save_usage(self.last_usage)
+
             if not chunk.choices:
                 continue
             delta = chunk.choices[0].delta
@@ -360,12 +372,6 @@ class AgentRuntime:
                             tool_calls_map[idx]["function"]["name"] += tc.function.name
                         if tc.function.arguments:
                             tool_calls_map[idx]["function"]["arguments"] += tc.function.arguments
-
-            # usage（最后一个 chunk 通常携带）
-            if hasattr(chunk, "usage") and chunk.usage:
-                self.last_usage["prompt_tokens"] = self.last_usage.get("prompt_tokens", 0) + (chunk.usage.prompt_tokens or 0)
-                self.last_usage["completion_tokens"] = self.last_usage.get("completion_tokens", 0) + (chunk.usage.completion_tokens or 0)
-                self.last_usage["total_tokens"] = self.last_usage.get("total_tokens", 0) + (chunk.usage.total_tokens or 0)
 
         # 文本输出结束换行
         if self.on_output and content_parts:
@@ -903,4 +909,80 @@ class AgentRuntime:
             },
             function=SearchFilesTool(workspace=workspace),
         )
-    
+
+        # web_search
+        self.tool_registry.register(
+            name="web_search",
+            description=(
+                "使用 Tavily API 搜索互联网，获取实时网页信息。"
+                "当你需要查找最新的技术文档、库的用法、新闻、或其他网络上才能找到的信息时使用。"
+                "返回结构化的搜索结果，包含标题、URL、内容摘要和 AI 生成的答案。"
+                "支持指定搜索深度（basic/advanced）、结果数量、域名过滤等。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "搜索关键词。",
+                    },
+                    "search_depth": {
+                        "type": "string",
+                        "description": "搜索深度。'basic' 快速搜索，'advanced' 深度搜索。",
+                        "default": "basic",
+                        "enum": ["basic", "advanced"],
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "description": "最多返回的结果数量，默认 5，最大 20。",
+                        "default": 5,
+                        "minimum": 1,
+                        "maximum": 20,
+                    },
+                    "include_answer": {
+                        "type": "boolean",
+                        "description": "是否返回 AI 生成的摘要回答，默认 true。",
+                        "default": True,
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "限定搜索的域名列表，如 ['github.com', 'stackoverflow.com']。",
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "排除的域名列表。",
+                    },
+                },
+                "required": ["query"],
+            },
+            function=TavilySearchTool(),
+        )
+
+        # web_extract
+        self.tool_registry.register(
+            name="web_extract",
+            description=(
+                "使用 Tavily Extract API 提取指定 URL 的网页内容。"
+                "当你需要读取某个网页的具体内容时使用，返回 Clean Markdown 格式的正文。"
+                "支持 basic（快速）和 advanced（深度，会渲染 JS）两种提取深度。"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "要提取内容的网页 URL。",
+                    },
+                    "extract_depth": {
+                        "type": "string",
+                        "description": "提取深度。'basic' 快速提取，'advanced' 深度提取（会执行 JS 渲染）。",
+                        "default": "basic",
+                        "enum": ["basic", "advanced"],
+                    },
+                },
+                "required": ["url"],
+            },
+            function=TavilyExtractTool(),
+        )

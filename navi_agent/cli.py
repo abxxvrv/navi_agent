@@ -192,7 +192,7 @@ def print_status_bar(runtime: AgentRuntime) -> None:
         pct = round(prompt_t / window * 100) if window else 0
         console.print(
             f"[dim]Context: {pct}% | In: {fmt(prompt_t)} / {fmt(window)} "
-            f"| Out: {comp_t} | Model: {model}[/dim]"
+            f"| Out: {fmt(comp_t)} | Model: {model}[/dim]"
         )
     else:
         console.print(f"[dim]Model: {model}[/dim]")
@@ -619,37 +619,39 @@ def _interactive_select(options: list[str], selected: int = 0) -> int | None:
 
 def handle_model_command(runtime: AgentRuntime) -> None:
     info = runtime.get_model_info()
-    current_name = info["current"]
-    models = info["models"]
+    providers = info["providers"]
 
-    if not models:
-        console.print("[yellow]No models configured. Edit ~/.navi/config.json[/yellow]")
+    if not providers:
+        console.print("[yellow]No providers configured. Edit ~/.navi/config.json[/yellow]")
         return
 
-    providers = sorted(models.keys())
-    current_idx = providers.index(current_name) if current_name in providers else 0
+    # --- 第一层：选择供应商 ---
+    current_provider = info["current_provider"]
+    provider_labels = [f"{p}  [dim](current: {info['current_model']})[/dim]" if p == current_provider else p
+                       for p in providers]
 
-    console.print(f"[bold]Current model[/bold]: {current_name} ({info['current_model_name']})")
-    console.print()
-
-    labels = []
-    for name in providers:
-        entry = models[name]
-        marker = " ◄" if name == current_name else ""
-        labels.append(f"{name} ({entry['model_name']}){marker}")
-
-    selected = _interactive_select(labels, current_idx)
-    if selected is None:
+    selected_provider_idx = _interactive_select(provider_labels, providers.index(current_provider))
+    if selected_provider_idx is None:
         return
+    provider_name = providers[selected_provider_idx]
 
-    provider_name = providers[selected]
-    entry = models[provider_name]
-    model_name = entry["model_name"]
+    # --- 第二层：选择模型 ---
+    models = runtime.router.list_models(provider_name)
+    model_names = list(models.keys())
+    current_model = info["current_model"]
 
-    if runtime.switch_model(provider_name):
-        console.print(f"[green]Switched to {provider_name} ({model_name})[/green]")
+    current_model_idx = model_names.index(current_model) if current_model in model_names else 0
+    model_labels = [f"{m} ◄" if m == current_model else m for m in model_names]
+
+    selected_model_idx = _interactive_select(model_labels, current_model_idx)
+    if selected_model_idx is None:
+        return
+    model_name = model_names[selected_model_idx]
+
+    if runtime.switch_model(provider_name, model_name):
+        console.print(f"[green]Switched to {provider_name} / {model_name}[/green]")
     else:
-        console.print(f"[red]Failed to switch to {provider_name}[/red]")
+        console.print(f"[red]Failed to switch to {provider_name} / {model_name}[/red]")
 
 
 def create_prompt_key_bindings() -> KeyBindings:
