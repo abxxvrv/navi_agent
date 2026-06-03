@@ -23,6 +23,15 @@ class BaseProvider(ABC):
     ) -> Any:
         ...
 
+    @abstractmethod
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        ...
+
 
 class DeepSeekProvider(BaseProvider):
     def chat(
@@ -39,6 +48,21 @@ class DeepSeekProvider(BaseProvider):
             extra_body={"thinking": {"type": "enabled"}},
         )
 
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        return self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            tools=tools,
+            stream=True,
+            reasoning_effort="high",
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+
 
 class MimoProvider(BaseProvider):
     def chat(
@@ -51,6 +75,20 @@ class MimoProvider(BaseProvider):
             model=self.model_name,
             messages=messages,
             tools=tools,
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        return self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            tools=tools,
+            stream=True,
             extra_body={"thinking": {"type": "enabled"}},
         )
 
@@ -117,6 +155,16 @@ class ModelRouter:
                 wait = 2 ** (attempt + 1)
                 time.sleep(wait)
         raise RuntimeError("unreachable")
+
+    def chat_stream(
+        self,
+        messages: list[dict[str, Any]],
+        tools: list[dict[str, Any]],
+        **kwargs: Any,
+    ) -> Any:
+        if self._provider is None:
+            raise RuntimeError(f"模型未配置或不可用: {self.current_name}")
+        return self._provider.chat_stream(messages, tools, **kwargs)
 
     @property
     def model_name(self) -> str:

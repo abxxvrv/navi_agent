@@ -5,6 +5,8 @@ import json
 import os
 import shutil
 import subprocess
+import threading
+import time
 import re
 
 
@@ -509,11 +511,13 @@ class RunCommandTool:
         default_timeout: int = 60,
         max_timeout: int = 300,
         max_output_chars: int = 50_000,
+        on_output=None,
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
         self.max_timeout = max_timeout
         self.max_output_chars = max_output_chars
+        self.on_output = on_output
         self.bash_path = self._resolve_bash_path()
 
         # 打印找到的 git bash 路径
@@ -582,51 +586,54 @@ class RunCommandTool:
                     "shell": "git-bash",
                 }
 
-            completed = subprocess.run(
+            proc = subprocess.Popen(
                 [self.bash_path, "-lc", command],
                 cwd=str(target_cwd),
-                shell=False,
-                capture_output=True,
-                text=True,
-                encoding=encoding,
-                errors="replace",
-                timeout=timeout_seconds,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
             )
 
-            stdout, stdout_truncated = self._truncate_output(completed.stdout)
-            stderr, stderr_truncated = self._truncate_output(completed.stderr)
-            output = stdout
-            if stderr:
-                output = f"{stdout}\n{stderr}" if stdout else stderr
+            timed_out = False
+            output_parts: list[str] = []
+
+            def _reader():
+                for line in proc.stdout:
+                    text = line.decode(encoding, errors="replace")
+                    output_parts.append(text)
+                    if self.on_output:
+                        self.on_output(text, end="")
+                proc.stdout.close()
+
+            reader = threading.Thread(target=_reader)
+            reader.daemon = True
+            reader.start()
+
+            deadline = time.monotonic() + timeout_seconds
+            while proc.poll() is None:
+                if time.monotonic() >= deadline:
+                    timed_out = True
+                    self._kill_process_tree(proc)
+                    break
+                time.sleep(0.05)
+
+            reader.join(timeout=3)
+            output, output_truncated = self._truncate_output("".join(output_parts))
+
+            if timed_out:
+                return {
+                    "ok": False,
+                    "exit_code": None,
+                    "output": output,
+                    "output_truncated": output_truncated,
+                    "error": "命令执行超时。",
+                }
 
             return {
-                "ok": completed.returncode == 0,
-                "exit_code": completed.returncode,
+                "ok": proc.returncode == 0,
+                "exit_code": proc.returncode,
                 "output": output,
-                "output_truncated": stdout_truncated or stderr_truncated,
-            }
-
-        except subprocess.TimeoutExpired as e:
-            stdout = e.stdout or ""
-            stderr = e.stderr or ""
-
-            if isinstance(stdout, bytes):
-                stdout = stdout.decode(encoding, errors="replace")
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(encoding, errors="replace")
-
-            stdout, stdout_truncated = self._truncate_output(stdout)
-            stderr, stderr_truncated = self._truncate_output(stderr)
-            output = stdout
-            if stderr:
-                output = f"{stdout}\n{stderr}" if stdout else stderr
-
-            return {
-                "ok": False,
-                "exit_code": None,
-                "output": output,
-                "output_truncated": stdout_truncated or stderr_truncated,
-                "error": "命令执行超时。",
+                "output_truncated": output_truncated,
             }
 
         except Exception as e:
@@ -634,6 +641,18 @@ class RunCommandTool:
                 "ok": False,
                 "error": str(e),
             }
+
+    def _kill_process_tree(self, proc: subprocess.Popen) -> None:
+        """杀掉 proc 及其所有子进程（Windows 用 taskkill /T）。"""
+        try:
+            subprocess.run(
+                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=5,
+            )
+        except Exception:
+            proc.kill()
 
     def _resolve_bash_path(self) -> str | None:
         env_path = os.environ.get("GIT_BASH")

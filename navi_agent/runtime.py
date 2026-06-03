@@ -53,6 +53,7 @@ class AgentRuntime:
         approval_mode: str = "normal",
         approval_handler: ApprovalHandler | None = None,
         resume_session_id: str | None = None,
+        on_output=None,
     ):
         load_dotenv()
 
@@ -60,6 +61,7 @@ class AgentRuntime:
         self.max_steps = max_steps
         self.event_handler = event_handler
         self.approval_handler = approval_handler
+        self.on_output = on_output
         self.navi_home = get_navi_home()
         self.approval_manager = ApprovalManager(
             mode=approval_mode,
@@ -309,34 +311,81 @@ class AgentRuntime:
     
     # 构造真正发给模型的 messages
     def _llm_node(self, state: AgentState) -> dict[str, Any]:
-        skill_index_prompt = self.context_manager.build_skill_index_prompt() # 构造技能索引
-        runtime_messages = self.context_manager.build_runtime_messages( # 构建传入的消息
+        skill_index_prompt = self.context_manager.build_skill_index_prompt()
+        runtime_messages = self.context_manager.build_runtime_messages(
             messages=state["messages"],
             extra_instructions=skill_index_prompt,
         )
-        # 调用模型，获取回复
-        response = self.router.chat(
+
+        # 流式调用模型
+        stream = self.router.chat_stream(
             messages=runtime_messages,
             tools=self.tool_registry.to_openai_tools(),
         )
-        self.last_usage = self.router.last_usage
 
-        message = response.choices[0].message
-        assistant_message = {
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
+        reasoning_parts: list[str] = []
+
+        for chunk in stream:
+            if not chunk.choices:
+                continue
+            delta = chunk.choices[0].delta
+
+            # 文本 token
+            if delta.content:
+                content_parts.append(delta.content)
+                if self.on_output:
+                    self.on_output(delta.content, end="")
+
+            # reasoning token（思考过程）
+            reasoning_content = getattr(delta, "reasoning_content", None)
+            if reasoning_content:
+                reasoning_parts.append(reasoning_content)
+
+            # tool call
+            if delta.tool_calls:
+                for tc in delta.tool_calls:
+                    idx = tc.index
+                    if idx not in tool_calls_map:
+                        tool_calls_map[idx] = {
+                            "id": "",
+                            "type": "function",
+                            "function": {"name": "", "arguments": ""},
+                        }
+                    if tc.id:
+                        tool_calls_map[idx]["id"] += tc.id
+                    if tc.function:
+                        if tc.function.name:
+                            tool_calls_map[idx]["function"]["name"] += tc.function.name
+                        if tc.function.arguments:
+                            tool_calls_map[idx]["function"]["arguments"] += tc.function.arguments
+
+            # usage（最后一个 chunk 通常携带）
+            if hasattr(chunk, "usage") and chunk.usage:
+                self.last_usage["prompt_tokens"] = self.last_usage.get("prompt_tokens", 0) + (chunk.usage.prompt_tokens or 0)
+                self.last_usage["completion_tokens"] = self.last_usage.get("completion_tokens", 0) + (chunk.usage.completion_tokens or 0)
+                self.last_usage["total_tokens"] = self.last_usage.get("total_tokens", 0) + (chunk.usage.total_tokens or 0)
+
+        # 文本输出结束换行
+        if self.on_output and content_parts:
+            self.on_output("")
+
+        # 拼接完整 message
+        content = "".join(content_parts)
+        assistant_message: dict[str, Any] = {
             "role": "assistant",
-            "content": message.content or "",
+            "content": content,
         }
 
-        reasoning_content = getattr(message, "reasoning_content", None)
-        if reasoning_content is not None:
-            assistant_message["reasoning_content"] = reasoning_content
+        if reasoning_parts:
+            assistant_message["reasoning_content"] = "".join(reasoning_parts)
 
-        if message.tool_calls:
-            if assistant_message["content"]:
-                self._emit({"type": "assistant_content", "content": assistant_message["content"]})
+        if tool_calls_map:
+            if content:
+                self._emit({"type": "assistant_content", "content": content})
             assistant_message["tool_calls"] = [
-                tool_call.model_dump(exclude_none=True)
-                for tool_call in message.tool_calls
+                tool_calls_map[i] for i in sorted(tool_calls_map.keys())
             ]
 
         self.session_store.append_message(assistant_message)
@@ -581,7 +630,8 @@ class AgentRuntime:
             description=(
                 "读取文本文件内容。只用于文本文件；图片、视频或其他二进制文件应使用更合适的工具。"
                 "读取结果会像 cat -n 一样在每一行前加上行号。"
-                "默认最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
+                "默认且最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
+                "不确定文件长度时，直接使用默认值 1000 行即可，不需要分多次读取。"
                 "本工具很适合并行调用，应该先并行调用 search_files 确定要读内容，然后并行阅读"
                 "单行超过 2000 字符会被截断并用 ... 标记，截断的行号会在 truncated_lines 中返回。"
                 "如果只需要文件的一部分，使用 start_line 和 max_lines。"
@@ -762,7 +812,7 @@ class AgentRuntime:
                 },
                 "required": ["command"],
             },
-            function=RunCommandTool(workspace=workspace),
+            function=RunCommandTool(workspace=workspace, on_output=self.on_output),
         )
 
         # glob

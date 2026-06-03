@@ -792,6 +792,7 @@ def start_chat(
         approval_mode=approval_mode,
         approval_handler=ask_approval_from_cli,
         resume_session_id=resume_session_id,
+        on_output=console.print,
     )
 
     # 打印启动信息（恢复会话时跳过）
@@ -1011,6 +1012,7 @@ def run(
         approval_mode=approval_mode,
         approval_handler=ask_approval_from_cli,
         resume_session_id=resume_session_id,
+        on_output=console.print,
     )
 
     console.print(
