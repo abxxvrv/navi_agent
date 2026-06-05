@@ -10,6 +10,8 @@ class SessionStore:
         self,
         root: str = ".light_agent/sessions", # 默认保存的位置
         project_path: str | None = None,
+        provider: str = "",
+        model: str = "",
     ):
         # 创建目录，也就是".light_agent/sessions"
         self.root = Path(root)
@@ -37,6 +39,8 @@ class SessionStore:
             "created_at": self.created_at,
             "updated_at": self.created_at,
             "project_path": self.project_path,
+            "provider": provider,
+            "model": model,
         }
         # 创建 session 目录并写入初始文件
         self.session_dir.mkdir(parents=True, exist_ok=True)

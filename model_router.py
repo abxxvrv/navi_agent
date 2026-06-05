@@ -42,14 +42,20 @@ PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
 
 
 class ModelRouter:
-    def __init__(self, config_path: Path):
+    """模型路由器。
+
+    config.json 存 providers 凭证、compression 配置和 default_model（仅新会话参考）。
+    每个会话的实际模型由调用方传入 provider / model 参数。
+    """
+
+    def __init__(self, config_path: Path, provider: str, model: str):
         self.config_path = config_path
         self.config = self._load_config()
-        self.current_provider: str = self.config.get("current_provider", "")
-        self.current_model: str = self.config.get("current_model", "")
-        self._provider = self._build_provider(self.current_provider, self.current_model)
+        self.provider = provider
+        self.model = model
+        self._provider = self._build_provider(self.provider, self.model)
 
-        # 压缩模型路由
+        # 压缩模型路由（全局配置，与会话无关）
         compression_config = self.config.get("compression", {})
         self._compression_provider = self._build_provider(
             compression_config.get("provider", ""),
@@ -75,7 +81,7 @@ class ModelRouter:
 
     def chat_stream(self, messages, tools, **kwargs):
         if self._provider is None:
-            raise RuntimeError(f"模型未配置或不可用: {self.current_model}")
+            raise RuntimeError(f"模型未配置或不可用: {self.model}")
         return self._provider.chat_stream(messages, tools, **kwargs)
 
     def chat_stream_compression(self, messages, max_tokens=None, **kwargs):
@@ -87,30 +93,27 @@ class ModelRouter:
 
     @property
     def model_name(self) -> str:
-        return self._provider.model_name if self._provider else self.current_model
+        return self._provider.model_name if self._provider else self.model
 
     @property
     def context_window(self) -> int:
-        models = self.config.get("providers", {}).get(self.current_provider, {}).get("models", {})
-        return models.get(self.current_model, {}).get("context_window", 1048576)
+        models = self.config.get("providers", {}).get(self.provider, {}).get("models", {})
+        return models.get(self.model, {}).get("context_window", 1048576)
 
     def list_providers(self) -> list[str]:
         return list(self.config.get("providers", {}).keys())
 
     def list_models(self, provider_name: str | None = None) -> dict:
-        name = provider_name or self.current_provider
+        name = provider_name or self.provider
         return dict(self.config.get("providers", {}).get(name, {}).get("models", {}))
 
     def switch_model(self, provider_name: str, model_name: str) -> bool:
-        if provider_name == self.current_provider and model_name == self.current_model:
+        if provider_name == self.provider and model_name == self.model:
             return True
         provider = self._build_provider(provider_name, model_name)
         if provider is None:
             return False
         self._provider = provider
-        self.current_provider = provider_name
-        self.current_model = model_name
-        self.config["current_provider"] = provider_name
-        self.config["current_model"] = model_name
-        self.config_path.write_text(json.dumps(self.config, indent=2, ensure_ascii=False))
+        self.provider = provider_name
+        self.model = model_name
         return True

@@ -104,27 +104,27 @@ class TestMemoryStore:
         assert result["success"] is False
         assert "多个匹配" in result["error"]
 
-    def test_get_memory_text_empty(self, memory_store):
+    def test_get_text_memory_empty(self, memory_store):
         """空记忆"""
-        assert memory_store.get_memory_text() == ""
+        assert memory_store.get_text("memory") == ""
 
-    def test_get_memory_text_with_entries(self, memory_store):
+    def test_get_text_memory_with_entries(self, memory_store):
         """有记忆条目"""
         memory_store.add("memory", "条目1")
         memory_store.add("memory", "条目2")
-        text = memory_store.get_memory_text()
+        text = memory_store.get_text("memory")
         assert "条目1" in text
         assert "条目2" in text
         assert ENTRY_DELIMITER in text
 
-    def test_get_user_text_empty(self, memory_store):
+    def test_get_text_user_empty(self, memory_store):
         """空用户画像"""
-        assert memory_store.get_user_text() == ""
+        assert memory_store.get_text("user") == ""
 
-    def test_get_user_text_with_entries(self, memory_store):
+    def test_get_text_user_with_entries(self, memory_store):
         """有用户画像"""
         memory_store.add("user", "用户叫张三")
-        text = memory_store.get_user_text()
+        text = memory_store.get_text("user")
         assert "用户叫张三" in text
 
     def test_persistence(self, tmp_path):

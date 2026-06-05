@@ -183,10 +183,11 @@ def print_error_message(error: str) -> None:
     """
     打印错误信息。
     """
+    from rich.markup import escape
     console.print()
     console.print(
         Panel(
-            error,
+            escape(error),
             title="Error",
             border_style="red",
         )
@@ -857,6 +858,12 @@ def start_chat(
     # 主循环
     while True:
         try:
+            # 检查后台审查结果
+            if runtime.reviewer.pending_message:
+                from rich.markup import escape
+                console.print(f"  💾 [dim]{escape(runtime.reviewer.pending_message)}[/dim]")
+                runtime.reviewer.pending_message = None
+
             console.print("─" * console.width)
             print_status_bar(runtime)
             console.print("─" * console.width)

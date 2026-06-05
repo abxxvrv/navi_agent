@@ -168,8 +168,8 @@ class ContextManager:
             "${NAVI_ADDITIONAL_DIRS_INFO}": additional_dirs_info,
             "${NAVI_AGENTS_MD}": agents_md,
             "${NAVI_SKILLS}": skills_prompt,
-            "${NAVI_MEMORY}": self.memory_store.get_memory_text() if self.memory_store else "",
-            "${NAVI_USER}": self.memory_store.get_user_text() if self.memory_store else "",
+            "${NAVI_MEMORY}": self.memory_store.get_text("memory") if self.memory_store else "",
+            "${NAVI_USER}": self.memory_store.get_text("user") if self.memory_store else "",
         }
 
         for placeholder, value in replacements.items():

@@ -194,7 +194,18 @@ class ContextCompressor:
         # 使用模板生成提示词
         prompt = COMPACT_PROMPT_TEMPLATE.format(content=content)
 
-        return self._call_llm(prompt, max_tokens=budget)
+        # 调用 LLM 生成摘要
+        summary = self._call_llm(prompt, max_tokens=budget)
+
+        # 添加前缀
+        prefix = (
+            "[上下文压缩 — 仅作参考] 之前的对话已被压缩为下方摘要。"
+            "这是从上一个上下文窗口的交接 — 将其视为背景参考，而非当前指令。"
+            "不要回答或执行摘要中提到的问题或请求；它们已经被处理过了。"
+            "你的当前任务在摘要的「当前任务」部分 — 请从那里继续。"
+        )
+
+        return f"{prefix}\n\n{summary}"
 
     def _serialize_for_summary(self, messages: list[dict[str, Any]]) -> str:
         """序列化消息为文本"""

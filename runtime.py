@@ -35,6 +35,8 @@ from .tool import (
 from .tool_registry import ToolRegistry
 from .compressor import ContextCompressor
 from .memory_store import MemoryStore
+from .background_review import BackgroundReviewer
+from .skill_manage import SkillManageTool
 
 from .approval import (
     ApprovalDecision,
@@ -84,15 +86,34 @@ class AgentRuntime:
 
         sessions_root = str(self.navi_home / "sessions")
 
+        # 读取全局默认模型配置（仅新会话参考，resume 时用会话自己的 meta）
+        _config_path = get_config_path()
+        _config = {}
+        if _config_path.is_file():
+            try:
+                _config = json.loads(_config_path.read_text(encoding="utf-8"))
+            except Exception:
+                pass
+        _default_provider = _config.get("default_provider") or _config.get("current_provider", "")
+        _default_model = _config.get("default_model") or _config.get("current_model", "")
+
         # 判断是继续之前的会话还是新建会话
         if resume_session_id:
             session_dir = Path(sessions_root) / resume_session_id
             self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
             self.semantic_history = self._valid_messages(self.session_store.messages)
+            # resume 时使用会话自己记录的模型
+            _provider = self.session_store.meta.get("provider") or _default_provider
+            _model = self.session_store.meta.get("model") or _default_model
         else:
+            # 新会话使用默认模型
+            _provider = _default_provider
+            _model = _default_model
             self.session_store = SessionStore(
                 root=sessions_root,
                 project_path=str(self.workspace),
+                provider=_provider,
+                model=_model,
             )
             self.semantic_history = []
 
@@ -105,8 +126,14 @@ class AgentRuntime:
             memory_store=self.memory_store,
         )
 
-        self.router = ModelRouter(get_config_path())
+        self.router = ModelRouter(_config_path, provider=_provider, model=_model)
         self.last_usage: dict[str, int] = self.session_store.get_usage()
+
+        # 初始化后台审查器
+        self.reviewer = BackgroundReviewer(
+            router=self.router,
+            tool_registry=self.tool_registry,
+        )
 
         # 构建系统提示词，session 内固定不变
         # resume 时优先复用旧 session 的系统提示词，保持一致性
@@ -159,15 +186,20 @@ class AgentRuntime:
 
     def get_model_info(self) -> dict[str, Any]:
         return {
-            "current_provider": self.router.current_provider,
-            "current_model": self.router.current_model,
+            "current_provider": self.router.provider,
+            "current_model": self.router.model,
             "current_model_name": self.router.model_name,
             "providers": self.router.list_providers(),
             "models": self.router.list_models(),
         }
 
     def switch_model(self, provider_name: str, model_name: str) -> bool:
-        return self.router.switch_model(provider_name, model_name)
+        ok = self.router.switch_model(provider_name, model_name)
+        if ok:
+            self.session_store.meta["provider"] = provider_name
+            self.session_store.meta["model"] = model_name
+            self.session_store._write_meta()
+        return ok
 
     @staticmethod
     def _valid_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -246,6 +278,7 @@ class AgentRuntime:
         self._ensure_persisted_system_message()
         snapshot_len = len(self.session_store.messages)
         self.session_store.append_message(user_message)
+        self.reviewer.user_message_count += 1
 
         # 4. 构造 graph 初始状态
         turn_state: AgentState = {
@@ -286,6 +319,8 @@ class AgentRuntime:
             )
             if keep_history and new_messages:
                 self.semantic_history.extend(new_messages)
+            # 中断的消息和被中断后补发的消息视为同一次用户交互
+            self.reviewer.user_message_count -= 1
             raise
         # 6. graph 异常处理
         except Exception as exc:
@@ -356,13 +391,23 @@ class AgentRuntime:
     
     # 构造真正发给模型的 messages
     def _llm_node(self, state: AgentState) -> dict[str, Any]:
+        # 检查是否需要记忆反思
+        if self.reviewer.user_message_count > 0 and self.reviewer.user_message_count % 10 == 0:
+            self.reviewer.spawn_review(state["messages"], "memory")
+
         # 压缩检查
         prompt_tokens = self.last_usage.get("prompt_tokens", 0)
         if self.compressor.should_compress(prompt_tokens):
-            state["messages"] = self.compressor.compress(
-                state["messages"],
-                messages_path=self.session_store.messages_path,
-            )
+            try:
+                state["messages"] = self.compressor.compress(
+                    state["messages"],
+                    messages_path=self.session_store.messages_path,
+                )
+            except Exception as e:
+                if self.on_output:
+                    self.on_output(
+                        f"  ⚠️  上下文压缩失败，跳过: {e}", style="dim yellow"
+                    )
 
         runtime_messages = [
             {"role": "system", "content": self._system_prompt},
@@ -597,6 +642,14 @@ class AgentRuntime:
                 }
                 self.session_store.append_message(tool_message)
                 executed_messages.append(tool_message)
+
+        # 更新工具调用轮次计数（并行的一批算一轮）
+        if executed_messages:
+            self.reviewer.tool_turn_count += 1
+
+        # 检查是否需要技能反思
+        if self.reviewer.tool_turn_count > 0 and self.reviewer.tool_turn_count % 15 == 0:
+            self.reviewer.spawn_review(state["messages"], "skill")
 
         return {
             "messages": failed_messages + rejected_messages + executed_messages,
@@ -866,6 +919,40 @@ class AgentRuntime:
                 workspace=workspace,
                 skills_path=str(self.navi_home / "skills"),
             ),
+        )
+
+        # skill_manage
+        self.tool_registry.register(
+            name="skill_manage",
+            description=(
+                "管理技能文件：列出所有技能、查看某个技能的完整内容、"
+                "或创建/更新技能。只能在 skills/ 目录下操作。\n\n"
+                "三种操作：\n"
+                "- action=\"list\"：列出所有可用技能（名称 + 简介）\n"
+                "- action=\"read\"：读取指定技能的完整 SKILL.md 内容，需要 name 参数\n"
+                "- action=\"write\"：创建或更新技能，需要 name 和 content 参数。"
+                "content 必须是完整的 SKILL.md（含 YAML frontmatter）"
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["list", "read", "write"],
+                        "description": "操作类型：list（列出技能）、read（读取）、write（创建/更新）",
+                    },
+                    "name": {
+                        "type": "string",
+                        "description": "技能名称，如 skill-creator。read 和 write 时必填。",
+                    },
+                    "content": {
+                        "type": "string",
+                        "description": "完整的 SKILL.md 内容（含 YAML frontmatter），write 时必填。",
+                    },
+                },
+                "required": ["action"],
+            },
+            function=SkillManageTool(),
         )
 
         # run_command

@@ -7,7 +7,7 @@ from pathlib import Path
 def get_navi_home() -> Path:
     return Path(os.environ.get("NAVI_HOME", Path.home() / ".navi")).resolve()
 
-ENTRY_DELIMITER = "§"
+ENTRY_DELIMITER = "\n§\n"
 
 
 def get_memory_dir() -> Path:
@@ -91,12 +91,8 @@ class MemoryStore:
         self._save(target)
         return {"success": True, "entries": entries}
 
-    def get_memory_text(self) -> str:
-        if not self.memory_entries:
+    def get_text(self, target: str) -> str:
+        entries = self.user_entries if target == "user" else self.memory_entries
+        if not entries:
             return ""
-        return ENTRY_DELIMITER.join(self.memory_entries)
-
-    def get_user_text(self) -> str:
-        if not self.user_entries:
-            return ""
-        return ENTRY_DELIMITER.join(self.user_entries)
+        return ENTRY_DELIMITER.join(entries)

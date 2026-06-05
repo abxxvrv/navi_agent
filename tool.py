@@ -602,7 +602,7 @@ class RunCommandTool:
                     text = line.decode(encoding, errors="replace")
                     output_parts.append(text)
                     if self.on_output:
-                        self.on_output(text, end="")
+                        self.on_output(text, end="", markup=False)
                 proc.stdout.close()
 
             reader = threading.Thread(target=_reader)
