@@ -8,12 +8,12 @@ from typing import Any
 class SessionStore:
     def __init__( # 初始化
         self,
-        root: str = ".light_agent/sessions", # 默认保存的位置
+        root: str = ".navi/sessions",
         project_path: str | None = None,
         provider: str = "",
         model: str = "",
     ):
-        # 创建目录，也就是".light_agent/sessions"
+        # 创建目录
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
 
