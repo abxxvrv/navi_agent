@@ -1,7 +1,7 @@
 """Tests for tool_registry.py"""
 
 import pytest
-from tool_registry import ToolSpec, ToolRegistry
+from navi_agent.tool_registry import ToolSpec, ToolRegistry
 
 
 class TestToolSpec:

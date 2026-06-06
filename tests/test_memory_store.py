@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from memory_store import MemoryStore, ENTRY_DELIMITER
+from navi_agent.memory_store import MemoryStore, ENTRY_DELIMITER
 
 
 @pytest.fixture

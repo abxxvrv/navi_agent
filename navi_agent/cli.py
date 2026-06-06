@@ -20,9 +20,9 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from navi_agent.approval import ApprovalDecision, UserApprovalChoice
-from navi_agent.paths import get_navi_home
-from navi_agent.runtime import AgentRuntime
+from .approval import ApprovalDecision, UserApprovalChoice
+from .paths import get_navi_home
+from .runtime import AgentRuntime
 
 
 APP_NAME = "Navi"

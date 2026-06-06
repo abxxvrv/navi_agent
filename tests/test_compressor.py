@@ -3,7 +3,7 @@
 import json
 import pytest
 from pathlib import Path
-from compressor import (
+from navi_agent.compressor import (
     ContextCompressor,
     CLEARED_MESSAGE,
     TRIGGER_RATIO,
