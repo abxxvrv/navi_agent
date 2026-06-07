@@ -19,6 +19,7 @@ TRIGGER_RATIO = 0.50
 PROTECT_HEAD_ROUNDS = 3
 PROTECT_TAIL_RATIO = 0.05
 CLEARED_MESSAGE = "[Old tool result content cleared]"
+COMPACTION_PREFIX = "[CONTEXT COMPACTION]"
 MIN_SUMMARY_TOKENS = 2_000
 MAX_SUMMARY_TOKENS = 12_000
 SUMMARY_RATIO = 0.20
@@ -95,8 +96,8 @@ class ContextCompressor:
         # 3. LLM 摘要
         summary = self._generate_summary(pruned_middle)
         summary_message = {
-            "role": "system",
-            "content": f"[CONTEXT COMPACTION]\n\n{summary}",
+            "role": "user",
+            "content": f"{COMPACTION_PREFIX}\n\n{summary}",
         }
 
         # 4. 拼接

@@ -5,11 +5,10 @@ import random
 from collections import defaultdict
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-import operator
 import os
 import time
 from pathlib import Path
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 from .paths import load_navi_dotenv
 from langgraph.graph import END, START, StateGraph
@@ -45,7 +44,7 @@ from .approval import (
 )
 
 class AgentState(TypedDict):
-    messages: Annotated[list[dict[str, Any]], operator.add]
+    messages: list[dict[str, Any]]
 
 
 AgentEventHandler = Callable[[dict[str, Any]], None]
@@ -201,6 +200,7 @@ class AgentRuntime:
             self.session_store._write_meta()
         return ok
 
+    # 清洗历史会话。
     @staticmethod
     def _valid_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         safe_messages: list[dict[str, Any]] = []
@@ -269,7 +269,6 @@ class AgentRuntime:
             }
         # 2. 准备上下文历史
         history = self.conversation_history if keep_history else []
-        history_len = len(history)
         
         # 3. 构造当前用户消息
         user_message = {
@@ -315,11 +314,8 @@ class AgentRuntime:
                         }
                         self.session_store.append_message(cancelled)
 
-            new_messages = self._valid_messages(
-                self.session_store.messages[snapshot_len:]
-            )
-            if keep_history and new_messages:
-                self.conversation_history.extend(new_messages)
+            if keep_history:
+                self.conversation_history = self._valid_messages(self.session_store.messages)
             # 中断的消息和被中断后补发的消息视为同一次用户交互
             self.reviewer.user_message_count -= 1
             raise
@@ -331,8 +327,8 @@ class AgentRuntime:
                 "final_answer": "",
             }
 
-        # 7. 截取当前轮消息
-        current_turn_messages = result["messages"][history_len:]
+        # 7. 取最终状态消息
+        current_turn_messages = result["messages"]
         # 8. 提取最终回答
         final_message = get_final_assistant_message(current_turn_messages)
 
@@ -346,7 +342,7 @@ class AgentRuntime:
 
         # 9. 更新 conversation_history
         if keep_history and final_answer:
-            self.conversation_history.extend(current_turn_messages)
+            self.conversation_history = self._valid_messages(self.session_store.messages)
 
         return { # 返回CLI
             "ok": bool(final_answer),
@@ -392,18 +388,21 @@ class AgentRuntime:
     
     # 构造真正发给模型的 messages
     def _llm_node(self, state: AgentState) -> dict[str, Any]:
-        # 检查是否需要记忆反思
-        if self.reviewer.user_message_count > 0 and self.reviewer.user_message_count % 10 == 0:
-            self.reviewer.spawn_review(state["messages"], "memory")
+        messages = state["messages"]
 
         # 压缩检查
         prompt_tokens = self.last_usage.get("prompt_tokens", 0)
         if self.compressor.should_compress(prompt_tokens):
             try:
-                state["messages"] = self.compressor.compress(
-                    state["messages"],
+                compressed_messages = self.compressor.compress(
+                    [
+                        {"role": "system", "content": self._system_prompt},
+                        *messages,
+                    ],
                     messages_path=self.session_store.messages_path,
                 )
+                self.session_store.messages = compressed_messages
+                messages = self._valid_messages(compressed_messages)
             except Exception as e:
                 if self.on_output:
                     self.on_output(
@@ -412,9 +411,14 @@ class AgentRuntime:
 
         model_messages = [
             {"role": "system", "content": self._system_prompt},
-            *state["messages"],
+            *messages,
         ]
-        starts_after_tool = bool(state["messages"]) and state["messages"][-1].get("role") == "tool"
+
+        # 检查是否需要记忆反思
+        if self.reviewer.user_message_count > 0 and self.reviewer.user_message_count % 10 == 0:
+            self.reviewer.spawn_review(model_messages, "memory")
+
+        starts_after_tool = bool(messages) and messages[-1].get("role") == "tool"
 
         for retry_count in range(self.max_retries_per_step + 1):
             content_parts: list[str] = []
@@ -515,7 +519,7 @@ class AgentRuntime:
                 self.session_store.append_message(assistant_message)
 
                 return {
-                    "messages": [assistant_message]
+                    "messages": [*messages, assistant_message]
                 }
             except Exception as exc:
                 if retry_count >= self.max_retries_per_step:
@@ -644,16 +648,25 @@ class AgentRuntime:
                 self.session_store.append_message(tool_message)
                 executed_messages.append(tool_message)
 
+        tool_messages = failed_messages + rejected_messages + executed_messages
+
         # 更新工具调用轮次计数（并行的一批算一轮）
-        if executed_messages:
+        if tool_messages:
             self.reviewer.tool_turn_count += 1
 
         # 检查是否需要技能反思
         if self.reviewer.tool_turn_count > 0 and self.reviewer.tool_turn_count % 15 == 0:
-            self.reviewer.spawn_review(state["messages"], "skill")
+            self.reviewer.spawn_review(
+                [
+                    {"role": "system", "content": self._system_prompt},
+                    *state["messages"],
+                    *tool_messages,
+                ],
+                "skill",
+            )
 
         return {
-            "messages": failed_messages + rejected_messages + executed_messages,
+            "messages": [*state["messages"], *tool_messages],
         }
 
     # 在工具节点去审批的函数

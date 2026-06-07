@@ -35,17 +35,15 @@ class SubAgentResult:
 
 
 class SubAgent:
-    """轻量子 agent：system_prompt + tools → while 循环直到模型不再调工具。"""
+    """轻量子 agent：messages + tools -> while 循环直到模型不再调工具。"""
 
     def __init__(
         self,
         router: ModelRouter,
-        system_prompt: str,
         tools: list[dict[str, Any]],
         tool_handlers: dict[str, Callable[..., Any]],
     ):
         self.router = router
-        self.system_prompt = system_prompt
         self.tools = tools
         self.tool_handlers = tool_handlers
 
@@ -57,8 +55,6 @@ class SubAgent:
         """同步执行子 agent。"""
         messages: list[dict[str, Any]] = []
 
-        if self.system_prompt:
-            messages.append({"role": "system", "content": self.system_prompt})
         if context_messages:
             messages.extend(context_messages)
         messages.append({"role": "user", "content": user_input})
@@ -166,7 +162,6 @@ class SubAgent:
 
 def prepare_agent(
     router: ModelRouter,
-    system_prompt: str,
     tool_names: list[str],
     tool_registry: ToolRegistry,
 ) -> SubAgent:
@@ -174,7 +169,6 @@ def prepare_agent(
 
     Args:
         router: 复用主 agent 的模型路由。
-        system_prompt: 子 agent 的系统提示词。
         tool_names: 要给子 agent 的工具名列表。空列表 = 无工具（单轮 LLM 调用）。
         tool_registry: 父 agent 的工具注册表。
     """
@@ -197,7 +191,6 @@ def prepare_agent(
 
     return SubAgent(
         router=router,
-        system_prompt=system_prompt,
         tools=tools,
         tool_handlers=handlers,
     )

@@ -70,7 +70,6 @@ class BackgroundReviewer:
 
             agent = prepare_agent(
                 router=self.router,
-                system_prompt="",
                 tool_names=tool_names,
                 tool_registry=self.tool_registry,
             )
