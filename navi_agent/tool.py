@@ -3,6 +3,8 @@ from typing import Any
 import difflib
 import json
 import os
+import platform
+import signal
 import shutil
 import subprocess
 import threading
@@ -518,7 +520,10 @@ class RunCommandTool:
         self.max_timeout = max_timeout
         self.max_output_chars = max_output_chars
         self.on_output = on_output
-        self.bash_path = self._resolve_bash_path()
+        if platform.system() == "Linux":
+            self.bash_path = "/bin/bash"
+        else:
+            self.bash_path = self._resolve_bash_path()
 
         # 打印找到的 git bash 路径
         # print(f"[navi] run_command bash_path={self.bash_path}")
@@ -586,12 +591,19 @@ class RunCommandTool:
                     "shell": "git-bash",
                 }
 
-            proc = subprocess.Popen(
-                [self.bash_path, "-lc", command],
+            popen_kwargs = dict(
                 cwd=str(target_cwd),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
-                creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
+            )
+            if platform.system() == "Windows":
+                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+            else:
+                popen_kwargs["start_new_session"] = True
+
+            proc = subprocess.Popen(
+                [self.bash_path, "-lc", command],
+                **popen_kwargs,
             )
 
             timed_out = False
@@ -643,16 +655,22 @@ class RunCommandTool:
             }
 
     def _kill_process_tree(self, proc: subprocess.Popen) -> None:
-        """杀掉 proc 及其所有子进程（Windows 用 taskkill /T）。"""
-        try:
-            subprocess.run(
-                ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=5,
-            )
-        except Exception:
-            proc.kill()
+        """杀掉 proc 及其所有子进程。"""
+        if platform.system() == "Windows":
+            try:
+                subprocess.run(
+                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=5,
+                )
+            except Exception:
+                proc.kill()
+        else:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+            except Exception:
+                proc.kill()
 
     def _resolve_bash_path(self) -> str | None:
         env_path = os.environ.get("GIT_BASH")

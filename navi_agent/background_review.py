@@ -70,14 +70,14 @@ class BackgroundReviewer:
 
             agent = prepare_agent(
                 router=self.router,
-                system_prompt=prompt,
+                system_prompt="",
                 tool_names=tool_names,
                 tool_registry=self.tool_registry,
             )
 
             result = agent.run(
-                user_input="请审查以上对话，进行必要的更新。",
-                context_messages=messages[-20:] if messages else None,
+                user_input=prompt,
+                context_messages=messages if messages else None,
             )
 
             # 只有实际执行了修改才通知用户
