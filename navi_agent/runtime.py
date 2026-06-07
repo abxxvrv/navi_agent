@@ -101,7 +101,7 @@ class AgentRuntime:
         if resume_session_id:
             session_dir = Path(sessions_root) / resume_session_id
             self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
-            self.semantic_history = self._valid_messages(self.session_store.messages)
+            self.conversation_history = self._valid_messages(self.session_store.messages)
             # resume 时使用会话自己记录的模型
             _provider = self.session_store.meta.get("provider") or _default_provider
             _model = self.session_store.meta.get("model") or _default_model
@@ -115,7 +115,7 @@ class AgentRuntime:
                 provider=_provider,
                 model=_model,
             )
-            self.semantic_history = []
+            self.conversation_history = []
 
         self.tool_registry = ToolRegistry()
         self.memory_store = MemoryStore()
@@ -268,7 +268,8 @@ class AgentRuntime:
                 "final_answer": "",
             }
         # 2. 准备上下文历史
-        base_history = self.semantic_history if keep_history else []
+        history = self.conversation_history if keep_history else []
+        history_len = len(history)
         
         # 3. 构造当前用户消息
         user_message = {
@@ -282,7 +283,7 @@ class AgentRuntime:
 
         # 4. 构造 graph 初始状态
         turn_state: AgentState = {
-            "messages": [*base_history, user_message],
+            "messages": [*history, user_message],
         }
 
         # 5. 执行 graph
@@ -318,7 +319,7 @@ class AgentRuntime:
                 self.session_store.messages[snapshot_len:]
             )
             if keep_history and new_messages:
-                self.semantic_history.extend(new_messages)
+                self.conversation_history.extend(new_messages)
             # 中断的消息和被中断后补发的消息视为同一次用户交互
             self.reviewer.user_message_count -= 1
             raise
@@ -331,7 +332,7 @@ class AgentRuntime:
             }
 
         # 7. 截取当前轮消息
-        current_turn_messages = result["messages"][  len(base_history)  :  ]
+        current_turn_messages = result["messages"][history_len:]
         # 8. 提取最终回答
         final_message = get_final_assistant_message(current_turn_messages)
 
@@ -343,9 +344,9 @@ class AgentRuntime:
 
         final_answer = final_message.get("content", "")
 
-        # 9. 更新 semantic_history
+        # 9. 更新 conversation_history
         if keep_history and final_answer:
-            self.semantic_history.extend(current_turn_messages)
+            self.conversation_history.extend(current_turn_messages)
 
         return { # 返回CLI
             "ok": bool(final_answer),
@@ -409,7 +410,7 @@ class AgentRuntime:
                         f"  ⚠️  上下文压缩失败，跳过: {e}", style="dim yellow"
                     )
 
-        runtime_messages = [
+        model_messages = [
             {"role": "system", "content": self._system_prompt},
             *state["messages"],
         ]
@@ -426,7 +427,7 @@ class AgentRuntime:
             try:
                 # 流式调用模型
                 stream = self.router.chat_stream(
-                    messages=runtime_messages,
+                    messages=model_messages,
                     tools=self._tools_for_api,
                 )
 
