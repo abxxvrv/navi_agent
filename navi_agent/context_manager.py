@@ -1,7 +1,8 @@
 import platform
-import re
 from pathlib import Path
 from typing import Any
+
+from jinja2 import Environment
 
 
 class ContextManager:
@@ -139,43 +140,19 @@ class ContextManager:
         skills_prompt: str,
     ) -> str:
         os_name = platform.system()
-        additional_dirs_info = ""
-
-        def replace_windows_block(match: re.Match[str]) -> str:
-            return match.group(1) if os_name == "Windows" else ""
-
-        def replace_additional_dirs_block(match: re.Match[str]) -> str:
-            return match.group(1) if additional_dirs_info else ""
-
-        rendered = re.sub(
-            r"`?\{% if NAVI_OS == \"Windows\" %\}`?(.*?)`?\{% endif \+?%\}`?",
-            replace_windows_block,
-            template,
-            flags=re.DOTALL,
+        env = Environment(keep_trailing_newline=True)
+        tmpl = env.from_string(template)
+        return tmpl.render(
+            NAVI_OS=os_name,
+            NAVI_SHELL="Git Bash" if os_name == "Windows" else "Bash",
+            NAVI_WORK_DIR=str(self.workspace),
+            NAVI_HOME=str(self.navi_home),
+            NAVI_ADDITIONAL_DIRS_INFO="",
+            NAVI_AGENTS_MD=agents_md,
+            NAVI_SKILLS=skills_prompt,
+            NAVI_MEMORY=self.memory_store.get_text("memory") if self.memory_store else "",
+            NAVI_USER=self.memory_store.get_text("user") if self.memory_store else "",
         )
-        rendered = re.sub(
-            r"`?\{% if NAVI_ADDITIONAL_DIRS_INFO %\}`?(.*?)`?\{% endif %\}`?",
-            replace_additional_dirs_block,
-            rendered,
-            flags=re.DOTALL,
-        )
-
-        replacements = {
-            "${NAVI_OS}": os_name,
-            "${NAVI_SHELL}": "Git Bash",
-            "${NAVI_WORK_DIR}": str(self.workspace),
-            "${NAVI_HOME}": str(self.navi_home),
-            "${NAVI_ADDITIONAL_DIRS_INFO}": additional_dirs_info,
-            "${NAVI_AGENTS_MD}": agents_md,
-            "${NAVI_SKILLS}": skills_prompt,
-            "${NAVI_MEMORY}": self.memory_store.get_text("memory") if self.memory_store else "",
-            "${NAVI_USER}": self.memory_store.get_text("user") if self.memory_store else "",
-        }
-
-        for placeholder, value in replacements.items():
-            rendered = rendered.replace(placeholder, value)
-
-        return rendered
 
     def _parse_skill_frontmatter(self, content: str) -> dict[str, str]:
         metadata = {}
