@@ -100,7 +100,6 @@ class ApprovalManager:
         "read_file",
         "list_dir",
         "list_directory",
-        "search_files",
         "grep",
         "glob",
         "view_file",
@@ -111,6 +110,7 @@ class ApprovalManager:
         "web_search",
         "web_extract",
         "memory",
+        "vision_analyze",
     }
 
     WRITE_TOOLS = {

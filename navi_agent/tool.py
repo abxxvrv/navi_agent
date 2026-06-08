@@ -26,6 +26,15 @@ def resolve_path(workspace: Path, path: str) -> Path:
     return resolved
 
 
+def format_result_path(workspace: Path, path: Path | str) -> str:
+    """返回工具结果路径：工作区内用相对路径，工作区外用绝对路径。"""
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(workspace))
+    except ValueError:
+        return str(resolved)
+
+
 def make_unified_diff(old_text: str, new_text: str, path: str) -> str:
     return "".join(
         difflib.unified_diff(
@@ -106,7 +115,7 @@ class ListDirTool:
 
         return {
             "ok": True,
-            "path": str(target),
+            "path": format_result_path(self.workspace, target),
             "items": items,
             "count": len(items),
             "truncated": len(items) >= max_items,
@@ -141,6 +150,19 @@ class ReadFileTool:
                 "ok": False,
                 "error": "路径不是文件。",
                 "path": path,
+            }
+
+        # 图片文件：提示使用 vision_analyze
+        _IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
+        if target.suffix.lower() in _IMAGE_EXTENSIONS:
+            return {
+                "ok": False,
+                "error": (
+                    f"图片文件无法以文本方式读取。"
+                    f"请使用 vision_analyze 工具来分析此图片：image_path=\"{path}\""
+                ),
+                "path": path,
+                "hint": "vision_analyze",
             }
 
         if start_line < 1:
@@ -207,7 +229,7 @@ class ReadFileTool:
 
         return {
             "ok": True,
-            "path": str(target),
+            "path": format_result_path(self.workspace, target),
             "start_line": start_line,
             "end_line": end_line,
             "content": numbered_content,
@@ -251,7 +273,7 @@ class WriteFileTool:
 
             target.parent.mkdir(parents=True, exist_ok=True)
 
-            relative_path = str(target)
+            result_path = format_result_path(self.workspace, target)
             if target.exists():
                 try:
                     old_content = target.read_text(encoding=encoding)
@@ -271,13 +293,13 @@ class WriteFileTool:
                 f.write(content)
 
             new_content = target.read_text(encoding=encoding)
-            diff = make_unified_diff(old_content, new_content, relative_path)
+            diff = make_unified_diff(old_content, new_content, result_path)
             added_lines, removed_lines = count_diff_lines(diff)
             diff, diff_truncated = truncate_diff(diff)
 
             return {
                 "ok": True,
-                "path": relative_path,
+                "path": result_path,
                 "mode": mode,
                 "bytes_written": len(content.encode(encoding)),
                 "changed": old_content != new_content,
@@ -379,8 +401,8 @@ class PatchTool:
                 replacements = 1
 
             # 10. 生成 diff，方便用户检查改了什么
-            relative_path = str(target)
-            diff = make_unified_diff(original_text, patched_text, relative_path)
+            result_path = format_result_path(self.workspace, target)
+            diff = make_unified_diff(original_text, patched_text, result_path)
             added_lines, removed_lines = count_diff_lines(diff)
 
             # 11. 写回文件
@@ -401,7 +423,7 @@ class PatchTool:
 
             return {
                 "ok": True,
-                "path": relative_path,
+                "path": result_path,
                 "replacements": replacements,
                 "bytes_written": len(patched_text.encode(encoding)),
                 "changed": original_text != verified_text,
@@ -771,18 +793,15 @@ class GlobTool:
         self,
         pattern: str,
         path: str = ".",
-        include_dirs: bool = True,
+        include_dirs: bool = False,
+        include_hidden: bool = False,
+        limit: int = 100,
     ) -> dict:
         if not pattern or not pattern.strip():
             return {"ok": False, "error": "pattern 不能为空。"}
 
         pattern = pattern.strip()
-
-        if pattern.startswith("**"):
-            return {
-                "ok": False,
-                "error": "pattern 不能以 ** 开头，请用更具体的模式如 src/**/*.py。",
-            }
+        limit = min(limit, self.MAX_MATCHES)
 
         try:
             target = resolve_path(self.workspace, path)
@@ -795,6 +814,12 @@ class GlobTool:
         if not target.is_dir():
             return {"ok": False, "error": f"不是目录: {path}", "path": path}
 
+        if pattern.startswith("**") and target == self.workspace:
+            return {
+                "ok": False,
+                "error": "从默认工作区根目录搜索时 pattern 不能以 ** 开头，请用更具体的模式如 src/**/*.py，或通过 path 指定搜索目录。",
+            }
+
         try:
             matches = sorted(target.glob(pattern))
         except Exception as exc:
@@ -803,14 +828,21 @@ class GlobTool:
         if not include_dirs:
             matches = [p for p in matches if p.is_file()]
 
-        truncated = len(matches) > self.MAX_MATCHES
+        if not include_hidden:
+            matches = [
+                p
+                for p in matches
+                if not any(part.startswith(".") for part in p.relative_to(target).parts)
+            ]
+
+        truncated = len(matches) > limit
         if truncated:
-            matches = matches[: self.MAX_MATCHES]
+            matches = matches[:limit]
 
         files = []
         for p in matches:
-            rel = str(p.relative_to(self.workspace))
-            entry = {"path": rel, "type": "directory" if p.is_dir() else "file"}
+            result_path = format_result_path(self.workspace, p)
+            entry = {"path": result_path, "type": "directory" if p.is_dir() else "file"}
             if p.is_file():
                 try:
                     entry["size"] = p.stat().st_size
@@ -828,7 +860,7 @@ class GlobTool:
         }
 
 
-class SearchFilesTool:
+class GrepTool:
     """全文搜索工具，优先用 ripgrep，fallback 到纯 Python。"""
 
     def __init__(self, workspace: str):
@@ -840,8 +872,15 @@ class SearchFilesTool:
         path: str = ".",
         glob: str = "",
         limit: int = 30,
-        context_lines: int = 0,
+        context_lines: int = 3,
     ) -> dict:
+        if not isinstance(query, str) or not query.strip():
+            return {"ok": False, "error": "query 不能为空。"}
+
+        query = query.strip()
+        limit = min(max(limit, 1), 100)
+        context_lines = min(max(context_lines, 0), 5)
+
         try:
             target = resolve_path(self.workspace, path)
         except ValueError as exc:
@@ -882,7 +921,7 @@ class SearchFilesTool:
 
             if etype == "context" and context_lines > 0:
                 data = entry["data"]
-                rel = str(Path(data["path"]["text"]))
+                rel = format_result_path(self.workspace, Path(data["path"]["text"]))
                 pending_context.append((rel, data["line_number"],
                                         data["lines"]["text"].rstrip("\n")))
 
@@ -890,7 +929,7 @@ class SearchFilesTool:
                 if len(matches) >= limit:
                     break
                 data = entry["data"]
-                rel = str(Path(data["path"]["text"]))
+                rel = format_result_path(self.workspace, Path(data["path"]["text"]))
                 mline = data["line_number"]
                 m = {"path": rel, "line": mline,
                      "content": data["lines"]["text"].rstrip("\n")}
@@ -906,7 +945,7 @@ class SearchFilesTool:
             elif etype == "end" and context_lines > 0:
                 data = entry.get("data", {})
                 if data.get("path"):
-                    rel = str(Path(data["path"]["text"]))
+                    rel = format_result_path(self.workspace, Path(data["path"]["text"]))
                     for m in reversed(matches):
                         if m["path"] == rel and "context_after" in m:
                             for p, l, c in pending_context:
@@ -945,7 +984,7 @@ class SearchFilesTool:
             lines = text.splitlines()
             for i, line in enumerate(lines):
                 if pattern.search(line):
-                    rel = str(fpath)
+                    rel = format_result_path(self.workspace, fpath)
                     entry = {"path": rel, "line": i + 1, "content": line}
                     if context_lines > 0:
                         s = max(0, i - context_lines)
@@ -1201,3 +1240,199 @@ class TavilyExtractTool:
             "content": content,
             "content_length": len(content),
         }
+
+
+class VisionAnalyzeTool:
+    """图片理解工具（Hermes 双路径模式）。
+
+    - 主模型支持多模态 → 图片作为 tool result 直接返回，主模型自己看
+    - 主模型不支持多模态 → 调用辅助视觉模型分析图片，返回文字描述
+    """
+
+    MIME_MAP = {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".gif": "image/gif",
+        ".webp": "image/webp",
+        ".bmp": "image/bmp",
+    }
+
+    def __init__(self, workspace: Path, config_path: Path, session_meta: dict):
+        self.workspace = workspace
+        self.session_meta = session_meta
+        self.config_path = config_path
+        # 辅助视觉配置只需读一次（不随会话变化）
+        self.aux_config = self._load_aux_config(config_path)
+
+    @staticmethod
+    def _load_aux_config(config_path: Path) -> dict:
+        """读取辅助视觉模型配置（全局固定，不随会话变化）。"""
+        try:
+            cfg = json.loads(config_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        aux = cfg.get("auxiliary", {}).get("vision", {})
+        if not aux.get("base_url"):
+            mimo = cfg.get("providers", {}).get("mimo", {})
+            aux.setdefault("base_url", mimo.get("base_url", ""))
+            aux.setdefault("api_key", mimo.get("api_key", ""))
+        if not aux.get("model"):
+            aux["model"] = "mimo-v2.5"
+        return aux
+
+    def _main_supports_vision(self) -> bool:
+        """实时读取当前主模型是否支持多模态（反映 /model 切换）。"""
+        provider = self.session_meta.get("provider", "")
+        model = self.session_meta.get("model", "")
+        if not provider or not model:
+            # session meta 没有则 fallback 到 config.json
+            try:
+                cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+                provider = cfg.get("default_provider", "")
+                model = cfg.get("default_model", "")
+            except Exception:
+                return False
+        else:
+            try:
+                cfg = json.loads(self.config_path.read_text(encoding="utf-8"))
+            except Exception:
+                return False
+        model_info = (
+            cfg.get("providers", {}).get(provider, {}).get("models", {}).get(model, {})
+        )
+        return model_info.get("multimodal", False)
+
+    def _load_image(self, image_path: str) -> tuple[str, str] | tuple[None, str]:
+        """加载图片并返回 (data_url, error)。"""
+        import base64
+
+        if image_path.startswith(("http://", "https://")):
+            import urllib.request
+            try:
+                req = urllib.request.Request(image_path)
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    raw = resp.read()
+                content_type = resp.headers.get("Content-Type", "")
+                if "png" in content_type:
+                    mime = "image/png"
+                elif "webp" in content_type:
+                    mime = "image/webp"
+                elif "gif" in content_type:
+                    mime = "image/gif"
+                else:
+                    mime = "image/jpeg"
+                b64 = base64.b64encode(raw).decode("utf-8")
+                return f"data:{mime};base64,{b64}", ""
+            except Exception as exc:
+                return None, f"下载图片失败: {exc}"
+        else:
+            p = Path(image_path)
+            file_path = p.resolve() if p.is_absolute() else (self.workspace / p).resolve()
+            if not file_path.exists():
+                return None, f"文件不存在: {file_path}"
+            suffix = file_path.suffix.lower()
+            mime_type = self.MIME_MAP.get(suffix)
+            if not mime_type:
+                return None, f"不支持的图片格式: {suffix}。支持: {', '.join(self.MIME_MAP.keys())}"
+            try:
+                with open(file_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("utf-8")
+                return f"data:{mime_type};base64,{b64}", ""
+            except Exception as exc:
+                return None, f"读取图片失败: {exc}"
+
+    def _call_auxiliary_vision(self, image_data_url: str, prompt: str) -> dict:
+        """调用辅助视觉模型分析图片，返回文字描述。"""
+        import urllib.request
+        import urllib.error
+
+        base_url = self.aux_config.get("base_url", "").rstrip("/")
+        api_key = self.aux_config.get("api_key", "")
+        model = self.aux_config.get("model", "mimo-v2.5")
+
+        if not base_url or not api_key:
+            return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 或 providers.mimo）。"}
+
+        # 拼接 prompt（Hermes 模式）
+        if prompt and prompt.strip() != "请描述这张图片的内容":
+            full_prompt = (
+                "Fully describe and explain everything about this image, "
+                "then answer the following question:\n\n" + prompt
+            )
+        else:
+            full_prompt = (
+                "Describe this image in detail. Include all visible text, "
+                "objects, layout, colors, and any other relevant information."
+            )
+
+        payload = {
+            "model": model,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "image_url", "image_url": {"url": image_data_url}},
+                        {"type": "text", "text": full_prompt},
+                    ],
+                }
+            ],
+            "max_completion_tokens": 2048,
+        }
+
+        try:
+            body = json.dumps(payload).encode("utf-8")
+            req = urllib.request.Request(
+                f"{base_url}/chat/completions",
+                data=body,
+                headers={"Content-Type": "application/json", "api-key": api_key},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            choices = data.get("choices", [])
+            if not choices:
+                return {"ok": False, "error": "辅助视觉模型未返回结果。", "raw": data}
+
+            return {
+                "ok": True,
+                "content": choices[0].get("message", {}).get("content", ""),
+                "model": data.get("model", model),
+                "usage": data.get("usage", {}),
+            }
+        except urllib.error.HTTPError as exc:
+            error_body = ""
+            try:
+                error_body = exc.read().decode("utf-8", errors="replace")
+            except Exception:
+                pass
+            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "detail": error_body}
+        except urllib.error.URLError as exc:
+            return {"ok": False, "error": f"网络错误: {exc.reason}"}
+        except Exception as exc:
+            return {"ok": False, "error": str(exc)}
+
+    def __call__(
+        self,
+        image_path: str,
+        prompt: str = "请描述这张图片的内容",
+    ) -> dict[str, Any]:
+        if not image_path or not image_path.strip():
+            return {"ok": False, "error": "image_path 不能为空。"}
+
+        image_data_url, err = self._load_image(image_path.strip())
+        if err:
+            return {"ok": False, "error": err}
+
+        # 路径 1：主模型支持多模态 → 图片注入 user message，主模型直接看
+        if self._main_supports_vision():
+            return {
+                "ok": True,
+                "content": prompt,
+                "_multimodal": True,
+                "_image_data_url": image_data_url,
+            }
+
+        # 路径 2：调用辅助视觉模型
+        return self._call_auxiliary_vision(image_data_url, prompt)

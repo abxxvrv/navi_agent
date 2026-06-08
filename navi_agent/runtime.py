@@ -21,14 +21,15 @@ from .paths import get_config_path, get_navi_home
 from .session_store import SessionStore
 from .tool import (
     GlobTool,
+    GrepTool,
     ListDirTool,
     PatchTool,
     ReadFileTool,
     RunCommandTool,
-    SearchFilesTool,
     SkillViewTool,
     TavilyExtractTool,
     TavilySearchTool,
+    VisionAnalyzeTool,
     WriteFileTool,
 )
 from .tool_registry import ToolRegistry
@@ -638,17 +639,55 @@ class AgentRuntime:
                     call_id, result, name, args = future.result()
                     results[call_id] = (call_id, result, name, args)
 
+            # 收集多模态图片，稍后注入 user message
+            pending_images: list[dict] = []
+
             for call_id, tool_name, tool_args in to_execute:
                 _, tool_result, _, _ = results[call_id]
+                # 多模态工具结果：tool message 只放文字，图片收集起来
+                if isinstance(tool_result, dict) and tool_result.get("_multimodal"):
+                    image_data_url = tool_result.get("_image_data_url", "")
+                    text_content = tool_result.get("content", "")
+                    tool_content = json.dumps(
+                        {
+                            "ok": True,
+                            "content": (
+                                "Image loaded into context. "
+                                "The image has been attached in the next user message — "
+                                "you can see it directly. "
+                                f"User request: {text_content}"
+                            ),
+                        },
+                        ensure_ascii=False,
+                    )
+                    pending_images.append({
+                        "prompt": text_content,
+                        "image_data_url": image_data_url,
+                    })
+                else:
+                    tool_content = json.dumps(tool_result, ensure_ascii=False)
                 tool_message = {
                     "role": "tool",
                     "tool_call_id": call_id,
-                    "content": json.dumps(tool_result, ensure_ascii=False),
+                    "content": tool_content,
                 }
                 self.session_store.append_message(tool_message)
                 executed_messages.append(tool_message)
 
         tool_messages = failed_messages + rejected_messages + executed_messages
+
+        # 多模态图片注入：在 tool messages 之后插入 user message，让主模型看到图片
+        if pending_images:
+            user_content: list[dict] = []
+            for img in pending_images:
+                user_content.append({"type": "text", "text": img["prompt"]})
+                user_content.append({
+                    "type": "image_url",
+                    "image_url": {"url": img["image_data_url"]},
+                })
+            injected_msg = {"role": "user", "content": user_content}
+            self.session_store.append_message(injected_msg)
+            tool_messages.append(injected_msg)
 
         # 更新工具调用轮次计数（并行的一批算一轮）
         if tool_messages:
@@ -757,7 +796,9 @@ class AgentRuntime:
         # list_dir
         self.tool_registry.register(
             name="list_dir",
-            description="列出工作区内指定路径下的文件和目录。",
+            description="""
+- 列出工作区内指定路径下的文件和目录。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -787,20 +828,21 @@ class AgentRuntime:
         # read_file
         self.tool_registry.register(
             name="read_file",
-            description=(
-                "读取文本文件内容。只用于文本文件；无法读取图片、视频或其他二进制文件例如.docx，.pdf"
-                "读取结果会像 cat -n 一样在每一行前加上行号。"
-                "默认且最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。"
-                "不确定文件长度时，直接使用默认值 1000 行即可，不需要分多次读取。"
-                "本工具很适合并行调用，应该先并行调用 search_files 确定要读内容，然后并行阅读"
-                "单行超过 2000 字符会被截断并用 ... 标记，截断的行号会在 truncated_lines 中返回。"
-                "如果只需要文件的一部分，使用 start_line 和 max_lines。"
-                "如果要搜索内容或模式，优先使用 search_files，而不是直接读取整文件。"
-                "配合 search_files 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。"
-                "工具结果会返回 start_line、end_line、content、truncated 和 truncated_lines；如果读取失败会返回错误。"
-                "truncated=false 表示本次读取没有因为 max_lines 或 max_chars 提前停止；如果 end_line 已覆盖目标行，应复用已有内容，不要重复读取。"
-                "truncated=true 表示结果被行数或字符数限制截断，需要按 end_line 继续读取后续内容。"
-            ),
+            description="""
+- 读取文本文件内容。只用于文本文件；无法读取图片、视频或其他二进制文件例如 .docx、.pdf。
+- 如果读取到图片文件（PNG、JPG、GIF、WebP、BMP），会返回错误提示，请转用 vision_analyze 工具。
+- 读取结果会像 cat -n 一样在每一行前加上行号。
+- 默认且最多读取 1000 行，总返回内容最多 100KB；每一行内容最多保留 2000 字符。
+- 不确定文件长度时，直接使用默认值 1000 行即可，不需要分多次读取。
+- 本工具很适合并行调用，应该先并行调用 grep 确定要读内容，然后并行阅读。
+- 单行超过 2000 字符会被截断并用 ... 标记，截断的行号会在 truncated_lines 中返回。
+- 如果只需要文件的一部分，使用 start_line 和 max_lines。
+- 如果要搜索内容或模式，优先使用 grep，而不是直接读取整文件。
+- 配合 grep 使用时，将搜索结果中的 line 作为 start_line 直接跳转到匹配位置。
+- 工具结果会返回 start_line、end_line、content、truncated 和 truncated_lines；如果读取失败会返回错误。
+- truncated=false 表示本次读取没有因为 max_lines 或 max_chars 提前停止；如果 end_line 已覆盖目标行，应复用已有内容，不要重复读取。
+- truncated=true 表示结果被行数或字符数限制截断，需要按 end_line 继续读取后续内容。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -837,13 +879,13 @@ class AgentRuntime:
         # write_file
         self.tool_registry.register(
             name="write_file",
-            description=(
-                "向文本文件写入内容。"
-                "提示：如果文件不存在会创建文件；如果父目录不存在会自动创建。"
-                "写代码到文件时必须使用此工具，不要把回复里的代码当作实际写入。"
-                "修改已有文件时，尽可能优先使用 patch_file；只有创建新文件、追加内容或完整重写文件时才使用 write_file。"
-                "该工具会返回 changed、added_lines、removed_lines 和 diff，便于检查实际改动。"
-            ),
+            description="""
+- 向文本文件写入内容。
+- 如果文件不存在会创建文件；如果父目录不存在会自动创建。
+- 写代码到文件时必须使用此工具，不要把回复里的代码当作实际写入。
+- 修改已有文件时，尽可能优先使用 patch_file；只有创建新文件、追加内容或完整重写文件时才使用 write_file。
+- 该工具会返回 changed、added_lines、removed_lines 和 diff，便于检查实际改动。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -873,14 +915,14 @@ class AgentRuntime:
         # patch_file
         self.tool_registry.register(
             name="patch_file",
-            description=(
-                "在已有文本文件中替换特定字符串。"
-                "提示：使用该工具对已有文件进行定向修改。"
-                "old_text 必须精确匹配，包括空格和缩进。可以适当多一些内容以保证匹配唯一。"
-                "默认要求 old_text 在文件中唯一；如果出现多个匹配结果会失败，除非明确设置 replace_all=true。"
-                "如果是创建新文件、追加内容或完整重写文件，请使用 write_file。"
-                "该工具会返回 changed、replacements、added_lines、removed_lines 和 diff，便于检查实际改动。"
-            ),
+            description="""
+- 在已有文本文件中替换特定字符串。
+- 使用该工具对已有文件进行定向修改。
+- old_text 必须精确匹配，包括空格和缩进。可以适当多一些内容以保证匹配唯一。
+- 默认要求 old_text 在文件中唯一；如果出现多个匹配结果会失败，除非明确设置 replace_all=true。
+- 如果是创建新文件、追加内容或完整重写文件，请使用 write_file。
+- 该工具会返回 changed、replacements、added_lines、removed_lines 和 diff，便于检查实际改动。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -915,10 +957,10 @@ class AgentRuntime:
         # skill_view
         self.tool_registry.register(
             name="skill_view",
-            description=(
-                "本工具可以查看指定技能的 SKILL.md 内容"
-                "当你要调用某个技能或者非常需要查看具体的技能文件时使用。"
-            ),
+            description="""
+- 本工具可以查看指定技能的 SKILL.md 内容。
+- 当你要调用某个技能或者非常需要查看具体的技能文件时使用。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -938,15 +980,14 @@ class AgentRuntime:
         # skill_manage
         self.tool_registry.register(
             name="skill_manage",
-            description=(
-                "管理技能文件：列出所有技能、查看某个技能的完整内容、"
-                "或创建/更新技能。只能在 skills/ 目录下操作。\n\n"
-                "三种操作：\n"
-                "- action=\"list\"：列出所有可用技能（名称 + 简介）\n"
-                "- action=\"read\"：读取指定技能的完整 SKILL.md 内容，需要 name 参数\n"
-                "- action=\"write\"：创建或更新技能，需要 name 和 content 参数。"
-                "content 必须是完整的 SKILL.md（含 YAML frontmatter）"
-            ),
+            description="""
+- 管理技能文件：列出所有技能、查看某个技能的完整内容，或创建/更新技能。
+- 只能在 skills/ 目录下操作。
+- action="list"：列出所有可用技能（名称 + 简介）。
+- action="read"：读取指定技能的完整 SKILL.md 内容，需要 name 参数。
+- action="write"：创建或更新技能，需要 name 和 content 参数。
+- content 必须是完整的 SKILL.md（含 YAML frontmatter）。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -972,14 +1013,14 @@ class AgentRuntime:
         # run_command
         self.tool_registry.register(
             name="run_command",
-            description=(
-                "使用 Git Bash 运行短时间、非交互式的 Bash 命令。"
-                "提示：写完代码后，使用该工具运行测试、检查语法或查看错误信息。"
-                "命令应使用 Bash 语法，不是 PowerShell 或 cmd 语法。"
-                "该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。"
-                "不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。"
-                "对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。"
-            ),
+            description="""
+- 可以运行短时间、非交互式的 Bash 命令。
+- 写完代码后，使用该工具运行测试、检查语法或查看错误信息。
+- 命令应使用 Bash 语法，不是 PowerShell 或 cmd 语法。
+- 该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。
+- 不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。
+- 对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1012,27 +1053,18 @@ class AgentRuntime:
         # glob
         self.tool_registry.register(
             name="glob",
-            description=(
-                "使用 glob 模式查找文件和目录。"
-                "本工具很适合并行调用"
-                "When to use: 查找匹配特定模式的文件（如所有 Python 文件 '*.py'）；"
-                "在子目录中递归搜索文件（如 'src/**/*.js'）；"
-                "定位配置文件（如 '*.config.*'、'*.json'）；"
-                "查找测试文件（如 'test_*.py'、'*_test.go'）。"
-                "Example patterns: '*.py'（当前目录所有 Python 文件）、"
-                "'src/**/*.js'（src 目录下所有 JS 文件递归）、"
-                "'test_*.py'（以 test_ 开头的 Python 文件）、"
-                "'*.{py,js}'（多种扩展名）。"
-                "Bad patterns: 以 ** 开头的模式会被拒绝，因为会递归搜索所有目录导致结果过大，"
-                "请用更具体的模式如 'src/**/*.py'。"
-                "如果要搜索文件内容，请使用 search_files。"
-            ),
+            description="""
+- 快速的文件模式匹配工具，适用于任意规模的代码库
+- 支持 glob 模式，如 "src/**/*.ts"。从默认工作区根目录搜索时会拒绝 "**/*.py"，请写成更具体的 "navi_agent/**/*.py"，或指定 path: "navi_agent", pattern: "**/*.py"。
+- 返回匹配的文件路径
+- 当你需要按文件名模式查找文件时使用此工具
+""",
             parameters={
                 "type": "object",
                 "properties": {
                     "pattern": {
                         "type": "string",
-                        "description": "glob 匹配模式，如 '*.py'、'src/**/*.ts'。不能以 ** 开头。",
+                        "description": "glob 匹配模式，如 '*.py'、'src/**/*.ts'。从默认工作区根目录搜索时不能以 ** 开头。",
                     },
                     "path": {
                         "type": "string",
@@ -1041,8 +1073,20 @@ class AgentRuntime:
                     },
                     "include_dirs": {
                         "type": "boolean",
-                        "description": "结果是否包含目录。默认 true。",
-                        "default": True,
+                        "description": "结果是否包含目录。默认 false。",
+                        "default": False,
+                    },
+                    "include_hidden": {
+                        "type": "boolean",
+                        "description": "结果是否包含隐藏文件或隐藏目录。默认 false。",
+                        "default": False,
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "最多返回的匹配数量。默认 100，最大 1000。",
+                        "default": 100,
+                        "minimum": 1,
+                        "maximum": 1000,
                     },
                 },
                 "required": ["pattern"],
@@ -1050,63 +1094,62 @@ class AgentRuntime:
             function=GlobTool(workspace=workspace),
         )
 
-        # search_files
+        # grep
         self.tool_registry.register(
-            name="search_files",
-            description=(
-                "在文件中搜索特定内容或模式。"
-                "本工具很适合并行使用，可以与 read_file 搭配，先并行搜索，再并行阅读"
-                "提示：搜索内容时优先使用该工具，而不是 read_file。"
-                "支持关键词和正则表达式，可用于查找函数定义、变量引用、错误信息、TODO 注释等。"
-                "使用 path 缩小搜索范围，使用 glob 过滤文件名，例如 '*.py' 或 '*.js'。"
-                "使用 context_lines 返回匹配行前后上下文；搜索结果中的 line 可作为 read_file 的 start_line。"
-            ),
+            name="grep",
+            description="""
+- 一个基于 ripgrep 构建的强大搜索工具
+- 始终使用 grep 进行搜索任务。绝不要通过 Bash 命令调用 `grep` 或 `rg`。grep 工具已针对正确的权限和访问进行了优化。
+- 支持完整的正则表达式语法（如 "log.*Error"、"function\\s+\\w+"）
+- 使用 glob 参数（如 "*.js"、"**/*.tsx"）
+- 输出模式："context_lines" 显示匹配行
+""",
             parameters={
                 "type": "object",
                 "properties": {
                     "query": {
                         "type": "string",
-                        "description": "搜索关键词或正则表达式。",
+                        "description": "搜索关键词或正则表达式。不可为空。",
                     },
                     "path": {
                         "type": "string",
-                        "description": "搜索的起始目录，相对于工作区。默认 '.'。",
+                        "description": "搜索的起始目录，相对于工作区。默认 '.'。工作区外的文件请使用绝对路径。",
                         "default": ".",
                     },
                     "glob": {
                         "type": "string",
-                        "description": "文件名过滤，如 '*.py'、'*.js'。留空搜索所有文件。",
+                        "description": "文件名过滤，支持 glob 模式，如 '*.py'、'*.js'。留空表示搜索所有文件。",
                         "default": "",
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "最多返回多少条匹配。默认 30。",
+                        "description": "最多返回多少条匹配。默认 30，最小 1，最大 100",
                         "default": 30,
                         "minimum": 1,
                         "maximum": 100,
                     },
                     "context_lines": {
                         "type": "integer",
-                        "description": "匹配行前后各显示几行上下文。默认 0。",
-                        "default": 0,
+                        "description": "匹配行前后各显示几行上下文。默认 3，最小 0，最大 5",
+                        "default": 3,
                         "minimum": 0,
                         "maximum": 5,
                     },
                 },
                 "required": ["query"],
             },
-            function=SearchFilesTool(workspace=workspace),
+            function=GrepTool(workspace=workspace),
         )
 
         # web_search
         self.tool_registry.register(
             name="web_search",
-            description=(
-                "搜索互联网，获取实时网页信息。"
-                "当你需要查找最新的技术文档、库的用法、新闻、或其他网络上才能找到的信息时使用。"
-                "返回结构化的搜索结果，包含标题、URL、内容摘要和 AI 生成的答案。"
-                "支持指定搜索深度（basic/advanced）、结果数量、域名过滤等。"
-            ),
+            description="""
+- 搜索互联网，获取实时网页信息。
+- 当你需要查找最新的技术文档、库的用法、新闻、或其他网络上才能找到的信息时使用。
+- 返回结构化的搜索结果，包含标题、URL、内容摘要和 AI 生成的答案。
+- 支持指定搜索深度（basic/advanced）、结果数量、域名过滤等。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1151,11 +1194,11 @@ class AgentRuntime:
         # web_extract
         self.tool_registry.register(
             name="web_extract",
-            description=(
-                "提取指定 URL 的网页内容。"
-                "当你需要读取某个网页的具体内容时使用，返回 Clean Markdown 格式的正文。"
-                "支持 basic（快速）和 advanced（深度，会渲染 JS）两种提取深度。"
-            ),
+            description="""
+- 提取指定 URL 的网页内容。
+- 当你需要读取某个网页的具体内容时使用，返回 Clean Markdown 格式的正文。
+- 支持 basic（快速）和 advanced（深度，会渲染 JS）两种提取深度。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1194,18 +1237,16 @@ class AgentRuntime:
 
         self.tool_registry.register(
             name="memory",
-            description=(
-                "管理持久化记忆，跨会话保留。\n\n"
-                "两个存储目标：\n"
-                "- memory: 你的笔记（环境事实、项目约定、工具特性、经验教训）\n"
-                "- user: 用户画像（用户偏好、沟通风格、工作习惯、技术栈）\n\n"
-                "三种操作：\n"
-                "- add: 添加一条新记忆\n"
-                "- replace: 更新已有记忆（用 old_text 定位，用 content 替换）\n"
-                "- remove: 删除已有记忆（用 old_text 定位）\n\n"
-                "何时保存：用户纠正你、用户分享偏好、你发现环境事实、你学到经验教训。\n"
-                "不要保存：任务进度、临时状态、容易重新发现的信息。"
-            ),
+            description="""
+- 管理持久化记忆，跨会话保留。
+- 存储目标 memory：你的笔记（环境事实、项目约定、工具特性、经验教训）。
+- 存储目标 user：用户画像（用户偏好、沟通风格、工作习惯、技术栈）。
+- action="add"：添加一条新记忆。
+- action="replace"：更新已有记忆（用 old_text 定位，用 content 替换）。
+- action="remove"：删除已有记忆（用 old_text 定位）。
+- 何时保存：用户纠正你、用户分享偏好、你发现环境事实、你学到经验教训。
+- 不要保存：任务进度、临时状态、容易重新发现的信息。
+""",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1231,4 +1272,35 @@ class AgentRuntime:
                 "required": ["action", "target"],
             },
             function=memory_tool,
+        )
+
+        # vision_analyze
+        self.tool_registry.register(
+            name="vision_analyze",
+            description="""
+- 识别图片并返回文本内容。支持本地图片文件和图片 URL。
+- 当用户提到图片、截图、照片，或 read_file 返回 hint="vision_analyze" 时，使用此工具分析图片。
+- 支持格式：JPEG、PNG、GIF、WebP、BMP。
+- 可选传入 prompt 指定对图片的提问，默认描述图片全部内容。
+""",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "image_path": {
+                        "type": "string",
+                        "description": "图片路径（本地文件路径或公网可访问的图片 URL）。",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "对图片的提问或指令，默认 '请描述这张图片的内容'。",
+                        "default": "请描述这张图片的内容",
+                    },
+                },
+                "required": ["image_path"],
+            },
+            function=VisionAnalyzeTool(
+                workspace=self.workspace,
+                config_path=get_config_path(),
+                session_meta=self.session_store.meta,
+            ),
         )
