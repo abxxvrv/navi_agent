@@ -6,6 +6,7 @@ import json
 from typing import Any, Callable, TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from .agent_store import AgentInstanceStore
     from .model_router import ModelRouter
     from .tool_registry import ToolRegistry
 
@@ -42,10 +43,17 @@ class SubAgent:
         router: ModelRouter,
         tools: list[dict[str, Any]],
         tool_handlers: dict[str, Callable[..., Any]],
+        system_prompt: str | None = None,
+        agent_id: str | None = None,
+        store: AgentInstanceStore | None = None,
     ):
         self.router = router
         self.tools = tools
         self.tool_handlers = tool_handlers
+        self.system_prompt = system_prompt
+        self.agent_id = agent_id
+        self.store = store
+        self.context: list[dict[str, Any]] = []
 
     def run(
         self,
@@ -55,12 +63,18 @@ class SubAgent:
         """同步执行子 agent。"""
         messages: list[dict[str, Any]] = []
 
-        if context_messages:
+        if self.system_prompt:
+            messages.append({"role": "system", "content": self.system_prompt})
+        if self.context:
+            messages.extend(self.context)
+        elif context_messages:
             messages.extend(context_messages)
         messages.append({"role": "user", "content": user_input})
 
         all_tool_calls: list[dict[str, Any]] = []
         steps = 0
+        # 记住本轮对话的起始位置，只持久化本轮新增部分
+        new_turn_start = len(messages)
 
         while True:
             steps += 1
@@ -70,6 +84,9 @@ class SubAgent:
 
             # 没有 tool_calls → 结束
             if not tool_calls:
+                # 只保存本轮新增的对话（不含 system prompt、context_messages、旧 context）
+                self.context = [m for m in messages[new_turn_start:] if m.get("role") != "system"]
+                self._persist()
                 return SubAgentResult(
                     content=content,
                     tool_calls_made=all_tool_calls,
@@ -110,6 +127,12 @@ class SubAgent:
                     "args": tc_args,
                     "result": result,
                 })
+
+    def _persist(self) -> None:
+        """持久化上下文到 store。"""
+        if self.store and self.agent_id:
+            self.store.save_context(self.agent_id, self.context)
+            self.store.update_meta(self.agent_id, status="completed")
 
     def _call_llm(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         """流式调用 LLM，返回 (content, tool_calls)。"""
@@ -164,6 +187,9 @@ def prepare_agent(
     router: ModelRouter,
     tool_names: list[str],
     tool_registry: ToolRegistry,
+    system_prompt: str | None = None,
+    agent_id: str | None = None,
+    store: AgentInstanceStore | None = None,
 ) -> SubAgent:
     """从父 ToolRegistry 按名字取工具，构造 SubAgent。
 
@@ -171,7 +197,23 @@ def prepare_agent(
         router: 复用主 agent 的模型路由。
         tool_names: 要给子 agent 的工具名列表。空列表 = 无工具（单轮 LLM 调用）。
         tool_registry: 父 agent 的工具注册表。
+        system_prompt: 子 agent 的系统提示词，None = 无。
+        agent_id: 恢复已有实例的 ID，None = 新建。
+        store: 实例存储，传入时启用持久化。
     """
+    # 恢复模式：从 store 加载 meta 和 context
+    if agent_id and store:
+        meta = store.get_meta(agent_id)
+        if meta is None:
+            raise FileNotFoundError(f"Agent instance not found: {agent_id}")
+        if meta.get("system_prompt") is not None:
+            system_prompt = meta["system_prompt"]
+        if meta.get("tool_names") is not None:
+            tool_names = meta["tool_names"]
+        context = store.load_context(agent_id)
+    else:
+        context = []
+
     tools: list[dict[str, Any]] = []
     handlers: dict[str, Callable[..., Any]] = {}
 
@@ -189,8 +231,13 @@ def prepare_agent(
         })
         handlers[name] = spec.function
 
-    return SubAgent(
+    agent = SubAgent(
         router=router,
         tools=tools,
         tool_handlers=handlers,
+        system_prompt=system_prompt,
+        agent_id=agent_id,
+        store=store,
     )
+    agent.context = context
+    return agent

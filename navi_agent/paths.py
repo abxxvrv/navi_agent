@@ -9,6 +9,12 @@ def get_navi_home() -> Path:
     return navi_home
 
 
+def get_agents_dir() -> Path:
+    agents_dir = get_navi_home() / "agents"
+    agents_dir.mkdir(parents=True, exist_ok=True)
+    return agents_dir
+
+
 def get_config_path() -> Path:
     return get_navi_home() / "config.json"
 
