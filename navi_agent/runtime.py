@@ -182,7 +182,7 @@ class AgentRuntime:
         return self._invoke_agent(user_input, keep_history=True)
 
     def list_tools(self) -> list[str]:
-        return list(self.tool_registry._tools.keys())
+        return [name for name, spec in self.tool_registry._tools.items() if spec.visible]
 
     def get_model_info(self) -> dict[str, Any]:
         return {
@@ -1022,6 +1022,7 @@ class AgentRuntime:
                 "required": ["action"],
             },
             function=SkillManageTool(),
+            visible=False,
         )
 
         # run_command

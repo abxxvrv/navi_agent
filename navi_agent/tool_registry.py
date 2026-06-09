@@ -8,6 +8,7 @@ class ToolSpec:
     description: str
     parameters: dict
     function: Callable[..., Any]
+    visible: bool = True
 
 
 class ToolRegistry:
@@ -20,6 +21,7 @@ class ToolRegistry:
         description: str,
         parameters: dict,
         function: Callable[..., Any],
+        visible: bool = True,
     ):
         if name in self._tools: # 防止重复注册
             raise ValueError(f"Tool already registered: {name}")
@@ -29,11 +31,13 @@ class ToolRegistry:
             description=description,
             parameters=parameters,
             function=function,
+            visible=visible,
         )
 
     def to_openai_tools(self) -> list[dict]:
         """
         转成 OpenAI / DeepSeek chat.completions.create 需要的 tools 格式。
+        只包含 visible=True 的工具。
         """
         return [
             {
@@ -44,7 +48,8 @@ class ToolRegistry:
                     "parameters": tool.parameters,
                 },
             }
-            for tool in self._tools.values() # 列表推导式
+            for tool in self._tools.values()
+            if tool.visible
         ]
 
     def invoke(self, name: str, arguments: dict) -> Any:
