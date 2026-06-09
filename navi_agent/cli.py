@@ -1,19 +1,17 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Annotated, Any
 
 import typer
 from .paths import load_navi_dotenv
-from prompt_toolkit import PromptSession
 from prompt_toolkit.application.current import get_app
-from prompt_toolkit.auto_suggest import AutoSuggestFromHistory
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import run_in_terminal
-from rich.console import Console
+from rich.console import Console, Group
 from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.syntax import Syntax
@@ -22,7 +20,10 @@ from rich.text import Text
 
 from .approval import ApprovalDecision, UserApprovalChoice
 from .paths import get_navi_home
+from .prompt_ui import NaviPromptSession
 from .runtime import AgentRuntime
+from .ui import NaviStreamView, approval_panel, console, format_context_status
+from .stream_box import StreamingBox
 
 
 APP_NAME = "Navi"
@@ -43,7 +44,6 @@ SLASH_COMMANDS = [
     "/quit",
 ]
 
-
 NAVI_LOGO = r"""
 ███╗   ██╗ █████╗ ██╗   ██╗██╗
 ████╗  ██║██╔══██╗██║   ██║██║
@@ -53,7 +53,6 @@ NAVI_LOGO = r"""
 ╚═╝  ╚═══╝╚═╝  ╚═╝  ╚═══╝  ╚═╝
 """
 
-
 app = typer.Typer(
     name="navi",
     help="Navi - your local project navigator.",
@@ -61,78 +60,81 @@ app = typer.Typer(
     add_completion=False,
 )
 
-console = Console()
-
-
 # =========================
 # UI
 # =========================
 
-def run_with_thinking_status(runtime: AgentRuntime, runner):
-    status = console.status("[dim]Thinking...[/dim]", spinner="dots")
+def run_with_stream_view(runtime: AgentRuntime, runner):
+    view = NaviStreamView()
+    original_event_handler = runtime.event_handler
     original_on_output = runtime.on_output
-    output_started = False
-
-    def on_output(*args, **kwargs):
-        nonlocal output_started
-        if not output_started:
-            status.stop()
-            output_started = True
-        console.print(*args, **kwargs)
-
-    runtime.on_output = on_output
-    status.start()
+    runtime.event_handler = view.handle_event
+    runtime.on_output = view.handle_output
     try:
-        return runner()
+        with view:
+            return runner()
     finally:
-        if not output_started:
-            status.stop()
+        runtime.event_handler = original_event_handler
         runtime.on_output = original_on_output
+
+
+
+def _print_through_patch(renderable: Any) -> None:
+    """Print a Rich renderable while prompt_toolkit's patch_stdout is active.
+
+    The module-level `console` was created before patch_stdout replaced sys.stdout,
+    so writes through it would bypass the proxy.  We create a fresh Console that
+    sees the current sys.stdout (the proxy under patch_stdout, or the real stdout
+    otherwise) so output lands in the right place.
+    """
+    import sys
+
+    fresh = Console(file=sys.stdout, highlight=False, force_terminal=True, color_system=console.color_system)
+    fresh.print(renderable)
+
+
+def _build_welcome_renderable(
+    workspace: Path,
+    model: str,
+    approval_mode: str,
+    session_id: str | None = None,
+) -> Any:
+    """Build the welcome card as a Rich renderable (for embedding in full-screen TUI)."""
+    logo = Text(NAVI_LOGO.strip("\n"), style="bold blue")
+    heading = Text.assemble((f"Welcome to {APP_NAME}!", "bold blue"))
+    hint = Text("Run /help to get started.", style="grey50")
+
+    head = Table(show_header=False, show_edge=False, box=None, padding=(0, 1), expand=False)
+    head.add_column(justify="left")
+    head.add_column(justify="left")
+    head.add_row(logo, Group(heading, hint))
+
+    rows = [
+        head,
+        Text(""),
+        Text.assemble(("Directory: ", "bold grey50"), (str(workspace), "")),
+        Text.assemble(("Session:   ", "bold grey50"), (session_id or "--", "")),
+        Text.assemble(("Model:     ", "bold grey50"), (model, ""), ("  "), ("approval: ", "grey50"), (approval_mode, "yellow")),
+        Text.assemble(("Version:   ", "bold grey50"), (VERSION, "")),
+    ]
+
+    return Panel(
+        Group(*rows),
+        border_style="blue",
+        padding=(1, 2),
+        expand=True,
+    )
+
 
 def print_splash(
     workspace: Path,
     model: str,
     approval_mode: str,
-    no_wait: bool = False,
+    session_id: str | None = None,
 ) -> None:
-    """
-    启动欢迎页。
-    类似 Claude Code / Codex CLI 那种进入终端产品前的展示页。
-    """
-    console.clear()
-
-    welcome = Text()
-    welcome.append("* ", style="bold red")
-    welcome.append("Welcome to ", style="dim")
-    welcome.append(APP_NAME, style="bold")
-    welcome.append(" - your local project navigator.", style="dim")
-
-    console.print(
-        Panel(
-            welcome,
-            border_style="dim",
-            padding=(0, 1),
-        )
-    )
-
-    console.print(NAVI_LOGO, style="bold cyan")
-
-    console.print()
-    console.print(f"[dim]Workspace:[/dim] [bold]{workspace}[/bold]")
-    console.print(f"[dim]Model:[/dim] [bold]{model}[/bold]")
-    console.print(f"[dim]Approval:[/dim] [bold]{approval_mode}[/bold]")
-    console.print(f"[dim]Version:[/dim] [bold]{VERSION}[/bold]")
-    console.print()
-
-    console.print(
-        "[green]Ready.[/green] "
-        "[dim]Press[/dim] [bold]Enter[/bold] [dim]to continue[/dim]"
-    )
-
-    if not no_wait:
-        input()
-
-    console.clear()
+    """Print the welcome card to stdout (for non-full-screen modes like `navi run`)."""
+    renderable = _build_welcome_renderable(workspace, model, approval_mode, session_id)
+    console.print(renderable)
 
 
 def print_chat_help() -> None:
@@ -210,86 +212,157 @@ def print_status_bar(runtime: AgentRuntime) -> None:
     if usage:
         prompt_t = usage.get("prompt_tokens", 0)
         comp_t = usage.get("completion_tokens", 0)
-        pct = round(prompt_t / window * 100) if window else 0
+        usage_ratio = (prompt_t / window) if window else 0
         console.print(
-            f"[dim]Context: {pct}% | In: {fmt(prompt_t)} / {fmt(window)} "
-            f"| Out: {fmt(comp_t)} | Model: {model}[/dim]"
+            f"[dim]{format_context_status(usage_ratio, prompt_t, window)} "
+            f"| out: {fmt(comp_t)} | model: {model}[/dim]"
         )
     else:
-        console.print(f"[dim]Model: {model}[/dim]")
+        console.print(f"[dim]model: {model}[/dim]")
 
 
-def print_agent_event(event: dict[str, Any]) -> None:
+def render_bottom_toolbar(runtime: AgentRuntime, workspace: Path, timer: dict | None = None):
+    usage = runtime.last_usage
+    model = runtime.router.model_name
+    window = runtime.router.context_window
+
+    prompt_t = usage.get("prompt_tokens", 0) if usage else 0
+    comp_t = usage.get("completion_tokens", 0) if usage else 0
+    pct = round(prompt_t / window * 100) if window else 0
+
+    def fmt(n: int) -> str:
+        if n >= 1_000_000:
+            return f"{n / 1_000_000:.1f}M"
+        if n >= 1000:
+            return f"{n / 1000:.1f}K"
+        return str(n)
+
+    elapsed_str = _format_elapsed(timer) if timer else ""
+
+    parts = [
+        f"Context: {pct}%",
+        f"In: {fmt(prompt_t)} / {fmt(window)}",
+        f"Out: {fmt(comp_t)}",
+        f"Model: {model}",
+    ]
+    if elapsed_str:
+        parts.append(elapsed_str)
+    return [("class:bottom-toolbar", " | ".join(parts))]
+
+
+def _format_elapsed(timer: dict) -> str:
+    """Format elapsed time for the status bar."""
+    import time as _time
+    start = timer.get("start")
+    frozen = timer.get("frozen", 0.0)
+    if start is not None:
+        elapsed = max(0.0, _time.time() - start)
+        emoji = "⏱"
+    elif frozen > 0:
+        elapsed = frozen
+        emoji = "⏲"
+    else:
+        return ""
+
+    minutes = int(elapsed // 60)
+    seconds = int(elapsed % 60)
+    if minutes > 0:
+        return f"{emoji} {minutes}m {seconds}s"
+    return f"{emoji} {seconds}s"
+
+
+
+def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
+    _p = printer or console.print
     event_type = event.get("type")
     tool_name = event.get("tool_name")
     tool_args = event.get("tool_args") or {}
     tool_result = event.get("tool_result") or {}
 
+    # ── Streaming events ──
+    if event_type == "reasoning_delta":
+        if box:
+            box.reasoning_delta(event.get("content") or "")
+        return
+
+    if event_type == "assistant_delta":
+        if box:
+            box.response_delta(event.get("content") or "")
+        return
+
+    if event_type == "assistant_end":
+        if box:
+            box.close_all()
+        return
+
+    # ── Tool events (close boxes first) ──
+    if box and box.has_output:
+        box.close_all()
+
     if event_type == "tool_start":
         if tool_name == "run_command":
             command = tool_args.get("command", "")
-            console.print(f"\n[dim]• Ran[/dim] [bold]{command}[/bold]")
+            _p(f"[dim]┊ preparing {tool_name}[/dim] [bold]{command}[/bold]")
         elif tool_name in {"write_file", "patch_file"}:
             path = tool_args.get("path", "")
-            console.print(f"\n[dim]• Editing[/dim] [bold]{path}[/bold]")
+            _p(f"[dim]┊ preparing {tool_name}…[/dim] [bold]{path}[/bold]")
         elif tool_name == "read_file":
             path = tool_args.get("path", "")
-            console.print(f"\n[dim]• Read[/dim] [bold]{path}[/bold]")
+            _p(f"[dim]┊ {tool_name}[/dim] [bold]{path}[/bold]")
         elif tool_name == "list_dir":
             path = tool_args.get("path", ".")
-            console.print(f"\n[dim]• Listed[/dim] [bold]{path}[/bold]")
+            _p(f"[dim]┊ {tool_name}[/dim] [bold]{path}[/bold]")
         elif tool_name == "skill_view":
             name = tool_args.get("name", "")
-            console.print(f"\n[dim]• Viewing skill[/dim] [bold]{name}[/bold]")
+            _p(f"[dim]┊ {tool_name}[/dim] [bold]{name}[/bold]")
         else:
-            console.print(f"\n[dim]• Tool[/dim] [bold]{tool_name}[/bold]")
+            _p(f"[dim]┊ {tool_name}[/dim]")
 
     elif event_type == "tool_result":
+        elapsed = event.get("elapsed")
+        elapsed_str = f"  {elapsed:.1f}s" if elapsed is not None else ""
+
         if tool_name in {"write_file", "patch_file"}:
             if not tool_result.get("ok"):
-                console.print(
-                    f"[red]  └ failed:[/red] "
-                    f"{tool_result.get('error', 'Unknown error')}"
-                )
+                _p(f"[red]┊ {tool_name} failed:[/red] {tool_result.get('error', 'Unknown error')}")
                 return
-
             path = tool_result.get("path") or tool_args.get("path", "")
             added = tool_result.get("added_lines", 0)
             removed = tool_result.get("removed_lines", 0)
-
-            console.print(
-                f"[dim]• Edited[/dim] [bold]{path}[/bold] "
-                f"([green]+{added}[/green] [red]-{removed}[/red])"
+            _p(
+                f"[dim]┊ {tool_name}[/dim] [bold]{path}[/bold] "
+                f"[green]+{added}[/green] [red]-{removed}[/red]{elapsed_str}"
             )
-
             diff = tool_result.get("diff")
             if diff:
-                console.print(Syntax(diff, "diff", word_wrap=True))
-
+                diff_lines = diff.splitlines()
+                if len(diff_lines) > 80:
+                    diff = "\n".join(diff_lines[:80])
+                    _p(Syntax(diff, "diff", word_wrap=True))
+                    _p(f"[yellow]┊ ... ({len(diff_lines) - 80} more lines, showing first 80)[/yellow]")
+                else:
+                    _p(Syntax(diff, "diff", word_wrap=True))
             if tool_result.get("diff_truncated"):
-                console.print("[yellow]  └ diff truncated[/yellow]")
+                _p("[yellow]┊ diff truncated[/yellow]")
 
         elif tool_name == "run_command":
             exit_code = tool_result.get("exit_code")
             output = tool_result.get("output") or ""
-
             if tool_result.get("ok") or exit_code == 0:
-                console.print("[green]  └ exit_code=0[/green]")
+                _p(f"[green]┊ exit_code=0[/green]{elapsed_str}")
             else:
-                console.print(f"[red]  └ exit_code={exit_code}[/red]")
-
+                _p(f"[red]┊ exit_code={exit_code}[/red]{elapsed_str}")
             if output.strip():
-                console.print(Syntax(output[-4000:], "text", word_wrap=True))
+                _p(Syntax(output[-4000:], "text", word_wrap=True))
 
         else:
             if tool_result.get("ok") is False:
-                console.print(
-                    f"[red]  └ failed:[/red] "
-                    f"{tool_result.get('error', 'Unknown error')}"
-                )
+                _p(f"[red]┊ {tool_name} failed:[/red] {tool_result.get('error', 'Unknown error')}")
+            else:
+                _p(f"[dim]┊ {tool_name}[/dim]{elapsed_str}")
 
     elif event_type == "tool_error":
-        console.print(f"[red]• Tool error {tool_name}:[/red] {event.get('error')}")
+        _p(f"[red]┊ {tool_name} error:[/red] {event.get('error')}")
 
     elif event_type == "assistant_content":
         pass
@@ -308,26 +381,12 @@ def ask_approval_from_cli(decision: ApprovalDecision) -> UserApprovalChoice:
 
     # 打印原因
     console.print()
-    console.print(
-        Panel(
-            decision.reason,
-            title="Approval required",
-            border_style="yellow",
-        )
-    )
+    console.print(approval_panel(decision))
 
     # 打印详情
     lines = [
-        f"[bold]Tool[/bold]: {decision.tool_name}",
-        f"[bold]Risk[/bold]: {decision.risk.value}",
+        "[dim]Use ↑/↓ or 1/2/3, then press Enter.[/dim]",
     ]
-
-    if decision.command:
-        lines.append(f"[bold]Command[/bold]: {decision.command}")
-
-    path = decision.tool_args.get("path")
-    if path:
-        lines.append(f"[bold]Path[/bold]: {path}")
 
     if decision.approval_key:
         lines.append(f"[dim]Approval key: {decision.approval_key}[/dim]")
@@ -821,83 +880,167 @@ def start_chat(
 
     都会进入这里。
     """
+    asyncio.run(
+        _start_chat_async(
+            workspace=workspace,
+            max_steps=max_steps,
+            no_splash=no_splash,
+            approval_mode=approval_mode,
+            resume_session_id=resume_session_id,
+        )
+    )
+
+
+def _print_live(*args, **kwargs) -> None:
+    """Print through patch_stdout using prompt_toolkit's ANSI renderer.
+
+    Rich Console objects cache their file handle at creation time, so a
+    module-level Console still points at the pre-patch_stdout stdout.
+    prompt_toolkit's print_formatted_text + ANSI goes through the current
+    sys.stdout proxy and renders correctly above the input area.
+    """
+    from prompt_toolkit import print_formatted_text as _pt_print
+    from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+
+    # If called with a single Rich renderable (Markdown, Panel, etc.),
+    # convert to ANSI string first.
+    if len(args) == 1 and not isinstance(args[0], str):
+        import io
+        buf = io.StringIO()
+        tmp = Console(file=buf, force_terminal=True,
+                      color_system=console.color_system, highlight=False)
+        tmp.print(*args, **kwargs)
+        _pt_print(_PT_ANSI(buf.getvalue()))
+        return
+
+    # Plain string with Rich markup → strip markup for ANSI printing
+    text = str(args[0]) if args else ""
+    if "[" in text and "]" in text:
+        # Rich markup: render to ANSI via temporary Console
+        import io
+        buf = io.StringIO()
+        tmp = Console(file=buf, force_terminal=True,
+                      color_system=console.color_system, highlight=False)
+        tmp.print(*args, **kwargs)
+        _pt_print(_PT_ANSI(buf.getvalue()))
+    else:
+        _pt_print(_PT_ANSI(text))
+
+
+async def _start_chat_async(
+    workspace: Path,
+    max_steps: int,
+    no_splash: bool,
+    approval_mode: str,
+    resume_session_id: str | None = None,
+) -> None:
     load_navi_dotenv()
 
     workspace = workspace.resolve()
 
+    stream_box = StreamingBox(_print_live)
+
     runtime = AgentRuntime(
         workspace=workspace,
         max_steps=max_steps,
-        event_handler=print_agent_event,
+        event_handler=lambda e: print_agent_event(e, box=stream_box),
         approval_mode=approval_mode,
         approval_handler=ask_approval_from_cli,
         resume_session_id=resume_session_id,
-        on_output=console.print,
+        on_output=_print_live,
     )
-
-    # 打印启动信息（恢复会话时跳过）
-    if not no_splash and not resume_session_id:
-        print_splash(
-            workspace=workspace,
-            model=runtime.router.model_name,
-            approval_mode=approval_mode,
-        )
-
-    print_chat_help()
 
     navi_home = get_navi_home()
 
-    # 创建 prompt session
-    prompt_session = PromptSession(
-        history=FileHistory(str(navi_home / "chat_history.txt")),
-        auto_suggest=AutoSuggestFromHistory(),
+    prompt_session = NaviPromptSession(
+        history_path=navi_home / "chat_history.txt",
         completer=WordCompleter(SLASH_COMMANDS, ignore_case=True),
         key_bindings=create_prompt_key_bindings(runtime),
+        bottom_toolbar=lambda: render_bottom_toolbar(runtime, workspace, timer),
     )
 
-    # 主循环
-    while True:
-        try:
-            # 检查后台审查结果
-            if runtime.reviewer.pending_message:
-                from rich.markup import escape
-                console.print(f"  💾 [dim]{escape(runtime.reviewer.pending_message)}[/dim]")
-                runtime.reviewer.pending_message = None
+    # 计时器：记录用户发消息到收到回复的耗时
+    timer: dict = {"start": None, "frozen": 0.0}
 
-            console.print("─" * console.width)
-            print_status_bar(runtime)
-            console.print("─" * console.width)
-            user_input = prompt_session.prompt("You > ")
-            text = user_input.strip()
+    # 欢迎信息直接打印到终端（Hermes 风格）
+    if not no_splash and not resume_session_id:
+        print_splash(workspace, runtime.router.model_name, approval_mode, runtime.session_store.session_id)
 
-            if not text:
-                continue
+    async def process_message(text: str) -> None:
+        """处理一条用户消息：斜杠命令或 Agent 对话轮次。"""
+        # 斜杠命令
+        if handle_slash_command(
+            command=text,
+            runtime=runtime,
+            workspace=workspace,
+        ):
+            return
 
-            # 处理斜杠命令
-            handled = handle_slash_command(
-                command=text,
-                runtime=runtime,
-                workspace=workspace,
-            )
+        # 待处理通知
+        if runtime.reviewer.pending_message:
+            msg = runtime.reviewer.pending_message
+            runtime.reviewer.pending_message = None
+            _print_live(f"[dim]💾 {msg}[/dim]")
 
-            if handled:
-                continue
+        # 用户消息直接打印（Hermes 风格）
+        _print_live()
+        _print_live(Text(f"> {text}", style="#87CEEB"))
+        _print_live()
 
-            # 发给 Agent 处理
-            result = run_with_thinking_status(runtime, lambda: runtime.run_turn(text))
+        # 开始计时
+        import time as _time
+        timer["start"] = _time.time()
+        timer["frozen"] = 0.0
+        prompt_session.invalidate()
 
-            # 打印结果
-            if not result_is_ok(result):
-                print_error_message(result_error(result))
+        prompt_session.begin_running()
+        stream_box.reset()
 
-        # 中止对话和退出对话
-        except KeyboardInterrupt:
-            console.print("\n[yellow]Interrupted.[/yellow]")
-            continue
+        # 后台定期刷新状态栏（让计时器实时更新）
+        async def _tick_toolbar():
+            while timer["start"] is not None:
+                prompt_session.invalidate()
+                await asyncio.sleep(1)
 
-        except EOFError:
-            console.print("\n[yellow]Bye.[/yellow]")
-            break
+        tick_task = asyncio.ensure_future(_tick_toolbar())
+
+        def runner():
+            return runtime.run_turn(text)
+
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, runner)
+
+        # 冻结计时器
+        if timer["start"] is not None:
+            timer["frozen"] = max(0.0, _time.time() - timer["start"])
+            timer["start"] = None
+        tick_task.cancel()
+        prompt_session.invalidate()
+
+        # 确保流式输出的 box 都关闭
+        stream_box.close_all()
+        prompt_session.end_running()
+
+        # 如果没有任何流式输出（模型没产生 reasoning 或 content），打印 final_answer
+        if not stream_box.had_output:
+            answer = result.get("final_answer") or result.get("content") or ""
+            if answer:
+                _print_live()
+                _print_live(Markdown(answer))
+
+        if prompt_session.cancel_requested:
+            _print_live("[yellow]Interrupted.[/yellow]")
+
+        if not result_is_ok(result):
+            _print_live(f"[red]{result_error(result)}[/red]")
+
+        # 处理排队消息
+        queued = prompt_session.take_queued()
+        if queued:
+            for msg in queued:
+                await process_message(msg)
+
+    await prompt_session.run_session(on_submit=process_message)
 
     sid = runtime.session_store.session_id
     console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
@@ -1060,7 +1203,7 @@ def run(
         )
     )
 
-    result = run_with_thinking_status(runtime, lambda: runtime.run_task(task))
+    result = run_with_stream_view(runtime, lambda: runtime.run_task(task))
 
     if result_is_ok(result):
         raise typer.Exit(code=0)

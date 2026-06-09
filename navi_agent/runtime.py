@@ -405,10 +405,12 @@ class AgentRuntime:
                 self.session_store.messages = compressed_messages
                 messages = self._valid_messages(compressed_messages)
             except Exception as e:
-                if self.on_output:
-                    self.on_output(
-                        f"  ⚠️  上下文压缩失败，跳过: {e}", style="dim yellow"
-                    )
+                self._emit(
+                    {
+                        "type": "compress_error",
+                        "message": f"上下文压缩失败，跳过: {e}",
+                    }
+                )
 
         model_messages = [
             {"role": "system", "content": self._system_prompt},
@@ -426,8 +428,6 @@ class AgentRuntime:
             tool_calls_map: dict[int, dict] = {}  # index -> {id, function: {name, arguments}}
             reasoning_parts: list[str] = []
             displayed_reasoning = False
-            separated_after_tool = False
-            reasoning_style = "italic dim"
 
             try:
                 # 流式调用模型
@@ -451,26 +451,35 @@ class AgentRuntime:
 
                     # 文本 token
                     if delta.content:
-                        if self.on_output and displayed_reasoning and not content_parts:
-                            self.on_output("")
-                            self.on_output("─" * 60, style="dim")
-                            self.on_output("")
+                        if displayed_reasoning and not content_parts:
+                            self._emit({"type": "reasoning_end"})
                         content_parts.append(delta.content)
-                        if self.on_output:
-                            self.on_output(delta.content, end="")
+                        self._emit(
+                            {
+                                "type": "assistant_delta",
+                                "content": delta.content,
+                            }
+                        )
 
                     # reasoning token（思考过程）
                     reasoning_content = getattr(delta, "reasoning_content", None)
                     if reasoning_content:
                         reasoning_parts.append(reasoning_content)
-                        if not content_parts and self.on_output:
-                            if starts_after_tool and not separated_after_tool:
-                                self.on_output("")
-                                separated_after_tool = True
+                        if not content_parts:
                             if not displayed_reasoning:
-                                self.on_output("● ", end="", style=reasoning_style)
+                                self._emit(
+                                    {
+                                        "type": "reasoning_start",
+                                        "starts_after_tool": starts_after_tool,
+                                    }
+                                )
                             displayed_reasoning = True
-                            self.on_output(reasoning_content, end="", style=reasoning_style)
+                            self._emit(
+                                {
+                                    "type": "reasoning_delta",
+                                    "content": reasoning_content,
+                                }
+                            )
 
                     # tool call
                     if delta.tool_calls:
@@ -490,17 +499,15 @@ class AgentRuntime:
                                 if tc.function.arguments:
                                     tool_calls_map[idx]["function"]["arguments"] += tc.function.arguments
 
-                # 文本输出结束换行
-                if self.on_output and content_parts:
-                    self.on_output("")
-
                 # 拼接完整 message
                 content = "".join(content_parts)
                 reasoning_content = "".join(reasoning_parts)
                 if not content.strip() and not tool_calls_map:
                     raise EmptyModelResponseError("模型没有返回正文或工具调用")
-                if self.on_output and displayed_reasoning and not content_parts and tool_calls_map:
-                    self.on_output("")
+                if displayed_reasoning:
+                    self._emit({"type": "reasoning_end"})
+                if content_parts:
+                    self._emit({"type": "assistant_end"})
 
                 assistant_message: dict[str, Any] = {
                     "role": "assistant",
@@ -529,12 +536,16 @@ class AgentRuntime:
                     ) from exc
 
                 delay = min(5.0, 0.3 * (2 ** retry_count)) + random.uniform(0, 0.5)
-                if self.on_output:
-                    self.on_output("")
-                    self.on_output(
-                        f"[模型响应异常，未保存本次未完成输出，正在重试 {retry_count + 1}/{self.max_retries_per_step}，等待 {delay:.1f}s：{exc}]"
-                    )
-                    self.on_output("")
+                self._emit(
+                    {
+                        "type": "retry",
+                        "message": (
+                            "模型响应异常，未保存本次未完成输出，"
+                            f"正在重试 {retry_count + 1}/{self.max_retries_per_step}，"
+                            f"等待 {delay:.1f}s：{exc}"
+                        ),
+                    }
+                )
                 time.sleep(delay)
 
         raise RuntimeError("模型请求失败。")
@@ -545,6 +556,7 @@ class AgentRuntime:
         """执行单个工具，供线程池调用。返回 (tool_call_id, result, name, args)。"""
         self._emit({"type": "tool_start", "tool_name": tool_name, "tool_args": tool_args})
 
+        t0 = time.monotonic()
         try:
             tool_result = self.tool_registry.invoke(tool_name, tool_args)
         except Exception as exc:
@@ -552,8 +564,10 @@ class AgentRuntime:
             self._emit({"type": "tool_error", "tool_name": tool_name,
                         "tool_args": tool_args, "error": str(exc)})
         else:
+            elapsed = time.monotonic() - t0
             self._emit({"type": "tool_result", "tool_name": tool_name,
-                        "tool_args": tool_args, "tool_result": tool_result})
+                        "tool_args": tool_args, "tool_result": tool_result,
+                        "elapsed": elapsed})
 
         return (tool_call_id, tool_result, tool_name, tool_args)
 
@@ -1047,7 +1061,12 @@ class AgentRuntime:
                 },
                 "required": ["command"],
             },
-            function=RunCommandTool(workspace=workspace, on_output=self.on_output),
+            function=RunCommandTool(
+                workspace=workspace,
+                on_output=lambda *args, **kwargs: (
+                    self.on_output(*args, **kwargs) if self.on_output else None
+                ),
+            ),
         )
 
         # glob
