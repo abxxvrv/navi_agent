@@ -967,11 +967,9 @@ async def _start_chat_async(
 
     def on_cancel_handler():
         runtime.interrupt()
-        # 直接写 stderr，绕过 prompt_toolkit 的 patch_stdout
-        # stderr 不会被 prompt_toolkit 接管，确保立即显示
-        import sys
-        sys.stderr.write("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...\n")
-        sys.stderr.flush()
+        # 直接 print，不用 stderr
+        # patch_stdout(raw=False) 时 print 可以正常工作
+        print("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...", flush=True)
 
     prompt_session = NaviPromptSession(
         history_path=navi_home / "chat_history.txt",

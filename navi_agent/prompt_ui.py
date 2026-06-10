@@ -371,7 +371,7 @@ class NaviPromptSession:
     def _patch_stdout(self):
         if self._custom_io:
             return contextlib.nullcontext()
-        return patch_stdout(raw=True)
+        return patch_stdout()  # 不用 raw=True，让 print() 能正常工作
 
     def _render_box_top(self) -> FormattedText:
         app = get_app_or_none()
