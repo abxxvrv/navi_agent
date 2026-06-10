@@ -843,7 +843,7 @@ def handle_slash_command(
     if command == "/mcp":
         try:
             from .mcp_commands import handle_mcp_command
-            result = handle_mcp_command(args, runtime.tool_registry, console)
+            result = handle_mcp_command(args, runtime.tool_registry)
             console.print(result)
         except ImportError:
             console.print("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
@@ -967,9 +967,11 @@ async def _start_chat_async(
 
     def on_cancel_handler():
         runtime.interrupt()
-        # 直接 print 到 stdout，确保立即显示
-        # 不能用 _print_live，因为 prompt_toolkit Application 可能正在渲染
-        print("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...", flush=True)
+        # 直接写 stderr，绕过 prompt_toolkit 的 patch_stdout
+        # stderr 不会被 prompt_toolkit 接管，确保立即显示
+        import sys
+        sys.stderr.write("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...\n")
+        sys.stderr.flush()
 
     prompt_session = NaviPromptSession(
         history_path=navi_home / "chat_history.txt",
