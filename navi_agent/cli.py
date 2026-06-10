@@ -839,8 +839,8 @@ def handle_slash_command(
         return True
 
     if command == "/model":
-        handle_model_command(runtime)
-        return True
+        # 由 process_message 处理（需要 prompt_session 交互）
+        return False
 
     if command == "/approval":
         mode = getattr(runtime.approval_manager, "mode", None)
@@ -952,11 +952,16 @@ async def _start_chat_async(
 
     navi_home = get_navi_home()
 
+    def on_cancel_handler():
+        runtime.interrupt()
+        _print_live("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+
     prompt_session = NaviPromptSession(
         history_path=navi_home / "chat_history.txt",
         completer=WordCompleter(SLASH_COMMANDS, ignore_case=True),
         key_bindings=create_prompt_key_bindings(runtime),
         bottom_toolbar=lambda: render_bottom_toolbar(runtime, workspace, timer),
+        on_cancel=on_cancel_handler,
     )
 
     # 计时器：记录用户发消息到收到回复的耗时
@@ -968,7 +973,34 @@ async def _start_chat_async(
 
     async def process_message(text: str) -> None:
         """处理一条用户消息：斜杠命令或 Agent 对话轮次。"""
-        # 斜杠命令
+        # /model 命令：打开 model picker（需要 prompt_session 交互）
+        if text.strip() == "/model":
+            info = runtime.get_model_info()
+            providers = info["providers"]
+            if not providers:
+                _print_live("[yellow]No providers configured. Edit ~/.navi/config.json[/yellow]")
+                return
+
+            def on_provider_selected(provider: str) -> list[str]:
+                models = runtime.router.list_models(provider)
+                return list(models.keys())
+
+            def on_model_selected(provider: str, model: str) -> None:
+                if runtime.switch_model(provider, model):
+                    _print_live(f"[green]Switched to {provider} / {model}[/green]")
+                else:
+                    _print_live(f"[red]Failed to switch to {provider} / {model}[/red]")
+
+            prompt_session.open_model_picker(
+                providers=providers,
+                current_provider=info["current_provider"],
+                current_model=info["current_model"],
+                on_provider_selected=on_provider_selected,
+                on_model_selected=on_model_selected,
+            )
+            return
+
+        # 其他斜杠命令
         if handle_slash_command(
             command=text,
             runtime=runtime,
@@ -995,6 +1027,7 @@ async def _start_chat_async(
 
         prompt_session.begin_running()
         stream_box.reset()
+        prompt_session._force_exit = False  # Reset force exit flag (use private attr for setter)
 
         # 后台定期刷新状态栏（让计时器实时更新）
         async def _tick_toolbar():
@@ -1005,7 +1038,15 @@ async def _start_chat_async(
         tick_task = asyncio.ensure_future(_tick_toolbar())
 
         def runner():
-            return runtime.run_turn(text)
+            try:
+                return runtime.run_turn(text)
+            except KeyboardInterrupt:
+                return {
+                    "ok": False,
+                    "error": "用户中断",
+                    "final_answer": "",
+                    "content": "",
+                }
 
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, runner)
@@ -1020,6 +1061,11 @@ async def _start_chat_async(
         # 确保流式输出的 box 都关闭
         stream_box.close_all()
         prompt_session.end_running()
+
+        # Double Ctrl+C → force exit
+        if prompt_session.force_exit:
+            prompt_session._app.exit(result="exit")
+            raise EOFError("Force exit (double Ctrl+C)")
 
         # 如果没有任何流式输出（模型没产生 reasoning 或 content），打印 final_answer
         if not stream_box.had_output:

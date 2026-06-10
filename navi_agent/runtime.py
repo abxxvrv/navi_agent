@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import random
+import threading
 from collections import defaultdict
 from collections.abc import Callable
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import os
 import time
@@ -19,6 +21,7 @@ from .history_utils import get_final_assistant_message
 from .model_router import ModelRouter
 from .paths import get_config_path, get_navi_home
 from .session_store import SessionStore
+from .interrupt import set_interrupt, is_interrupted, clear_all
 from .tool import (
     GlobTool,
     GrepTool,
@@ -129,6 +132,11 @@ class AgentRuntime:
         self.router = ModelRouter(_config_path, provider=_provider, model=_model)
         self.last_usage: dict[str, int] = self.session_store.get_usage()
 
+        # Ctrl+C 中断信号（流式循环中检查）
+        self.cancel_event = threading.Event()
+        # 当前执行线程 ID（用于线程级中断传播）
+        self._execution_thread_id: int | None = None
+
         # 初始化后台审查器
         self.reviewer = BackgroundReviewer(
             router=self.router,
@@ -180,6 +188,19 @@ class AgentRuntime:
 
     def run_turn(self, user_input: str) -> dict[str, Any]:
         return self._invoke_agent(user_input, keep_history=True)
+
+    def interrupt(self, message: str | None = None) -> None:
+        """Request the agent to interrupt its current loop.
+
+        Call this from another thread (e.g., input handler)
+        to gracefully stop the agent.
+
+        Propagates the interrupt to the execution thread so that
+        is_interrupted() checks inside tools and stream loops will see it.
+        """
+        self.cancel_event.set()
+        if self._execution_thread_id is not None:
+            set_interrupt(True, self._execution_thread_id)
 
     def list_tools(self) -> list[str]:
         return [name for name, spec in self.tool_registry._tools.items() if spec.visible]
@@ -260,6 +281,12 @@ class AgentRuntime:
 
     # 调用agent，临时任务、对话模式都会用这个
     def _invoke_agent(self, user_input: str, keep_history: bool) -> dict[str, Any]:
+        # 记录执行线程 ID（用于中断传播）
+        self._execution_thread_id = threading.get_ident()
+        # 重置中断信号
+        self.cancel_event.clear()
+        clear_all()
+
         # 1. 清理和校验用户输入
         user_input = user_input.encode("utf-8", "replace").decode("utf-8").strip()
         if not user_input:
@@ -437,6 +464,10 @@ class AgentRuntime:
                 )
 
                 for chunk in stream:
+                    # Ctrl+C 中断检查（两种机制都检查）
+                    if self.cancel_event.is_set() or is_interrupted():
+                        break
+
                     # usage（最后一个 chunk，choices 通常为空）
                     if hasattr(chunk, "usage") and chunk.usage:
                         # prompt_tokens 只取最后一次（当前上下文大小）
@@ -502,6 +533,17 @@ class AgentRuntime:
                 # 拼接完整 message
                 content = "".join(content_parts)
                 reasoning_content = "".join(reasoning_parts)
+
+                # 用户中断 → 保存已有内容并退出
+                if self.cancel_event.is_set() or is_interrupted():
+                    if displayed_reasoning:
+                        self._emit({"type": "reasoning_end"})
+                    if content_parts:
+                        self._emit({"type": "assistant_end"})
+                    if content.strip() or tool_calls_map:
+                        break  # 保存部分内容
+                    raise KeyboardInterrupt("用户中断")
+
                 if not content.strip() and not tool_calls_map:
                     raise EmptyModelResponseError("模型没有返回正文或工具调用")
                 if displayed_reasoning:
@@ -640,6 +682,24 @@ class AgentRuntime:
                 continue
             to_execute.append((call_id, tool_name, tool_args))
 
+        # ── Pre-flight: 中断检查 ──
+        if self.cancel_event.is_set() or is_interrupted():
+            for call_id, tool_name, tool_args in to_execute:
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(
+                        {"ok": False, "error": f"工具执行已取消 — {tool_name} 因用户中断被跳过"},
+                        ensure_ascii=False,
+                    ),
+                }
+                self.session_store.append_message(tool_message)
+                failed_messages.append(tool_message)
+            to_execute = []
+
+        # 收集多模态图片，稍后注入 user message
+        pending_images: list[dict] = []
+
         # 阶段三：并发执行
         executed_messages: list[dict] = []
         if to_execute:
@@ -649,12 +709,36 @@ class AgentRuntime:
                     for cid, name, args in to_execute
                 }
                 results: dict[str, tuple] = {}
-                for future in futures:
-                    call_id, result, name, args = future.result()
-                    results[call_id] = (call_id, result, name, args)
 
-            # 收集多模态图片，稍后注入 user message
-            pending_images: list[dict] = []
+                # 轮询 future 完成情况，定期检查 interrupt
+                pending = set(futures.keys())
+                while pending:
+                    done, pending = concurrent.futures.wait(pending, timeout=1.0)
+                    for f in done:
+                        call_id, result, name, args = f.result()
+                        results[call_id] = (call_id, result, name, args)
+
+                    # 中断检查：取消未完成的 future
+                    if (self.cancel_event.is_set() or is_interrupted()) and pending:
+                        for f in pending:
+                            f.cancel()
+                        # 给正在跑的工具 3 秒优雅退出
+                        concurrent.futures.wait(pending, timeout=3.0)
+                        # 为被取消的 future 补上取消结果
+                        for f in pending:
+                            cid = futures[f]
+                            tool_name = next(n for c, n, _ in to_execute if c == cid)
+                            tool_message = {
+                                "role": "tool",
+                                "tool_call_id": cid,
+                                "content": json.dumps(
+                                    {"ok": False, "error": f"工具执行已取消 — {tool_name} 因用户中断被跳过"},
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            self.session_store.append_message(tool_message)
+                            failed_messages.append(tool_message)
+                        break
 
             for call_id, tool_name, tool_args in to_execute:
                 _, tool_result, _, _ = results[call_id]
