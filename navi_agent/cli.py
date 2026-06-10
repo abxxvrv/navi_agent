@@ -38,6 +38,7 @@ SLASH_COMMANDS = [
     "/tools",
     "/skills",
     "/sessions",
+    "/mcp",
     "/model",
     "/approval",
     "/exit",
@@ -150,6 +151,7 @@ def print_chat_help() -> None:
             "[cyan]/tools[/cyan]     Show available tools",
             "[cyan]/skills[/cyan]    Show available skills",
             "[cyan]/sessions[/cyan]  Show recent sessions",
+            "[cyan]/mcp[/cyan]       Manage MCP servers",
             "[cyan]/approval[/cyan]  Show approval mode and session approvals",
             "[cyan]/exit[/cyan]      Exit Navi",
             "",
@@ -838,6 +840,17 @@ def handle_slash_command(
         console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
+    if command == "/mcp":
+        try:
+            from .mcp_commands import handle_mcp_command
+            result = handle_mcp_command(args, runtime.tool_registry, console)
+            console.print(result)
+        except ImportError:
+            console.print("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
+        except Exception as e:
+            console.print(f"[red]MCP command error: {e}[/red]")
+        return True
+
     if command == "/model":
         # 由 process_message 处理（需要 prompt_session 交互）
         return False
@@ -954,7 +967,9 @@ async def _start_chat_async(
 
     def on_cancel_handler():
         runtime.interrupt()
-        _print_live("\n⚡ Interrupting agent... (press Ctrl+C again to force exit)")
+        # 直接 print 到 stdout，确保立即显示
+        # 不能用 _print_live，因为 prompt_toolkit Application 可能正在渲染
+        print("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...", flush=True)
 
     prompt_session = NaviPromptSession(
         history_path=navi_home / "chat_history.txt",
