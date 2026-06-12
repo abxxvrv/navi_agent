@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import random
 import threading
 from collections import defaultdict
@@ -12,15 +13,17 @@ import time
 from pathlib import Path
 from typing import Any, Literal
 
+logger = logging.getLogger(__name__)
+
 from .paths import load_navi_dotenv
 from langgraph.graph import END, START, StateGraph
 from typing_extensions import TypedDict
 
 from .context_manager import ContextManager
 from .history_utils import get_final_assistant_message
+from .history_store import HistoryStore
 from .model_router import ModelRouter
 from .paths import get_config_path, get_navi_home
-from .session_store import SessionStore
 from .interrupt import set_interrupt, is_interrupted, clear_all
 from .tool import (
     GlobTool,
@@ -87,7 +90,7 @@ class AgentRuntime:
             navi_home=self.navi_home,
         )
 
-        sessions_root = str(self.navi_home / "sessions")
+        history_db_path = self.navi_home / "history.sqlite3"
 
         # 读取全局默认模型配置（仅新会话参考，resume 时用会话自己的 meta）
         _config_path = get_config_path()
@@ -102,8 +105,7 @@ class AgentRuntime:
 
         # 判断是继续之前的会话还是新建会话
         if resume_session_id:
-            session_dir = Path(sessions_root) / resume_session_id
-            self.session_store = SessionStore.from_existing(session_dir, root=sessions_root)
+            self.session_store = HistoryStore.from_existing(history_db_path, resume_session_id)
             self.conversation_history = self._valid_messages(self.session_store.messages)
             # resume 时使用会话自己记录的模型
             _provider = self.session_store.meta.get("provider") or _default_provider
@@ -112,8 +114,8 @@ class AgentRuntime:
             # 新会话使用默认模型
             _provider = _default_provider
             _model = _default_model
-            self.session_store = SessionStore(
-                root=sessions_root,
+            self.session_store = HistoryStore(
+                db_path=history_db_path,
                 project_path=str(self.workspace),
                 provider=_provider,
                 model=_model,
@@ -158,13 +160,25 @@ class AgentRuntime:
 
         self._register_tools()
 
-        # 工具列表：新会话时存入 meta，resume 时从 meta 读取
-        if resume_session_id and "tools" in self.session_store.meta:
-            self._tools_for_api = self.session_store.meta["tools"]
+        # 初始化 MCP 工具（如果配置了的话）
+        self._init_mcp_tools()
+
+        all_tools_for_api = self.tool_registry.to_openai_tools()
+        persisted_tool_names = self.session_store.meta.get("tool_names") or []
+        if resume_session_id and persisted_tool_names:
+            allowed = set(persisted_tool_names)
+            self._tools_for_api = [
+                tool
+                for tool in all_tools_for_api
+                if tool.get("function", {}).get("name") in allowed
+            ]
         else:
-            self._tools_for_api = self.tool_registry.to_openai_tools()
-            self.session_store.meta["tools"] = self._tools_for_api
-            self.session_store._write_meta()
+            self._tools_for_api = all_tools_for_api
+            tool_names = [
+                tool.get("function", {}).get("name", "")
+                for tool in self._tools_for_api
+            ]
+            self.session_store.set_tool_names([name for name in tool_names if name])
 
         # 初始化上下文压缩器
         self.compressor = ContextCompressor(
@@ -217,9 +231,7 @@ class AgentRuntime:
     def switch_model(self, provider_name: str, model_name: str) -> bool:
         ok = self.router.switch_model(provider_name, model_name)
         if ok:
-            self.session_store.meta["provider"] = provider_name
-            self.session_store.meta["model"] = model_name
-            self.session_store._write_meta()
+            self.session_store.set_model(provider_name, model_name)
         return ok
 
     # 清洗历史会话。
@@ -247,7 +259,11 @@ class AgentRuntime:
             required_ids = [
                 tool_call.get("id")
                 for tool_call in tool_calls
-                if isinstance(tool_call, dict) and tool_call.get("id")
+                if (
+                    isinstance(tool_call, dict)
+                    and tool_call.get("id")
+                    and (tool_call.get("function") or {}).get("name")
+                )
             ]
             if len(required_ids) != len(tool_calls):
                 i += 1
@@ -540,11 +556,16 @@ class AgentRuntime:
                         self._emit({"type": "reasoning_end"})
                     if content_parts:
                         self._emit({"type": "assistant_end"})
-                    if content.strip() or tool_calls_map:
-                        break  # 保存部分内容
                     raise KeyboardInterrupt("用户中断")
 
-                if not content.strip() and not tool_calls_map:
+                valid_tool_calls = [
+                    tool_calls_map[i]
+                    for i in sorted(tool_calls_map.keys())
+                    if tool_calls_map[i].get("id")
+                    and (tool_calls_map[i].get("function") or {}).get("name")
+                ]
+
+                if not content.strip() and not valid_tool_calls:
                     raise EmptyModelResponseError("模型没有返回正文或工具调用")
                 if displayed_reasoning:
                     self._emit({"type": "reasoning_end"})
@@ -559,12 +580,10 @@ class AgentRuntime:
                 if reasoning_parts:
                     assistant_message["reasoning_content"] = reasoning_content
 
-                if tool_calls_map:
+                if valid_tool_calls:
                     if content:
                         self._emit({"type": "assistant_content", "content": content})
-                    assistant_message["tool_calls"] = [
-                        tool_calls_map[i] for i in sorted(tool_calls_map.keys())
-                    ]
+                    assistant_message["tool_calls"] = valid_tool_calls
 
                 self.session_store.append_message(assistant_message)
 
@@ -669,6 +688,18 @@ class AgentRuntime:
         # 阶段二：审批
         to_execute: list[tuple[str, str, dict]] = []  # (call_id, name, args)
         for call_id, tool_name, tool_args in parsed:
+            if self.cancel_event.is_set() or is_interrupted():
+                tool_message = {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": json.dumps(
+                        {"ok": False, "error": f"工具执行已取消 — {tool_name} 因用户中断被跳过"},
+                        ensure_ascii=False,
+                    ),
+                }
+                self.session_store.append_message(tool_message)
+                failed_messages.append(tool_message)
+                continue
             approval_result = self._handle_approval(
                 tool_call_id=call_id, tool_name=tool_name, tool_args=tool_args)
             if approval_result is not None:
@@ -1408,3 +1439,22 @@ class AgentRuntime:
                 session_meta=self.session_store.meta,
             ),
         )
+
+    def _init_mcp_tools(self) -> None:
+        """初始化 MCP 工具（如果配置了的话）。"""
+        try:
+            from .mcp_client import discover_mcp_tools, _MCP_AVAILABLE
+            if _MCP_AVAILABLE:
+                mcp_tools = discover_mcp_tools(self.tool_registry)
+                if mcp_tools:
+                    logger.info("MCP: registered %d tool(s): %s", len(mcp_tools), ", ".join(mcp_tools))
+        except Exception as e:
+            logger.debug("MCP initialization failed (non-fatal): %s", e)
+
+    def shutdown_mcp(self) -> None:
+        """关闭 MCP 连接（在 AgentRuntime 销毁时调用）。"""
+        try:
+            from .mcp_client import shutdown_mcp_servers
+            shutdown_mcp_servers()
+        except Exception:
+            pass

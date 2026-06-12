@@ -19,6 +19,7 @@ from rich.table import Table
 from rich.text import Text
 
 from .approval import ApprovalDecision, UserApprovalChoice
+from .history_store import HistoryStore
 from .paths import get_navi_home
 from .prompt_ui import NaviPromptSession
 from .runtime import AgentRuntime
@@ -578,32 +579,9 @@ def list_skills_from_navi_home() -> list[str]:
 
 def list_sessions_from_navi_home(limit: int = 20) -> list[dict]:
     """
-    从 Navi home 的 sessions 目录读取历史 session 元数据。
+    从 Navi home 的 SQLite 历史库读取 session 元数据。
     """
-    import json as _json
-
-    sessions_dir = get_navi_home() / "sessions"
-    sessions: list[dict] = []
-
-    if sessions_dir.exists():
-        for item in sorted(sessions_dir.iterdir(), reverse=True):
-            if not item.is_dir():
-                continue
-            meta_path = item / "meta.json"
-            if not meta_path.is_file():
-                continue
-            try:
-                meta = _json.loads(meta_path.read_text(encoding="utf-8"))
-                sessions.append({
-                    "session_id": meta.get("session_id", item.name),
-                    "title": meta.get("title", "Untitled"),
-                    "project_path": meta.get("project_path", ""),
-                    "created_at": meta.get("created_at", ""),
-                })
-            except Exception:
-                continue
-
-    return sessions[:limit]
+    return HistoryStore.list_sessions(get_navi_home() / "history.sqlite3", limit=limit)
 
 
 def print_sessions_table(limit: int = 5, current_session_id: str | None = None) -> None:
@@ -952,24 +930,32 @@ async def _start_chat_async(
     workspace = workspace.resolve()
 
     stream_box = StreamingBox(_print_live)
+    prompt_session: NaviPromptSession | None = None
+
+    def approval_handler(decision: ApprovalDecision) -> UserApprovalChoice:
+        if prompt_session is None:
+            return ask_approval_from_cli(decision)
+        return prompt_session.request_approval(decision)
 
     runtime = AgentRuntime(
         workspace=workspace,
         max_steps=max_steps,
         event_handler=lambda e: print_agent_event(e, box=stream_box),
         approval_mode=approval_mode,
-        approval_handler=ask_approval_from_cli,
+        approval_handler=approval_handler,
         resume_session_id=resume_session_id,
         on_output=_print_live,
     )
 
     navi_home = get_navi_home()
+    cancel_notice_printed = False
 
     def on_cancel_handler():
+        nonlocal cancel_notice_printed
         runtime.interrupt()
-        # 直接 print，不用 stderr
-        # patch_stdout(raw=False) 时 print 可以正常工作
-        print("\n⚡ 中断请求已收到，等待当前 chunk 返回后中断...", flush=True)
+        if not cancel_notice_printed:
+            cancel_notice_printed = True
+            _print_live("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
 
     prompt_session = NaviPromptSession(
         history_path=navi_home / "chat_history.txt",
@@ -988,6 +974,7 @@ async def _start_chat_async(
 
     async def process_message(text: str) -> None:
         """处理一条用户消息：斜杠命令或 Agent 对话轮次。"""
+        nonlocal cancel_notice_printed
         # /model 命令：打开 model picker（需要 prompt_session 交互）
         if text.strip() == "/model":
             info = runtime.get_model_info()
@@ -1040,6 +1027,7 @@ async def _start_chat_async(
         timer["frozen"] = 0.0
         prompt_session.invalidate()
 
+        cancel_notice_printed = False
         prompt_session.begin_running()
         stream_box.reset()
         prompt_session._force_exit = False  # Reset force exit flag (use private attr for setter)
@@ -1177,14 +1165,9 @@ def main_callback(
 
     resume_session_id = resume
     if continue_:
-        sessions_dir = get_navi_home() / "sessions"
-        if sessions_dir.exists():
-            dirs = sorted(
-                [d for d in sessions_dir.iterdir() if d.is_dir()],
-                reverse=True,
-            )
-            if dirs:
-                resume_session_id = dirs[0].name
+        latest_session_id = HistoryStore.latest_session_id(get_navi_home() / "history.sqlite3")
+        if latest_session_id:
+            resume_session_id = latest_session_id
 
     ctx.obj = {
         "workspace": workspace,

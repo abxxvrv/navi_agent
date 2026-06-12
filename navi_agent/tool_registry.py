@@ -34,6 +34,27 @@ class ToolRegistry:
             visible=visible,
         )
 
+    def unregister(self, name: str) -> bool:
+        """移除已注册的工具。返回是否成功。"""
+        if name in self._tools:
+            del self._tools[name]
+            return True
+        return False
+
+    def has(self, name: str) -> bool:
+        """检查工具是否已注册。"""
+        return name in self._tools
+
+    def remove_by_prefix(self, prefix: str) -> int:
+        """移除所有以 prefix 开头的工具（用于 MCP server 重载）。
+        
+        返回移除的数量。
+        """
+        to_remove = [n for n in self._tools if n.startswith(prefix)]
+        for name in to_remove:
+            del self._tools[name]
+        return len(to_remove)
+
     def to_openai_tools(self) -> list[dict]:
         """
         转成 OpenAI / DeepSeek chat.completions.create 需要的 tools 格式。

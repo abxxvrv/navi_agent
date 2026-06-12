@@ -93,22 +93,31 @@ def test_inline_state_keeps_submitted_user_message():
     assert text.index("你好") < text.index("OK")
 
 
-def test_running_prompt_queues_entered_text():
-    """Running-mode Enter binding queues text and clears the buffer."""
+def test_running_prompt_enter_inserts_newline():
+    """Running-mode UI should no longer advertise Enter as queue."""
     with create_pipe_input() as pipe_input:
         prompt = _make_prompt(pipe_input)
 
-        # Simulate running mode + user typing and pressing Enter
-        prompt.begin_streaming(NaviInlineStreamState(on_change=prompt.invalidate))
-        prompt._buffer.set_document(Document("queued"))
+        prompt.begin_running()
+        text = fragment_list_to_text(prompt._render_toolbar())
 
-        # Replicate the running Enter binding logic
-        text = prompt._buffer.text.strip()
-        prompt._queued.append(text)
-        prompt._buffer.set_document(Document(), bypass_readonly=True)
+        assert "enter: newline" in text
+        assert "enter: queue" not in text
 
-        assert prompt.take_queued() == ["queued"]
-        assert prompt._buffer.text == ""
+
+def test_running_toolbar_shows_interrupt_requested():
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(pipe_input)
+        prompt.begin_running()
+
+        initial_text = fragment_list_to_text(prompt._render_toolbar())
+        assert "ctrl+c: interrupt" in initial_text
+
+        prompt._cancel_requested = True
+        interrupted_text = fragment_list_to_text(prompt._render_toolbar())
+
+        assert "interrupt requested" in interrupted_text
+        assert "waiting for current operation" in interrupted_text
 
 
 def test_prompt_approval_returns_choice():

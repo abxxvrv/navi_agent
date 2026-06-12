@@ -29,6 +29,8 @@ from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 
+from .approval import UserApprovalChoice
+
 
 _NAVI_STYLE = PTStyle.from_dict({
     "bottom-toolbar": "bg:#1a1a2e #C0C0C0",
@@ -65,12 +67,15 @@ class NaviPromptSession:
 
         # Model picker state (None = closed)
         self.model_picker: dict | None = None
+        self._approval_state: dict[str, Any] | None = None
 
         input_bindings = KeyBindings()
         running_bindings = KeyBindings()
         picker_bindings = KeyBindings()
+        approval_bindings = KeyBindings()
         not_running = Condition(lambda: not self._running)
         picker_active = Condition(lambda: self.model_picker is not None)
+        approval_active = Condition(lambda: self._approval_state is not None)
 
         # ── Picker key bindings ──
 
@@ -120,17 +125,59 @@ class NaviPromptSession:
             self.close_model_picker()
             event.app.invalidate()
 
-        # ── Running key bindings ──
+        # ── Approval key bindings ──
 
-        @running_bindings.add("enter", eager=True, filter=Condition(lambda: self._running))
-        def _(event: KeyPressEvent) -> None:
-            text = event.current_buffer.text.strip()
-            if text:
-                self._queued.append(text)
-                event.current_buffer.set_document(Document(), bypass_readonly=True)
+        @approval_bindings.add("up", filter=approval_active, eager=True)
+        def _approval_up(event: KeyPressEvent) -> None:
+            state = self._approval_state
+            if state:
+                state["selected"] = max(0, state["selected"] - 1)
+                event.app.invalidate()
+
+        @approval_bindings.add("down", filter=approval_active, eager=True)
+        def _approval_down(event: KeyPressEvent) -> None:
+            state = self._approval_state
+            if state:
+                state["selected"] = min(len(state["choices"]) - 1, state["selected"] + 1)
+                event.app.invalidate()
+
+        @approval_bindings.add("enter", filter=approval_active, eager=True)
+        def _approval_enter(event: KeyPressEvent) -> None:
+            self._choose_approval()
             event.app.invalidate()
 
-        @running_bindings.add("c-c", eager=True, filter=Condition(lambda: self._running))
+        @approval_bindings.add("escape", filter=approval_active, eager=True)
+        def _approval_escape(event: KeyPressEvent) -> None:
+            self._choose_approval(index=2)
+            event.app.invalidate()
+
+        @approval_bindings.add("c-c", filter=approval_active, eager=True)
+        def _approval_interrupt(event: KeyPressEvent) -> None:
+            self._cancel_requested = True
+            if self._on_cancel:
+                self._on_cancel()
+            self._choose_approval(index=2)
+            event.app.invalidate()
+
+        def _make_approval_number_handler(index: int):
+            def _handler(event: KeyPressEvent) -> None:
+                self._choose_approval(index=index)
+                event.app.invalidate()
+            return _handler
+
+        for _num in range(1, 4):
+            approval_bindings.add(str(_num), filter=approval_active, eager=True)(
+                _make_approval_number_handler(_num - 1)
+            )
+
+        # ── Running key bindings ──
+
+        @running_bindings.add("enter", eager=True, filter=Condition(lambda: self._running and self._approval_state is None))
+        def _(event: KeyPressEvent) -> None:
+            event.current_buffer.insert_text("\n")
+            event.app.invalidate()
+
+        @running_bindings.add("c-c", eager=True, filter=Condition(lambda: self._running and self._approval_state is None))
         def _(event: KeyPressEvent) -> None:
             import time as _time
             now = _time.monotonic()
@@ -185,14 +232,19 @@ class NaviPromptSession:
         self._layout = Layout(
             HSplit([
                 Window(
-                    content=FormattedTextControl(self._render_box_top),
-                    height=1,
-                    dont_extend_height=True,
-                ),
-                Window(
                     content=FormattedTextControl(self._render_model_picker),
                     dont_extend_height=True,
                     height=self._picker_height,
+                ),
+                Window(
+                    content=FormattedTextControl(self._render_approval),
+                    dont_extend_height=True,
+                    height=self._approval_height,
+                ),
+                Window(
+                    content=FormattedTextControl(self._render_box_top),
+                    height=1,
+                    dont_extend_height=True,
                 ),
                 VSplit([
                     Window(
@@ -227,7 +279,7 @@ class NaviPromptSession:
 
         self._app: Application[str] = Application(
             layout=self._layout,
-            key_bindings=merge_key_bindings([picker_bindings, running_bindings, input_bindings, key_bindings]),
+            key_bindings=merge_key_bindings([picker_bindings, approval_bindings, running_bindings, input_bindings, key_bindings]),
             input=input,
             output=output,
             full_screen=False,
@@ -275,6 +327,22 @@ class NaviPromptSession:
         self._queued = []
         return result
 
+    def request_approval(self, decision: Any) -> Any:
+        """Ask for approval through the active prompt_toolkit UI."""
+        response_queue: queue.Queue[Any] = queue.Queue()
+        self._approval_state = {
+            "decision": decision,
+            "choices": [
+                ("Allow once", UserApprovalChoice.ALLOW_ONCE),
+                ("Allow for this session", UserApprovalChoice.ALLOW_SESSION),
+                ("Reject", UserApprovalChoice.REJECT),
+            ],
+            "selected": 0,
+            "response_queue": response_queue,
+        }
+        self.invalidate()
+        return response_queue.get()
+
     @property
     def cancel_requested(self) -> bool:
         return self._cancel_requested
@@ -321,6 +389,20 @@ class NaviPromptSession:
         self.model_picker = None
         self._app.invalidate()
 
+    def _choose_approval(self, index: int | None = None) -> None:
+        state = self._approval_state
+        if not state:
+            return
+        if index is None:
+            index = state.get("selected", 0)
+        choices = state.get("choices") or []
+        if index < 0 or index >= len(choices):
+            index = len(choices) - 1
+        value = choices[index][1]
+        self._approval_state = None
+        state["response_queue"].put(value)
+        self._app.invalidate()
+
     def _picker_height(self) -> int:
         """Dynamic height for the picker window."""
         if not self.model_picker:
@@ -364,6 +446,47 @@ class NaviPromptSession:
         fragments.append(("class:picker-dim", "  ↑↓ navigate  Enter select  Esc cancel\n"))
         return fragments
 
+    def _approval_height(self) -> int:
+        if not self._approval_state:
+            return 0
+        return len(self._approval_lines())
+
+    def _render_approval(self) -> FormattedText:
+        if not self._approval_state:
+            return FormattedText()
+        fragments = FormattedText()
+        for style, text in self._approval_lines():
+            fragments.append((style, text + "\n"))
+        return fragments
+
+    def _approval_lines(self) -> list[tuple[str, str]]:
+        state = self._approval_state
+        if not state:
+            return []
+        decision = state["decision"]
+        command = getattr(decision, "command", None) or (getattr(decision, "tool_args", {}) or {}).get("command", "")
+        approval_key = getattr(decision, "approval_key", None)
+        lines: list[tuple[str, str]] = [
+            ("class:running-prompt-separator", "╭─ approval " + "─" * 68),
+            ("", f"  {getattr(decision, 'reason', '')}"),
+            ("", ""),
+            ("", f"  Tool: {getattr(decision, 'tool_name', '')}"),
+            ("", f"  Risk: {getattr(getattr(decision, 'risk', ''), 'value', getattr(decision, 'risk', ''))}"),
+        ]
+        if command:
+            lines.append(("", f"  Command: {command}"))
+        lines.append(("class:running-prompt-separator", "╰" + "─" * 79))
+        lines.append(("class:bottom-toolbar", "Use ↑/↓ or 1/2/3, then press Enter."))
+        if approval_key:
+            lines.append(("class:bottom-toolbar", f"Approval key: {approval_key}"))
+        lines.append(("", ""))
+        selected = state.get("selected", 0)
+        for i, (label, _value) in enumerate(state["choices"], start=1):
+            prefix = "❯" if selected == i - 1 else " "
+            style = "class:picker-selected" if selected == i - 1 else ""
+            lines.append((style, f"{prefix} [{i}] {label}"))
+        return lines
+
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
@@ -371,7 +494,7 @@ class NaviPromptSession:
     def _patch_stdout(self):
         if self._custom_io:
             return contextlib.nullcontext()
-        return patch_stdout()  # 不用 raw=True，让 print() 能正常工作
+        return patch_stdout(raw=True)
 
     def _render_box_top(self) -> FormattedText:
         app = get_app_or_none()
@@ -388,7 +511,12 @@ class NaviPromptSession:
         fragments.extend(self._bottom_toolbar())
         if self._running:
             fragments.append(("", "\n"))
-            fragments.append(("class:bottom-toolbar", "enter: queue  |  ctrl+c: interrupt"))
+            if self._approval_state:
+                fragments.append(("class:bottom-toolbar", "approval: use ↑/↓ or 1/2/3, then Enter"))
+            elif self._cancel_requested:
+                fragments.append(("class:bottom-toolbar", "interrupt requested  |  waiting for current operation"))
+            else:
+                fragments.append(("class:bottom-toolbar", "enter: newline  |  ctrl+c: interrupt"))
         return fragments
 
 

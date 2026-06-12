@@ -367,6 +367,17 @@ class ApprovalManager:
         if normalized_tool_name in self.WRITE_TOOLS:
             return self._check_write_tool(normalized_tool_name, tool_name, args)
 
+        # MCP 工具，用户配置即信任。
+        if normalized_tool_name.startswith("mcp_"):
+            return ApprovalDecision(
+                action=ApprovalAction.ALLOW,
+                risk=RiskLevel.SAFE,
+                reason="MCP 工具，用户配置即信任。",
+                tool_name=tool_name,
+                tool_args=args,
+                approval_key=None,
+            )
+
         # 未分类工具
         return ApprovalDecision(
             action=ApprovalAction.DENY,
