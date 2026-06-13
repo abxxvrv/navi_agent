@@ -37,8 +37,14 @@ SLASH_COMMANDS = [
     "/skills",
     "/sessions",
     "/mcp",
+    "/mcp status",
+    "/mcp add",
+    "/mcp remove",
+    "/mcp reload",
+    "/mcp help",
     "/model",
     "/approval",
+    "/compress",
     "/exit",
     "/quit",
 ]
@@ -149,8 +155,9 @@ def print_chat_help() -> None:
             "[cyan]/tools[/cyan]     Show available tools",
             "[cyan]/skills[/cyan]    Show available skills",
             "[cyan]/sessions[/cyan]  Show recent sessions",
-            "[cyan]/mcp[/cyan]       Manage MCP servers",
+            "[cyan]/mcp[/cyan]       Manage MCP servers (status/add/remove/reload/help)",
             "[cyan]/approval[/cyan]  Show approval mode and session approvals",
+            "[cyan]/compress[/cyan]  Compress context into a new session",
             "[cyan]/exit[/cyan]      Exit Navi",
             "",
             "Type a natural language task to start.",
@@ -273,7 +280,7 @@ def _format_elapsed(timer: dict) -> str:
 
 
 def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
-    _p = printer or console.print
+    _p = printer or _print_live
     event_type = event.get("type")
     tool_name = event.get("tool_name")
     tool_args = event.get("tool_args") or {}
@@ -347,13 +354,10 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
 
         elif tool_name == "run_command":
             exit_code = tool_result.get("exit_code")
-            output = tool_result.get("output") or ""
             if tool_result.get("ok") or exit_code == 0:
                 _p(f"[green]┊ exit_code=0[/green]{elapsed_str}")
             else:
                 _p(f"[red]┊ exit_code={exit_code}[/red]{elapsed_str}")
-            if output.strip():
-                _p(Syntax(output[-4000:], "text", word_wrap=True))
 
         else:
             if tool_result.get("ok") is False:
@@ -815,10 +819,11 @@ def handle_slash_command(
         console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
-    if command == "/mcp":
+    if command.startswith("/mcp"):
         try:
             from ..integrations.mcp_commands import handle_mcp_command
-            result = handle_mcp_command(args, runtime.tool_registry)
+            mcp_args = command[4:].strip() if len(command) > 4 else ""
+            result = handle_mcp_command(mcp_args, runtime.tool_registry)
             console.print(result)
         except ImportError:
             console.print("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
@@ -842,6 +847,21 @@ def handle_slash_command(
         else:
             console.print("[dim]No session approvals yet.[/dim]")
 
+        return True
+
+    if command == "/compress":
+        result = runtime.compress_context_to_new_session()
+        if not result.get("ok"):
+            console.print(f"[red]Compress failed:[/red] {result.get('error', 'unknown error')}")
+            return True
+
+        if not result.get("compressed"):
+            console.print("[yellow]Nothing to compress yet.[/yellow]")
+            return True
+
+        console.print("[green]Compressed context into a new session.[/green]")
+        console.print(f"[dim]Previous session: {result['old_session_id']}[/dim]")
+        console.print(f"[dim]Current session:  {result['new_session_id']}[/dim]")
         return True
 
     console.print(f"[yellow]Unknown command:[/yellow] {command}")

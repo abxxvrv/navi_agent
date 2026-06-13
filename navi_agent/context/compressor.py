@@ -193,7 +193,9 @@ class ContextCompressor:
         )
 
         # 使用模板生成提示词
-        prompt = COMPACT_PROMPT_TEMPLATE.format(content=content)
+        from jinja2 import Template
+        template = Template(COMPACT_PROMPT_TEMPLATE)
+        prompt = template.render(content=content)
 
         # 调用 LLM 生成摘要
         summary = self._call_llm(prompt, max_tokens=budget)

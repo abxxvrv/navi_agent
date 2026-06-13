@@ -476,6 +476,65 @@ class AgentRuntime:
         if self._system_prompt:
             self.session_store.append_message({"role": "system", "content": self._system_prompt})
 
+    def compress_context_to_new_session(self) -> dict[str, Any]:
+        return self._compress_current_session_to_new_session(reason="manual")
+
+    def _compress_current_session_to_new_session(
+        self,
+        *,
+        reason: str,
+    ) -> dict[str, Any]:
+        old_store = self.session_store
+        old_session_id = old_store.session_id
+        old_messages = list(old_store.messages)
+
+        try:
+            compressed_messages = self.compressor.compress(
+                old_messages,
+                messages_path=None,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "compressed": False,
+                "reason": reason,
+                "error": str(exc),
+                "old_session_id": old_session_id,
+                "new_session_id": old_session_id,
+                "old_message_count": len(old_messages),
+                "new_message_count": len(old_messages),
+            }
+
+        if compressed_messages == old_messages:
+            return {
+                "ok": True,
+                "compressed": False,
+                "reason": reason,
+                "old_session_id": old_session_id,
+                "new_session_id": old_session_id,
+                "old_message_count": len(old_messages),
+                "new_message_count": len(old_messages),
+            }
+
+        new_store = old_store.fork_with_messages(
+            compressed_messages,
+            title=old_store.meta.get("title"),
+        )
+        new_store.save_usage({})
+        self.session_store = new_store
+        self.conversation_history = self._valid_messages(new_store.messages)
+        self.last_usage = {}
+
+        return {
+            "ok": True,
+            "compressed": True,
+            "reason": reason,
+            "old_session_id": old_session_id,
+            "new_session_id": new_store.session_id,
+            "old_message_count": len(old_messages),
+            "new_message_count": len(new_store.messages),
+        }
+
     def _compile_graph(self):
         graph_builder = StateGraph(AgentState)
 
@@ -502,21 +561,14 @@ class AgentRuntime:
         # 压缩检查
         prompt_tokens = self.last_usage.get("prompt_tokens", 0)
         if self.compressor.should_compress(prompt_tokens):
-            try:
-                compressed_messages = self.compressor.compress(
-                    [
-                        {"role": "system", "content": self._system_prompt},
-                        *messages,
-                    ],
-                    messages_path=self.session_store.messages_path,
-                )
-                self.session_store.messages = compressed_messages
-                messages = self._valid_messages(compressed_messages)
-            except Exception as e:
+            result = self._compress_current_session_to_new_session(reason="auto")
+            if result.get("ok") and result.get("compressed"):
+                messages = self._valid_messages(self.session_store.messages)
+            elif not result.get("ok"):
                 self._emit(
                     {
                         "type": "compress_error",
-                        "message": f"上下文压缩失败，跳过: {e}",
+                        "message": f"上下文压缩失败，跳过: {result.get('error', 'unknown error')}",
                     }
                 )
 

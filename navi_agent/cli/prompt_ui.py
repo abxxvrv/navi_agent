@@ -22,8 +22,9 @@ from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent, merge_key_bindings
 from prompt_toolkit.layout import Layout
-from prompt_toolkit.layout.containers import HSplit, VSplit, Window, Dimension
+from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit, VSplit, Window, Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
+from prompt_toolkit.layout.menus import CompletionsMenu
 from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 
@@ -171,6 +172,12 @@ class NaviPromptSession:
 
         # ── Idle key bindings ──
 
+        @input_bindings.add("/", eager=True, filter=not_running & ~picker_active)
+        def _(event: KeyPressEvent) -> None:
+            event.current_buffer.insert_text("/")
+            event.current_buffer.start_completion(select_first=False)
+            event.app.invalidate()
+
         @input_bindings.add("enter", eager=True, filter=not_running & ~picker_active)
         def _(event: KeyPressEvent) -> None:
             text = event.current_buffer.text.strip()
@@ -202,7 +209,8 @@ class NaviPromptSession:
         )
 
         self._layout = Layout(
-            HSplit([
+            FloatContainer(
+                content=HSplit([
                 Window(
                     content=FormattedTextControl(self._render_model_picker),
                     dont_extend_height=True,
@@ -246,7 +254,15 @@ class NaviPromptSession:
                     height=2,
                     dont_extend_height=True,
                 ),
-            ])
+                ]),
+                floats=[
+                    Float(
+                        xcursor=True,
+                        ycursor=True,
+                        content=CompletionsMenu(max_height=8, scroll_offset=1),
+                    ),
+                ],
+            )
         )
 
         self._app: Application[str] = Application(

@@ -15,6 +15,7 @@ class HistoryStore:
         project_path: str | None = None,
         provider: str = "",
         model: str = "",
+        parent_session_id: str | None = None,
     ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -32,6 +33,7 @@ class HistoryStore:
             "provider": provider,
             "model": model,
             "tool_names": [],
+            "parent_session_id": parent_session_id,
         }
 
         self._init_db()
@@ -50,7 +52,7 @@ class HistoryStore:
                 """
                 SELECT session_id, title, created_at, updated_at, project_path,
                        provider, model, tool_names_json, last_prompt_tokens,
-                       last_completion_tokens
+                       last_completion_tokens, parent_session_id
                 FROM sessions
                 WHERE session_id = ?
                 """,
@@ -75,6 +77,7 @@ class HistoryStore:
                 "provider": row["provider"],
                 "model": row["model"],
                 "tool_names": instance._decode_tool_names(row["tool_names_json"]),
+                "parent_session_id": row["parent_session_id"],
             }
             if usage:
                 instance.meta["last_usage"] = usage
@@ -114,7 +117,8 @@ class HistoryStore:
         with store._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT session_id, title, project_path, created_at, updated_at
+                SELECT session_id, title, project_path, created_at, updated_at,
+                       parent_session_id
                 FROM sessions
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT ?
@@ -129,6 +133,7 @@ class HistoryStore:
                 "project_path": row["project_path"],
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
+                "parent_session_id": row["parent_session_id"],
             }
             for row in rows
         ]
@@ -203,6 +208,31 @@ class HistoryStore:
         raw = self.meta.get("last_usage", {})
         return {k: v for k, v in raw.items() if k in ("prompt_tokens", "completion_tokens")}
 
+    def fork_with_messages(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        title: str | None = None,
+    ) -> "HistoryStore":
+        child = HistoryStore(
+            db_path=self.db_path,
+            project_path=self.meta.get("project_path"),
+            provider=self.meta.get("provider", ""),
+            model=self.meta.get("model", ""),
+            parent_session_id=self.session_id,
+        )
+        child.meta["title"] = title or self.meta.get("title", "Untitled session")
+        child.meta["tool_names"] = list(self.meta.get("tool_names", []))
+        usage = self.get_usage()
+        if usage:
+            child.meta["last_usage"] = usage
+        child._upsert_session()
+
+        for message in messages:
+            child.append_message(message)
+
+        return child
+
     def set_tool_names(self, tool_names: list[str]) -> None:
         seen: set[str] = set()
         self.meta["tool_names"] = [
@@ -239,6 +269,7 @@ class HistoryStore:
                         provider TEXT NOT NULL DEFAULT '',
                         model TEXT NOT NULL DEFAULT '',
                         tool_names_json TEXT NOT NULL DEFAULT '[]',
+                        parent_session_id TEXT,
                         last_prompt_tokens INTEGER,
                         last_completion_tokens INTEGER,
                         message_count INTEGER NOT NULL DEFAULT 0,
@@ -278,6 +309,7 @@ class HistoryStore:
                         ON messages(role);
                     """
                 )
+                self._ensure_column(conn, "sessions", "parent_session_id", "TEXT")
 
     def _upsert_session(self, conn: sqlite3.Connection | None = None) -> None:
         usage = self.get_usage()
@@ -290,6 +322,7 @@ class HistoryStore:
             self.meta.get("provider", ""),
             self.meta.get("model", ""),
             json.dumps(self.meta.get("tool_names", []), ensure_ascii=False),
+            self.meta.get("parent_session_id"),
             usage.get("prompt_tokens"),
             usage.get("completion_tokens"),
             len(self.messages),
@@ -298,10 +331,10 @@ class HistoryStore:
         sql = """
             INSERT INTO sessions (
                 session_id, title, created_at, updated_at, project_path,
-                provider, model, tool_names_json, last_prompt_tokens,
-                last_completion_tokens, message_count
+                provider, model, tool_names_json, parent_session_id,
+                last_prompt_tokens, last_completion_tokens, message_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 title = excluded.title,
                 updated_at = excluded.updated_at,
@@ -309,6 +342,7 @@ class HistoryStore:
                 provider = excluded.provider,
                 model = excluded.model,
                 tool_names_json = excluded.tool_names_json,
+                parent_session_id = excluded.parent_session_id,
                 last_prompt_tokens = excluded.last_prompt_tokens,
                 last_completion_tokens = excluded.last_completion_tokens,
                 message_count = excluded.message_count
@@ -321,6 +355,20 @@ class HistoryStore:
         with self._connect() as owned_conn:
             with owned_conn:
                 owned_conn.execute(sql, params)
+
+    def _ensure_column(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        definition: str,
+    ) -> None:
+        columns = {
+            row["name"]
+            for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
     def _decode_tool_names(self, value: str | None) -> list[str]:
         if not value:

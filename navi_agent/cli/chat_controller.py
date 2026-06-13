@@ -96,7 +96,11 @@ class ChatController:
         navi_home = get_navi_home()
         self.prompt_session = NaviPromptSession(
             history_path=navi_home / "chat_history.txt",
-            completer=WordCompleter(self.slash_commands, ignore_case=True),
+            completer=WordCompleter(
+                self.slash_commands,
+                ignore_case=True,
+                WORD=True,
+            ),
             key_bindings=self.create_prompt_key_bindings(self.runtime),
             bottom_toolbar=lambda: self.render_bottom_toolbar(
                 self.runtime, self.workspace, self.timer
@@ -236,7 +240,7 @@ class ChatController:
     def handle_cancel(self) -> None:
         runtime = self.runtime
         if runtime is not None:
-            runtime.interrupt()
+            self.loop.run_in_executor(None, runtime.interrupt)
         if not self.cancel_notice_printed:
             self.cancel_notice_printed = True
             self.print_live("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
