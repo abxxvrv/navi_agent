@@ -238,7 +238,7 @@ def _mcp_remove(args: str, registry) -> str:
 
 def _get_config_path() -> Path:
     """获取 config.json 路径。"""
-    from .paths import get_config_path
+    from ..paths import get_config_path
     return get_config_path()
 
 

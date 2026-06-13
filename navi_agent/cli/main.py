@@ -5,9 +5,8 @@ from pathlib import Path
 from typing import Annotated, Any
 
 import typer
-from .paths import load_navi_dotenv
+from ..paths import load_navi_dotenv
 from prompt_toolkit.application.current import get_app
-from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.filters import Condition
 from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.patch_stdout import run_in_terminal
@@ -18,13 +17,11 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
-from .approval import ApprovalDecision, UserApprovalChoice
-from .history_store import HistoryStore
-from .paths import get_navi_home
-from .prompt_ui import NaviPromptSession
-from .runtime import AgentRuntime
+from ..tools.approval import ApprovalDecision, UserApprovalChoice
+from ..storage.history_store import HistoryStore
+from ..paths import get_navi_home
+from ..runtime.agent import AgentRuntime
 from .ui import NaviStreamView, approval_panel, console, format_context_status
-from .stream_box import StreamingBox
 
 
 APP_NAME = "Navi"
@@ -820,7 +817,7 @@ def handle_slash_command(
 
     if command == "/mcp":
         try:
-            from .mcp_commands import handle_mcp_command
+            from ..integrations.mcp_commands import handle_mcp_command
             result = handle_mcp_command(args, runtime.tool_registry)
             console.print(result)
         except ImportError:
@@ -925,174 +922,26 @@ async def _start_chat_async(
     approval_mode: str,
     resume_session_id: str | None = None,
 ) -> None:
-    load_navi_dotenv()
+    from .chat_controller import ChatController
 
-    workspace = workspace.resolve()
-
-    stream_box = StreamingBox(_print_live)
-    prompt_session: NaviPromptSession | None = None
-
-    def approval_handler(decision: ApprovalDecision) -> UserApprovalChoice:
-        if prompt_session is None:
-            return ask_approval_from_cli(decision)
-        return prompt_session.request_approval(decision)
-
-    runtime = AgentRuntime(
+    controller = ChatController(
         workspace=workspace,
         max_steps=max_steps,
-        event_handler=lambda e: print_agent_event(e, box=stream_box),
+        no_splash=no_splash,
         approval_mode=approval_mode,
-        approval_handler=approval_handler,
         resume_session_id=resume_session_id,
-        on_output=_print_live,
+        slash_commands=SLASH_COMMANDS,
+        print_live=_print_live,
+        print_splash=print_splash,
+        print_agent_event=print_agent_event,
+        render_bottom_toolbar=render_bottom_toolbar,
+        create_prompt_key_bindings=create_prompt_key_bindings,
+        handle_slash_command=handle_slash_command,
+        ask_approval_from_cli=ask_approval_from_cli,
+        result_is_ok=result_is_ok,
+        result_error=result_error,
     )
-
-    navi_home = get_navi_home()
-    cancel_notice_printed = False
-
-    def on_cancel_handler():
-        nonlocal cancel_notice_printed
-        runtime.interrupt()
-        if not cancel_notice_printed:
-            cancel_notice_printed = True
-            _print_live("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
-
-    prompt_session = NaviPromptSession(
-        history_path=navi_home / "chat_history.txt",
-        completer=WordCompleter(SLASH_COMMANDS, ignore_case=True),
-        key_bindings=create_prompt_key_bindings(runtime),
-        bottom_toolbar=lambda: render_bottom_toolbar(runtime, workspace, timer),
-        on_cancel=on_cancel_handler,
-    )
-
-    # 计时器：记录用户发消息到收到回复的耗时
-    timer: dict = {"start": None, "frozen": 0.0}
-
-    # 欢迎信息直接打印到终端（Hermes 风格）
-    if not no_splash and not resume_session_id:
-        print_splash(workspace, runtime.router.model_name, approval_mode, runtime.session_store.session_id)
-
-    async def process_message(text: str) -> None:
-        """处理一条用户消息：斜杠命令或 Agent 对话轮次。"""
-        nonlocal cancel_notice_printed
-        # /model 命令：打开 model picker（需要 prompt_session 交互）
-        if text.strip() == "/model":
-            info = runtime.get_model_info()
-            providers = info["providers"]
-            if not providers:
-                _print_live("[yellow]No providers configured. Edit ~/.navi/config.json[/yellow]")
-                return
-
-            def on_provider_selected(provider: str) -> list[str]:
-                models = runtime.router.list_models(provider)
-                return list(models.keys())
-
-            def on_model_selected(provider: str, model: str) -> None:
-                if runtime.switch_model(provider, model):
-                    _print_live(f"[green]Switched to {provider} / {model}[/green]")
-                else:
-                    _print_live(f"[red]Failed to switch to {provider} / {model}[/red]")
-
-            prompt_session.open_model_picker(
-                providers=providers,
-                current_provider=info["current_provider"],
-                current_model=info["current_model"],
-                on_provider_selected=on_provider_selected,
-                on_model_selected=on_model_selected,
-            )
-            return
-
-        # 其他斜杠命令
-        if handle_slash_command(
-            command=text,
-            runtime=runtime,
-            workspace=workspace,
-        ):
-            return
-
-        # 待处理通知
-        if runtime.reviewer.pending_message:
-            msg = runtime.reviewer.pending_message
-            runtime.reviewer.pending_message = None
-            _print_live(f"[dim]💾 {msg}[/dim]")
-
-        # 用户消息直接打印（Hermes 风格）
-        _print_live()
-        _print_live(Text(f"> {text}", style="#87CEEB"))
-        _print_live()
-
-        # 开始计时
-        import time as _time
-        timer["start"] = _time.time()
-        timer["frozen"] = 0.0
-        prompt_session.invalidate()
-
-        cancel_notice_printed = False
-        prompt_session.begin_running()
-        stream_box.reset()
-        prompt_session._force_exit = False  # Reset force exit flag (use private attr for setter)
-
-        # 后台定期刷新状态栏（让计时器实时更新）
-        async def _tick_toolbar():
-            while timer["start"] is not None:
-                prompt_session.invalidate()
-                await asyncio.sleep(1)
-
-        tick_task = asyncio.ensure_future(_tick_toolbar())
-
-        def runner():
-            try:
-                return runtime.run_turn(text)
-            except KeyboardInterrupt:
-                return {
-                    "ok": False,
-                    "error": "用户中断",
-                    "final_answer": "",
-                    "content": "",
-                }
-
-        loop = asyncio.get_running_loop()
-        result = await loop.run_in_executor(None, runner)
-
-        # 冻结计时器
-        if timer["start"] is not None:
-            timer["frozen"] = max(0.0, _time.time() - timer["start"])
-            timer["start"] = None
-        tick_task.cancel()
-        prompt_session.invalidate()
-
-        # 确保流式输出的 box 都关闭
-        stream_box.close_all()
-        prompt_session.end_running()
-
-        # Double Ctrl+C → force exit
-        if prompt_session.force_exit:
-            prompt_session._app.exit(result="exit")
-            raise EOFError("Force exit (double Ctrl+C)")
-
-        # 如果没有任何流式输出（模型没产生 reasoning 或 content），打印 final_answer
-        if not stream_box.had_output:
-            answer = result.get("final_answer") or result.get("content") or ""
-            if answer:
-                _print_live()
-                _print_live(Markdown(answer))
-
-        if prompt_session.cancel_requested:
-            _print_live("[yellow]Interrupted.[/yellow]")
-
-        if not result_is_ok(result):
-            _print_live(f"[red]{result_error(result)}[/red]")
-
-        # 处理排队消息
-        queued = prompt_session.take_queued()
-        if queued:
-            for msg in queued:
-                await process_message(msg)
-
-    await prompt_session.run_session(on_submit=process_message)
-
-    sid = runtime.session_store.session_id
-    console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
+    await controller.run()
 
 
 # =========================

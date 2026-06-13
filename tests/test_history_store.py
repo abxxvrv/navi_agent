@@ -1,7 +1,7 @@
 import sqlite3
 import time
 
-from navi_agent.history_store import HistoryStore
+from navi_agent.storage.history_store import HistoryStore
 
 
 def test_history_store_creates_sqlite_schema(tmp_path):

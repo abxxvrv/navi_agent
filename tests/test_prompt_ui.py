@@ -1,10 +1,8 @@
 import asyncio
 import tempfile
-import time
 from io import StringIO
 from pathlib import Path
 
-from prompt_toolkit.document import Document
 from prompt_toolkit.formatted_text import fragment_list_to_text
 from prompt_toolkit.input.defaults import create_pipe_input
 from prompt_toolkit.key_binding import KeyBindings
@@ -12,13 +10,12 @@ from prompt_toolkit.layout.controls import BufferControl
 from prompt_toolkit.output import DummyOutput
 from rich.console import Console
 
-from navi_agent.approval import ApprovalAction, ApprovalDecision, RiskLevel
-import navi_agent.cli as cli
-from navi_agent.prompt_ui import NaviPromptSession
-from navi_agent.ui import NaviInlineStreamState
+from navi_agent.tools.approval import ApprovalAction, ApprovalDecision, RiskLevel
+import navi_agent.cli.main as cli
+from navi_agent.cli.prompt_ui import NaviPromptSession
 
 
-def _make_prompt(pipe_input):
+def _make_prompt(pipe_input, **kwargs):
     return NaviPromptSession(
         history_path=Path(tempfile.gettempdir()) / "navi_prompt_test_history.txt",
         completer=None,
@@ -26,33 +23,49 @@ def _make_prompt(pipe_input):
         bottom_toolbar=lambda: [("", "toolbar")],
         input=pipe_input,
         output=DummyOutput(),
+        **kwargs,
     )
 
 
-def test_prompt_renders_streaming_above_input_box():
+def test_prompt_approval_panel_renders_decision():
     with create_pipe_input() as pipe_input:
         prompt = _make_prompt(pipe_input)
-        state = NaviInlineStreamState()
-        state.handle_event({"type": "assistant_delta", "content": "OK"})
-        prompt.begin_streaming(state)
+        decision = ApprovalDecision(
+            action=ApprovalAction.ASK,
+            risk=RiskLevel.RISKY,
+            reason="Need approval",
+            tool_name="run_command",
+            tool_args={"command": "echo hi"},
+            approval_key="run:echo hi",
+            command="echo hi",
+        )
 
-        text = prompt._conv_buffer.text
+        prompt.show_approval(decision)
+        text = fragment_list_to_text(prompt._render_approval())
 
-    # During active streaming, _compose_current shows a "Composing..." indicator
-    assert "Composing" in text
+    assert "Need approval" in text
+    assert "run_command" in text
+    assert "echo hi" in text
 
 
-def test_prompt_shows_history_after_streaming():
+def test_prompt_clear_approval_removes_panel():
     with create_pipe_input() as pipe_input:
         prompt = _make_prompt(pipe_input)
-        state = NaviInlineStreamState()
-        state.handle_event({"type": "assistant_delta", "content": "OK"})
-        state.handle_event({"type": "assistant_end"})
-        prompt.show_history(state.render())
+        decision = ApprovalDecision(
+            action=ApprovalAction.ASK,
+            risk=RiskLevel.RISKY,
+            reason="Need approval",
+            tool_name="run_command",
+            tool_args={"command": "echo hi"},
+            approval_key="run:echo hi",
+            command="echo hi",
+        )
 
-        text = prompt._conv_buffer.text
+        prompt.show_approval(decision)
+        prompt.clear_approval()
+        text = fragment_list_to_text(prompt._render_approval())
 
-        assert "OK" in text
+        assert text == ""
 
 
 def test_prompt_box_in_above_input():
@@ -75,22 +88,6 @@ def test_prompt_input_window_config():
 
     assert window is not None
     assert bool(window.dont_extend_height()) is True
-
-
-def test_inline_state_keeps_submitted_user_message():
-    state = NaviInlineStreamState()
-    state.add_user_message("你好")
-    state.handle_event({"type": "assistant_delta", "content": "OK"})
-    state.handle_event({"type": "assistant_end"})
-
-    output = StringIO()
-    test_console = Console(file=output, force_terminal=False, width=80, highlight=False)
-    test_console.print(state.render())
-    text = output.getvalue()
-
-    assert "你好" in text
-    assert "OK" in text
-    assert text.index("你好") < text.index("OK")
 
 
 def test_running_prompt_enter_inserts_newline():
@@ -120,10 +117,71 @@ def test_running_toolbar_shows_interrupt_requested():
         assert "waiting for current operation" in interrupted_text
 
 
-def test_prompt_approval_returns_choice():
-    """request_approval blocks until _choose_approval resolves it."""
+def test_running_ctrl_c_requests_cancel_without_exiting_app():
+    cancels = []
+
+    class FakeApp:
+        def __init__(self):
+            self.exited = False
+            self.invalidated = False
+
+        def exit(self, result=None):
+            self.exited = True
+
+        def invalidate(self):
+            self.invalidated = True
+
+    class FakeEvent:
+        def __init__(self):
+            self.app = FakeApp()
+
     with create_pipe_input() as pipe_input:
-        prompt = _make_prompt(pipe_input)
+        prompt = _make_prompt(pipe_input, on_cancel=lambda: cancels.append(True))
+        prompt.begin_running()
+        event = FakeEvent()
+
+        prompt._handle_ctrl_c(event)
+
+        assert cancels == [True]
+        assert prompt.cancel_requested is True
+        assert event.app.invalidated is True
+        assert event.app.exited is False
+
+
+def test_running_double_ctrl_c_marks_force_exit_without_exiting_app():
+    cancels = []
+
+    class FakeApp:
+        def __init__(self):
+            self.exited = False
+
+        def exit(self, result=None):
+            self.exited = True
+
+        def invalidate(self):
+            pass
+
+    class FakeEvent:
+        def __init__(self):
+            self.app = FakeApp()
+
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(pipe_input, on_cancel=lambda: cancels.append(True))
+        prompt.begin_running()
+        event = FakeEvent()
+
+        prompt._handle_ctrl_c(event)
+        prompt._handle_ctrl_c(event)
+
+        assert cancels == [True, True]
+        assert prompt.force_exit is True
+        assert event.app.exited is False
+
+
+def test_prompt_approval_sends_choice_callback():
+    choices = []
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(pipe_input, on_approval_response=choices.append)
         decision = ApprovalDecision(
             action=ApprovalAction.ASK,
             risk=RiskLevel.RISKY,
@@ -134,19 +192,39 @@ def test_prompt_approval_returns_choice():
             command="echo hi",
         )
 
-        # Resolve approval from another thread
-        def resolve():
-            time.sleep(0.05)
-            prompt._choose_approval(1)  # "Allow for this session"
+        prompt.show_approval(decision)
+        prompt._submit_approval(1)  # "Allow for this session"
 
-        import threading
-        t = threading.Thread(target=resolve)
-        t.start()
+        assert [choice.value for choice in choices] == ["allow_session"]
+        assert fragment_list_to_text(prompt._render_approval()) == ""
 
-        choice = prompt.request_approval(decision)
-        t.join()
 
-        assert choice.value == "allow_session"
+def test_prompt_approval_cancel_does_not_send_reject():
+    choices = []
+    cancels = []
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(
+            pipe_input,
+            on_approval_response=choices.append,
+            on_cancel=lambda: cancels.append(True),
+        )
+        decision = ApprovalDecision(
+            action=ApprovalAction.ASK,
+            risk=RiskLevel.RISKY,
+            reason="Need approval",
+            tool_name="run_command",
+            tool_args={"command": "echo hi"},
+            approval_key="run:echo hi",
+            command="echo hi",
+        )
+
+        prompt.show_approval(decision)
+        prompt._cancel_approval()
+
+        assert choices == []
+        assert cancels == [True]
+        assert prompt.cancel_requested is True
+        assert fragment_list_to_text(prompt._render_approval()) == ""
 
 
 def test_splash_matches_kimi_style_welcome_card(monkeypatch):
@@ -171,39 +249,6 @@ def test_splash_matches_kimi_style_welcome_card(monkeypatch):
     assert "Version:" in text
     assert "Commands" not in text
     assert "Press" not in text
-
-
-def test_stream_state_accumulates_across_turns():
-    """A single NaviInlineStreamState reused across turns keeps all history."""
-    state = NaviInlineStreamState()
-
-    def render(state):
-        output = StringIO()
-        c = Console(file=output, force_terminal=False, width=80, highlight=False)
-        rendered = state.render()
-        if rendered is not None:
-            c.print(rendered)
-        return output.getvalue()
-
-    # Turn 1
-    state.add_user_message("message one")
-    state.handle_event({"type": "assistant_delta", "content": "response one"})
-    state.handle_event({"type": "assistant_end"})
-
-    rendered_1 = render(state)
-    assert "message one" in rendered_1
-    assert "response one" in rendered_1
-
-    # Turn 2 — same state, should still contain turn 1 history
-    state.add_user_message("message two")
-    state.handle_event({"type": "assistant_delta", "content": "response two"})
-    state.handle_event({"type": "assistant_end"})
-
-    rendered_2 = render(state)
-    assert "message one" in rendered_2
-    assert "response one" in rendered_2
-    assert "message two" in rendered_2
-    assert "response two" in rendered_2
 
 
 def _find_buffer_window(prompt):

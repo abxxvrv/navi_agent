@@ -25,7 +25,7 @@ dev = [
 ]
 
 [project.scripts]
-navi = "navi_agent.cli:main"
+navi = "navi_agent.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["navi_agent*"]

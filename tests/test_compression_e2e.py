@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 # 添加项目路径
-from navi_agent.compressor import ContextCompressor, TRIGGER_RATIO
+from navi_agent.context.compressor import ContextCompressor, TRIGGER_RATIO
 
 
 def load_messages(file_path: Path) -> list[dict]:

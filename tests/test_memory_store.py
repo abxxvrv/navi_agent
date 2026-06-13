@@ -5,13 +5,13 @@ import tempfile
 from pathlib import Path
 from unittest.mock import patch
 
-from navi_agent.memory_store import MemoryStore, ENTRY_DELIMITER
+from navi_agent.storage.memory_store import MemoryStore, ENTRY_DELIMITER
 
 
 @pytest.fixture
 def memory_store(tmp_path):
     """创建临时目录的 MemoryStore"""
-    with patch("memory_store.get_memory_dir", return_value=tmp_path / "memories"):
+    with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "memories"):
         store = MemoryStore(memory_limit=100, user_limit=80)
         yield store
 
@@ -129,7 +129,7 @@ class TestMemoryStore:
 
     def test_persistence(self, tmp_path):
         """持久化测试"""
-        with patch("memory_store.get_memory_dir", return_value=tmp_path / "memories"):
+        with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "memories"):
             # 创建并添加条目
             store1 = MemoryStore(memory_limit=2000, user_limit=1000)
             store1.add("memory", "持久化测试")

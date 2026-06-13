@@ -399,7 +399,7 @@ def _load_mcp_config() -> Dict[str, dict]:
     Returns a dict of ``{server_name: server_config}`` or empty dict.
     """
     try:
-        from .paths import get_config_path
+        from ..paths import get_config_path
         config_path = get_config_path()
         if not config_path.is_file():
             return {}
