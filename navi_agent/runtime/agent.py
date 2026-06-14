@@ -39,6 +39,7 @@ from ..tools.builtin import (
     TavilySearchTool,
     VisionAnalyzeTool,
     WriteFileTool,
+    SearchSessionTool,
 )
 from ..tools.registry import ToolRegistry
 from ..context.compressor import ContextCompressor
@@ -825,21 +826,26 @@ class AgentRuntime:
 
         # 阶段二：审批
         to_execute: list[tuple[str, str, dict]] = []  # (call_id, name, args)
-        for call_id, tool_name, tool_args in parsed:
-            self._raise_if_cancelled()
-            approval_result = self._handle_approval(
-                tool_call_id=call_id, tool_name=tool_name, tool_args=tool_args)
-            self._raise_if_cancelled()
-            if approval_result is not None:
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": json.dumps(approval_result, ensure_ascii=False),
-                }
-                self.session_store.append_message(tool_message)
-                rejected_messages.append(tool_message)
-                continue
-            to_execute.append((call_id, tool_name, tool_args))
+        approval_batch_done = bool(parsed)
+        try:
+            for call_id, tool_name, tool_args in parsed:
+                self._raise_if_cancelled()
+                approval_result = self._handle_approval(
+                    tool_call_id=call_id, tool_name=tool_name, tool_args=tool_args)
+                self._raise_if_cancelled()
+                if approval_result is not None:
+                    tool_message = {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "content": json.dumps(approval_result, ensure_ascii=False),
+                    }
+                    self.session_store.append_message(tool_message)
+                    rejected_messages.append(tool_message)
+                    continue
+                to_execute.append((call_id, tool_name, tool_args))
+        finally:
+            if approval_batch_done:
+                self._emit({"type": "approval_batch_done"})
 
         # ── Pre-flight: 中断检查 ──
         self._raise_if_cancelled()
@@ -1584,8 +1590,8 @@ class AgentRuntime:
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "对图片的提问或指令，默认 '请描述这张图片的内容'。",
-                        "default": "请描述这张图片的内容",
+                        "description": "对图片的提问或指令。",
+                        "default": "Fully describe and explain everything about this image, then answer the following question",
                     },
                 },
                 "required": ["image_path"],
@@ -1594,6 +1600,17 @@ class AgentRuntime:
                 workspace=self.workspace,
                 config_path=get_config_path(),
                 session_meta=self.session_store.meta,
+            ),
+        )
+
+        # search_session
+        self.tool_registry.register(
+            name="search_session",
+            description="搜索历史会话消息。支持关键词、短语、布尔查询（AND/OR/NOT）。返回匹配消息的摘要和上下文。",
+            parameters=SearchSessionTool.parameters,
+            function=SearchSessionTool(
+                navi_home=self.navi_home,
+                current_session_id=self.session_store.session_id,
             ),
         )
 

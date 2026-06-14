@@ -36,6 +36,7 @@ SLASH_COMMANDS = [
     "/tools",
     "/skills",
     "/sessions",
+    "/search",
     "/mcp",
     "/mcp status",
     "/mcp add",
@@ -45,6 +46,7 @@ SLASH_COMMANDS = [
     "/model",
     "/approval",
     "/compress",
+    "/fork",
     "/exit",
     "/quit",
 ]
@@ -155,9 +157,11 @@ def print_chat_help() -> None:
             "[cyan]/tools[/cyan]     Show available tools",
             "[cyan]/skills[/cyan]    Show available skills",
             "[cyan]/sessions[/cyan]  Show recent sessions",
+            "[cyan]/search[/cyan]   Search session history",
             "[cyan]/mcp[/cyan]       Manage MCP servers (status/add/remove/reload/help)",
             "[cyan]/approval[/cyan]  Show approval mode and session approvals",
             "[cyan]/compress[/cyan]  Compress context into a new session",
+            "[cyan]/fork[/cyan]     Fork session into a new window",
             "[cyan]/exit[/cyan]      Exit Navi",
             "",
             "Type a natural language task to start.",
@@ -819,6 +823,73 @@ def handle_slash_command(
         console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
+    if command.startswith("/search"):
+        query = command[7:].strip()
+        if not query:
+            console.print("[yellow]Usage: /search <query>[/yellow]")
+            console.print("[dim]支持关键词、短语（用引号）、布尔（AND/OR/NOT）[/dim]")
+            return True
+
+        try:
+            from ..storage.history_store import HistoryStore
+            from ..paths import get_navi_home
+
+            db_path = get_navi_home() / "history.sqlite3"
+            if not db_path.is_file():
+                console.print("[yellow]没有历史会话。[/yellow]")
+                return True
+
+            store = HistoryStore.__new__(HistoryStore)
+            store.db_path = db_path
+            store.path = db_path
+            import threading
+            store._lock = threading.Lock()
+            store._conn = store._connect()
+
+            results = store.search_messages(query, limit=10)
+
+            if not results:
+                console.print(f"[yellow]没有找到包含 \"{query}\" 的消息。[/yellow]")
+                return True
+
+            console.print(f"[bold]搜索结果[/bold] ({len(results)} 条)")
+            console.print()
+
+            for i, r in enumerate(results, 1):
+                session_id = r.get("session_id", "")
+                title = r.get("title", "Untitled")
+                snippet = r.get("snippet", "")
+                created_at = r.get("created_at", "")
+
+                # 标题行
+                console.print(f"[cyan]{i}.[/cyan] [bold]{title}[/bold]")
+                console.print(f"   [dim]{session_id} · {created_at}[/dim]")
+
+                # 片段（高亮匹配词）
+                if snippet:
+                    # 移除 FTS5 snippet 标记，改用 Rich 高亮
+                    clean_snippet = snippet.replace(">>>", "[bold]").replace("<<<", "[/bold]")
+                    console.print(f"   {clean_snippet}")
+
+                # 上下文摘要
+                context = r.get("context", [])
+                if context:
+                    ctx_parts = []
+                    for msg in context:
+                        role = msg.get("role", "")
+                        content = msg.get("content", "")[:60]
+                        if content:
+                            ctx_parts.append(f"[dim]{role}:[/dim] {content}")
+                    if ctx_parts:
+                        console.print(f"   [dim]├─ {' │ '.join(ctx_parts)}[/dim]")
+
+                console.print()
+
+            return True
+        except Exception as e:
+            console.print(f"[red]搜索失败: {e}[/red]")
+            return True
+
     if command.startswith("/mcp"):
         try:
             from ..integrations.mcp_commands import handle_mcp_command
@@ -862,6 +933,71 @@ def handle_slash_command(
         console.print("[green]Compressed context into a new session.[/green]")
         console.print(f"[dim]Previous session: {result['old_session_id']}[/dim]")
         console.print(f"[dim]Current session:  {result['new_session_id']}[/dim]")
+        return True
+
+    if command == "/fork":
+        import subprocess
+        import os
+        import sys
+
+        def _ps_quote(value: str) -> str:
+            """Escape a string for use inside PowerShell single-quotes."""
+            return "'" + value.replace("'", "''") + "'"
+
+        current_store = runtime.session_store
+        current_messages = list(current_store.messages)
+        current_session_id = current_store.session_id
+
+        # Fork session
+        new_store = current_store.fork_for_user(current_messages)
+        new_session_id = new_store.session_id
+
+        console.print(f"[green]Forked session.[/green]")
+        console.print(f"[dim]Original session: {current_session_id}[/dim]")
+        console.print(f"[dim]New session:      {new_session_id}[/dim]")
+
+        # Open new terminal window
+        try:
+            is_wsl = os.path.exists("/mnt/c/Windows/System32/cmd.exe")
+            python_exe = sys.executable
+            ws = str(workspace)
+
+            if is_wsl:
+                # WSL: wt.exe → wsl.exe → bash → python
+                navi_cmd = (
+                    f"cd {ws!r} && "
+                    f"{python_exe} -m navi_agent.cli.main --resume {new_session_id!r}"
+                )
+                subprocess.Popen([
+                    "wt.exe", "-w", "0", "nt",
+                    "wsl.exe", "-e", "bash", "-c", navi_cmd,
+                ])
+            else:
+                # Native Windows: wt.exe → powershell → python
+                # 用 -d 让 wt.exe 设工作目录，PowerShell 里不需要 cd
+                def _wsl_to_win(p: str) -> str:
+                    if p.startswith("/mnt/"):
+                        return f"{p[5].upper()}:{p[6:].replace('/', chr(92))}"
+                    return p
+
+                win_path = _wsl_to_win(ws)
+                ps_command = (
+                    f"& {_ps_quote(python_exe)} "
+                    f"-m navi_agent.cli.main --resume {_ps_quote(new_session_id)}"
+                )
+                subprocess.Popen([
+                    "wt.exe", "-w", "0", "nt",
+                    "-d", win_path,
+                    "powershell.exe",
+                    "-NoProfile", "-NoExit",
+                    "-Command", ps_command,
+                ])
+
+            console.print("[dim]Opened new terminal window.[/dim]")
+        except Exception as e:
+            console.print(f"[yellow]Could not open new terminal: {e}[/yellow]")
+            console.print(f"[dim]Manual: navi --resume {new_session_id}[/dim]")
+
         return True
 
     console.print(f"[yellow]Unknown command:[/yellow] {command}")

@@ -34,6 +34,7 @@ class ApprovalBroker:
         self._default_timeout = default_timeout
         self._lock = threading.Lock()
         self._current: _ApprovalRequest | None = None
+        self._current_deadline: float | None = None
 
     def request(self, decision: Any, timeout: float | None = None) -> UserApprovalChoice:
         wait_timeout = self._default_timeout if timeout is None else timeout
@@ -47,6 +48,7 @@ class ApprovalBroker:
         self._on_request(decision)
 
         deadline = time.monotonic() + wait_timeout
+        self._current_deadline = deadline
         try:
             while True:
                 remaining = deadline - time.monotonic()
@@ -60,6 +62,7 @@ class ApprovalBroker:
                 except queue.Empty:
                     continue
         finally:
+            self._current_deadline = None
             with self._lock:
                 if self._current is request:
                     self._current = None
@@ -88,3 +91,4 @@ class ApprovalBroker:
             request.response_queue.put_nowait(choice)
         except queue.Full:
             pass
+

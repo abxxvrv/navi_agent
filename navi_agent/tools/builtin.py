@@ -635,11 +635,21 @@ class RunCommandTool:
             output_parts: list[str] = []
 
             def _reader():
+                displayed_chars = 0
+                cli_truncated = False
                 for line in proc.stdout:
                     text = line.decode(encoding, errors="replace")
                     output_parts.append(text)
-                    if self.on_output:
-                        self.on_output(text, end="", markup=False)
+                    if self.on_output and not cli_truncated:
+                        if displayed_chars + len(text) <= 2000:
+                            self.on_output(text, end="", markup=False)
+                            displayed_chars += len(text)
+                        else:
+                            remaining = 2000 - displayed_chars
+                            if remaining > 0:
+                                self.on_output(text[:remaining], end="", markup=False)
+                            self.on_output("\n... (output truncated)", end="", markup=False)
+                            cli_truncated = True
                 proc.stdout.close()
 
             reader = threading.Thread(target=_reader)
@@ -1371,17 +1381,7 @@ class VisionAnalyzeTool:
         if not base_url or not api_key:
             return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 或 providers.mimo）。"}
 
-        # 拼接 prompt（Hermes 模式）
-        if prompt and prompt.strip() != "请描述这张图片的内容":
-            full_prompt = (
-                "Fully describe and explain everything about this image, "
-                "then answer the following question:\n\n" + prompt
-            )
-        else:
-            full_prompt = (
-                "Describe this image in detail. Include all visible text, "
-                "objects, layout, colors, and any other relevant information."
-            )
+        full_prompt = prompt
 
         payload = {
             "model": model,
@@ -1453,3 +1453,255 @@ class VisionAnalyzeTool:
 
         # 路径 2：调用辅助视觉模型
         return self._call_auxiliary_vision(image_data_url, prompt)
+
+
+class SearchSessionTool:
+    """会话搜索工具，三种模式（和 Hermes 一致）。
+
+    1. DISCOVERY: query → FTS5 搜索 + lineage 去重 + bookends
+    2. SCROLL: session_id + around_message_id → 纯消息窗口
+    3. BROWSE: 无参数 → 最近会话列表
+    """
+
+    name = "search_session"
+    description = (
+        "搜索历史会话消息。支持关键词、短语、布尔查询（AND/OR/NOT）。"
+        "返回匹配消息的摘要和上下文。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "搜索关键词。支持 FTS5 语法：简单关键词、短语（用引号）、布尔（AND/OR/NOT）、前缀（*）。"
+            },
+            "session_id": {
+                "type": "string",
+                "description": "会话 ID，配合 around_message_id 使用，进入 SCROLL 模式。"
+            },
+            "around_message_id": {
+                "type": "integer",
+                "description": "锚定消息 ID，配合 session_id 使用。"
+            },
+            "window": {
+                "type": "integer",
+                "description": "消息窗口大小（默认 5）",
+                "default": 5
+            },
+            "limit": {
+                "type": "integer",
+                "description": "返回结果数（默认 3）",
+                "default": 3
+            },
+            "sort": {
+                "type": "string",
+                "enum": ["newest", "oldest"],
+                "description": "排序方式：newest（最新）、oldest（最早），默认按相关性"
+            }
+        }
+    }
+
+    def __init__(self, navi_home: Path, current_session_id: str = None):
+        self.navi_home = navi_home
+        self.current_session_id = current_session_id
+
+    def __call__(
+        self,
+        query: str = "",
+        session_id: str = None,
+        around_message_id: int = None,
+        window: int = 5,
+        limit: int = 3,
+        sort: str = None,
+    ) -> dict[str, Any]:
+        try:
+            from ..storage.history_store import HistoryStore
+
+            db_path = self.navi_home / "history.sqlite3"
+            if not db_path.is_file():
+                return {"ok": True, "count": 0, "results": [], "message": "没有历史会话。"}
+
+            store = HistoryStore.for_querying(db_path)
+
+            # SCROLL 模式：session_id + around_message_id
+            if session_id and around_message_id is not None:
+                return self._scroll(store, session_id, int(around_message_id), window)
+
+            # DISCOVERY 模式：query
+            if query and query.strip():
+                return self._discover(store, query.strip(), limit, sort)
+
+            # BROWSE 模式：无参数
+            return self._browse(store, limit)
+
+        except Exception as e:
+            return {"ok": False, "error": f"搜索失败: {str(e)}"}
+
+    def _resolve_to_root(self, store, session_id: str) -> str:
+        """沿 parent_session_id 链找到根 session。"""
+        visited = set()
+        cur = session_id
+        while cur and cur not in visited:
+            visited.add(cur)
+            meta = store.get_session(cur)
+            if not meta:
+                break
+            parent = meta.get("parent_session_id")
+            if not parent:
+                break
+            cur = parent
+        return cur
+
+    def _scroll(self, store, session_id: str, around_message_id: int, window: int) -> dict:
+        """SCROLL 模式：返回锚定消息 ± window 条上下文。"""
+        window = max(1, min(window, 20))
+
+        # 拒绝在当前活跃 session lineage 内滚动
+        if self.current_session_id:
+            a_root = self._resolve_to_root(store, session_id)
+            c_root = self._resolve_to_root(store, self.current_session_id)
+            if a_root and c_root and a_root == c_root:
+                return {"ok": False, "error": "锚点在当前会话 lineage 内，已在上下文中。"}
+
+        view = store.get_messages_around(session_id, around_message_id, window=window)
+        messages = view.get("window") or []
+
+        if not messages:
+            return {"ok": False, "error": f"消息 {around_message_id} 不在会话 {session_id} 中。"}
+
+        session_meta = store.get_session(session_id) or {}
+
+        return {
+            "ok": True,
+            "mode": "scroll",
+            "session_id": session_id,
+            "around_message_id": around_message_id,
+            "session_meta": {
+                "title": session_meta.get("title"),
+                "model": session_meta.get("model"),
+                "created_at": session_meta.get("created_at"),
+            },
+            "messages": [_shape_msg(m, anchor_id=around_message_id) for m in messages],
+            "messages_before": view.get("messages_before", 0),
+            "messages_after": view.get("messages_after", 0),
+        }
+
+    def _discover(self, store, query: str, limit: int, sort: str) -> dict:
+        """DISCOVERY 模式：FTS5 搜索 + lineage 去重 + bookends。"""
+        limit = max(1, min(limit, 10))
+
+        raw_results = store.search_messages(
+            query=query,
+            limit=50,
+            sort=sort,
+        )
+
+        if not raw_results:
+            return {"ok": True, "mode": "discover", "query": query, "results": [], "count": 0}
+
+        current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
+
+        # 按 lineage 去重
+        seen: dict[str, dict] = {}
+        for r in raw_results:
+            raw_sid = r.get("session_id")
+            if not raw_sid:
+                continue
+            resolved = self._resolve_to_root(store, raw_sid)
+            # 跳过当前 session lineage
+            if current_root and resolved == current_root:
+                continue
+            if self.current_session_id and raw_sid == self.current_session_id:
+                continue
+            if resolved not in seen:
+                r["_lineage_root"] = resolved
+                seen[resolved] = r
+            if len(seen) >= limit:
+                break
+
+        results = []
+        for lineage_root, match_info in seen.items():
+            hit_sid = match_info.get("session_id") or lineage_root
+            msg_id = match_info.get("id")
+            if not msg_id:
+                continue
+
+            try:
+                view = store.get_anchored_view(hit_sid, msg_id, window=5, bookend=3)
+            except Exception:
+                continue
+
+            session_meta = store.get_session(lineage_root) or {}
+
+            entry = {
+                "session_id": hit_sid,
+                "title": session_meta.get("title"),
+                "model": session_meta.get("model") or "unknown",
+                "created_at": session_meta.get("created_at"),
+                "matched_role": match_info.get("role"),
+                "match_message_id": msg_id,
+                "snippet": match_info.get("snippet") or "",
+                "bookend_start": view.get("bookend_start") or [],
+                "messages": [_shape_msg(m, anchor_id=msg_id) for m in (view.get("window") or [])],
+                "bookend_end": view.get("bookend_end") or [],
+                "messages_before": view.get("messages_before", 0),
+                "messages_after": view.get("messages_after", 0),
+            }
+            if lineage_root and lineage_root != hit_sid:
+                entry["parent_session_id"] = lineage_root
+            results.append(entry)
+
+        return {
+            "ok": True,
+            "mode": "discover",
+            "query": query,
+            "results": results,
+            "count": len(results),
+        }
+
+    def _browse(self, store, limit: int) -> dict:
+        """BROWSE 模式：返回最近会话列表。"""
+        limit = max(1, min(limit, 20))
+
+        current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
+
+        sessions = store.list_sessions_rich(limit=limit + 5, order_by_last_active=True)
+
+        results = []
+        for s in sessions:
+            sid = s.get("session_id", "")
+            # 跳过当前 session
+            if current_root and sid == current_root:
+                continue
+            if self.current_session_id and sid == self.current_session_id:
+                continue
+            results.append({
+                "session_id": sid,
+                "title": s.get("title"),
+                "model": s.get("model"),
+                "created_at": s.get("created_at"),
+                "updated_at": s.get("updated_at"),
+                "message_count": s.get("message_count", 0),
+                "preview": s.get("preview") or "",
+            })
+            if len(results) >= limit:
+                break
+
+        return {
+            "ok": True,
+            "mode": "browse",
+            "results": results,
+            "count": len(results),
+        }
+
+
+def _shape_msg(m: dict, anchor_id: int = None) -> dict:
+    """精简消息用于返回。"""
+    entry = {
+        "id": m.get("id"),
+        "role": m.get("role"),
+        "content": (m.get("content") or "")[:500],
+    }
+    if anchor_id is not None and m.get("id") == anchor_id:
+        entry["anchor"] = True
+    return entry

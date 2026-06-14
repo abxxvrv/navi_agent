@@ -72,9 +72,9 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `navi_agent/runtime/interruptible.py`: 阻塞操作的统一入口，当前包含 `run_model_stream()`、`wait_approval()`、`tool_worker()`。
 - `navi_agent/model/request.py`: 模型流式请求 worker。runtime 控制线程轮询 chunk 和 cancel，必要时 abort 当前请求。
 - `navi_agent/model/router.py`: 模型 provider/router。普通调用保留共享 client，交互中断路径使用 request-local client。
-- `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 需要能在中断时杀掉 subprocess。
+- `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 需要能在中断时杀掉 subprocess；`SearchSessionTool` 支持 DISCOVERY/SCROLL/BROWSE 三种模式。
 - `navi_agent/tools/registry.py`: 工具注册表。
-- `navi_agent/storage/history_store.py`: SQLite 会话历史存储，当前历史写入的权威位置。
+- `navi_agent/storage/history_store.py`: SQLite 会话历史存储。FTS5 全文搜索（unicode61 + trigram 双表，触发器自动同步）。关键方法：`search_messages()`、`get_messages_around()`、`get_anchored_view()`（window + bookends）、`get_session()`、`list_sessions_rich()`。
 - `navi_agent/storage/memory_store.py`: 长期记忆存储。
 - `navi_agent/storage/agent_store.py`: 子 agent 实例存储。
 - `navi_agent/context/context_manager.py`: 运行上下文组装。
@@ -94,6 +94,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 阻塞路径应通过 `interruptible.py` 的 wrapper 进入：模型走 `run_model_stream()`，审批走 `wait_approval()`，工具 worker 进入 `tool_worker()`。
 - 中断保存历史的原则：本轮 user 会写入会话；未完成的 assistant 文本不落库；已写入的 assistant tool_calls 必须补齐中断 tool message，避免 resume 时历史结构坏掉。
 - 优先模仿 Hermes 的中断思路：设置 cancel 标记、设置线程级 cooperative interrupt、abort 当前请求/进程，让执行层自行抛出并清理，不强杀 Python 线程。
+- 会话搜索（`SearchSessionTool`）三种模式复刻 Hermes：DISCOVERY（FTS5 搜索 + lineage 去重 + bookends）、SCROLL（锚定消息窗口）、BROWSE（最近会话列表）。`parent_session_id` 链用于压缩会话的 lineage 归并。搜索结果自动跳过当前活跃会话。
 
 ## 7. 未完成任务
 

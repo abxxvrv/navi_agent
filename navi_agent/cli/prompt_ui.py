@@ -8,6 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import threading
+import textwrap
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any
@@ -21,6 +24,7 @@ from prompt_toolkit.filters import Condition
 from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent, merge_key_bindings
+from prompt_toolkit.keys import Keys
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import Float, FloatContainer, HSplit, VSplit, Window, Dimension
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -29,6 +33,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 
 from ..tools.approval import UserApprovalChoice
+from .interrupt_trace import trace_interrupt
 
 
 _NAVI_STYLE = PTStyle.from_dict({
@@ -37,6 +42,8 @@ _NAVI_STYLE = PTStyle.from_dict({
     "input": "",
     "picker-selected": "bold",
     "picker-dim": "#888888",
+    "approval-countdown": "#4ec9b0",
+    "approval-countdown-warn": "bold #ff4444",
 })
 
 class NaviPromptSession:
@@ -63,11 +70,14 @@ class NaviPromptSession:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._cancel_requested = False
         self._force_exit = False  # Double Ctrl+C → force exit
-        self._last_ctrl_c_time: float = 0.0  # 上次 Ctrl+C 时间（用于 double-press 检测）
+        self._last_interrupt_time: float = 0.0  # 上次中断键时间（用于 double-press 检测）
 
         # Model picker state (None = closed)
         self.model_picker: dict | None = None
         self._approval_state: dict[str, Any] | None = None
+        self._approval_history: list[dict[str, Any]] = []
+        self.approval_broker: Any = None  # set by chat_controller after init
+        self._countdown_timer: threading.Timer | None = None
 
         input_bindings = KeyBindings()
         running_bindings = KeyBindings()
@@ -77,6 +87,7 @@ class NaviPromptSession:
         not_running = Condition(lambda: not self._running)
         picker_active = Condition(lambda: self.model_picker is not None)
         approval_active = Condition(lambda: self._approval_state is not None)
+        approval_ui_visible = Condition(lambda: self._approval_state is not None or bool(self._approval_history))
 
         # ── Picker key bindings ──
 
@@ -149,8 +160,7 @@ class NaviPromptSession:
 
         @approval_bindings.add("escape", filter=approval_active, eager=True)
         def _approval_escape(event: KeyPressEvent) -> None:
-            self._submit_approval(index=2)
-            event.app.invalidate()
+            self._handle_escape(event)
 
         def _make_approval_number_handler(index: int):
             def _handler(event: KeyPressEvent) -> None:
@@ -163,22 +173,33 @@ class NaviPromptSession:
                 _make_approval_number_handler(_num - 1)
             )
 
+        @approval_bindings.add("c-o", filter=approval_active, eager=True)
+        def _approval_expand(event: KeyPressEvent) -> None:
+            state = self._approval_state
+            if state:
+                state["command_expanded"] = not state.get("command_expanded", False)
+                event.app.invalidate()
+
+        @approval_bindings.add(Keys.Any, filter=approval_ui_visible, eager=True)
+        def _approval_swallow_input(event: KeyPressEvent) -> None:
+            event.app.invalidate()
+
         # ── Running key bindings ──
 
-        @running_bindings.add("enter", eager=True, filter=Condition(lambda: self._running and self._approval_state is None))
+        @running_bindings.add("enter", eager=True, filter=Condition(lambda: self._running and self._approval_state is None and not self._approval_history))
         def _(event: KeyPressEvent) -> None:
             event.current_buffer.insert_text("\n")
             event.app.invalidate()
 
         # ── Idle key bindings ──
 
-        @input_bindings.add("/", eager=True, filter=not_running & ~picker_active)
+        @input_bindings.add("/", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
             event.current_buffer.insert_text("/")
             event.current_buffer.start_completion(select_first=False)
             event.app.invalidate()
 
-        @input_bindings.add("enter", eager=True, filter=not_running & ~picker_active)
+        @input_bindings.add("enter", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
             text = event.current_buffer.text.strip()
             if text:
@@ -193,13 +214,17 @@ class NaviPromptSession:
         def _(event: KeyPressEvent) -> None:
             event.current_buffer.insert_text("\n")
 
-        @input_bindings.add("c-d", eager=True, filter=not_running & ~picker_active)
+        @input_bindings.add("c-d", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
             event.app.exit(result="exit")
 
         @global_bindings.add("c-c", eager=True, is_global=True)
         def _(event: KeyPressEvent) -> None:
             self._handle_ctrl_c(event)
+
+        @global_bindings.add("escape", eager=True, is_global=True)
+        def _(event: KeyPressEvent) -> None:
+            self._handle_escape(event)
 
         self._buffer = Buffer(
             history=FileHistory(str(history_path)),
@@ -301,12 +326,18 @@ class NaviPromptSession:
             self._loop = None
 
     def begin_running(self) -> None:
+        trace_interrupt("prompt_begin_running")
         self._running = True
         self._cancel_requested = False
         self._force_exit = False
         self._app.invalidate()
 
     def end_running(self) -> None:
+        trace_interrupt(
+            "prompt_end_running",
+            cancel_requested=self._cancel_requested,
+            force_exit=self._force_exit,
+        )
         self._running = False
         self._app.invalidate()
 
@@ -320,11 +351,34 @@ class NaviPromptSession:
                 ("Reject", UserApprovalChoice.REJECT),
             ],
             "selected": 0,
+            "command_expanded": False,
+            "submitted": False,
         }
+        # Cancel any existing countdown, then start a new one
+        if self._countdown_timer is not None:
+            self._countdown_timer.cancel()
+
+        def _tick() -> None:
+            if self._approval_state is not None:
+                self.invalidate()
+                self._countdown_timer = threading.Timer(1.0, _tick)
+                self._countdown_timer.daemon = True
+                self._countdown_timer.start()
+
+        self._countdown_timer = threading.Timer(1.0, _tick)
+        self._countdown_timer.daemon = True
+        self._countdown_timer.start()
         self.invalidate()
 
-    def clear_approval(self) -> None:
+    def clear_approval(self, *, clear_history: bool = False) -> None:
+        if self._approval_state is not None and self._approval_state.get("submitted"):
+            self._approval_history.append(self._approval_state)
+        if self._countdown_timer is not None:
+            self._countdown_timer.cancel()
+            self._countdown_timer = None
         self._approval_state = None
+        if clear_history:
+            self._approval_history.clear()
         self.invalidate()
 
     @property
@@ -347,6 +401,36 @@ class NaviPromptSession:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def can_handle_interrupt_signal(self) -> bool:
+        return self._running or self._approval_state is not None or self.model_picker is not None
+
+    def handle_interrupt_signal(self) -> bool:
+        trace_interrupt(
+            "prompt_signal_interrupt",
+            running=self._running,
+            approval_active=self._approval_state is not None,
+            model_picker_active=self.model_picker is not None,
+            cancel_requested=self._cancel_requested,
+            force_exit=self._force_exit,
+        )
+        if self._approval_state is not None:
+            self._cancel_approval()
+            self.invalidate()
+            return True
+
+        if self.model_picker is not None:
+            self.close_model_picker()
+            self.invalidate()
+            return True
+
+        if self._running:
+            self._request_interrupt()
+            self.invalidate()
+            return True
+
+        return False
 
     # ── Model picker ──
 
@@ -385,8 +469,14 @@ class NaviPromptSession:
         choices = state.get("choices") or []
         if index < 0 or index >= len(choices):
             index = len(choices) - 1
-        value = choices[index][1]
-        self._approval_state = None
+        if state.get("submitted"):
+            return
+        label, value = choices[index]
+        state["selected"] = index
+        state["submitted"] = True
+        state["submitted_index"] = index
+        state["submitted_label"] = label
+        state["submitted_choice"] = value
         if self._on_approval_response:
             self._on_approval_response(value)
         self._app.invalidate()
@@ -394,6 +484,7 @@ class NaviPromptSession:
     def _cancel_approval(self) -> None:
         if not self._approval_state:
             return
+        trace_interrupt("prompt_cancel_approval")
         self._cancel_requested = True
         self._approval_state = None
         if self._on_cancel:
@@ -401,6 +492,21 @@ class NaviPromptSession:
         self._app.invalidate()
 
     def _handle_ctrl_c(self, event: KeyPressEvent) -> None:
+        self._handle_interrupt_key(event, "prompt_toolkit_ctrl_c")
+
+    def _handle_escape(self, event: KeyPressEvent) -> None:
+        self._handle_interrupt_key(event, "prompt_toolkit_escape")
+
+    def _handle_interrupt_key(self, event: KeyPressEvent, source: str) -> None:
+        trace_interrupt(
+            source,
+            running=self._running,
+            approval_active=self._approval_state is not None,
+            model_picker_active=self.model_picker is not None,
+            cancel_requested=self._cancel_requested,
+            force_exit=self._force_exit,
+            app_running=getattr(event.app, "is_running", None),
+        )
         if self._approval_state is not None:
             self._cancel_approval()
             event.app.invalidate()
@@ -423,10 +529,16 @@ class NaviPromptSession:
 
         now = _time.monotonic()
         self._cancel_requested = True
-        if now - self._last_ctrl_c_time < 2.0:
+        if now - self._last_interrupt_time < 2.0:
             self._force_exit = True
         else:
-            self._last_ctrl_c_time = now
+            self._last_interrupt_time = now
+
+        trace_interrupt(
+            "prompt_request_interrupt",
+            force_exit=self._force_exit,
+            on_cancel=self._on_cancel is not None,
+        )
 
         if self._on_cancel:
             self._on_cancel()
@@ -475,12 +587,12 @@ class NaviPromptSession:
         return fragments
 
     def _approval_height(self) -> int:
-        if not self._approval_state:
+        if not self._approval_state and not self._approval_history:
             return 0
         return len(self._approval_lines())
 
     def _render_approval(self) -> FormattedText:
-        if not self._approval_state:
+        if not self._approval_state and not self._approval_history:
             return FormattedText()
         fragments = FormattedText()
         for style, text in self._approval_lines():
@@ -488,25 +600,82 @@ class NaviPromptSession:
         return fragments
 
     def _approval_lines(self) -> list[tuple[str, str]]:
+        lines: list[tuple[str, str]] = []
+        for state in self._approval_history:
+            decision = state["decision"]
+            command = getattr(decision, "command", None) or (getattr(decision, "tool_args", {}) or {}).get("command", "")
+            index = state.get("submitted_index", state.get("selected", 0))
+            label = state.get("submitted_label", "")
+            lines.extend([
+                ("class:running-prompt-separator", "╭─ approval result " + "─" * 60),
+                ("", f"  Tool: {getattr(decision, 'tool_name', '')}"),
+                ("", f"  Risk: {getattr(getattr(decision, 'risk', ''), 'value', getattr(decision, 'risk', ''))}"),
+                ("", f"  Decision: [{index + 1}] {label}"),
+            ])
+            if command:
+                lines.append(("", f"  Command: {command}"))
+            lines.append(("class:running-prompt-separator", "╰" + "─" * 79))
         state = self._approval_state
         if not state:
-            return []
+            return lines
         decision = state["decision"]
         command = getattr(decision, "command", None) or (getattr(decision, "tool_args", {}) or {}).get("command", "")
-        approval_key = getattr(decision, "approval_key", None)
-        lines: list[tuple[str, str]] = [
+        lines.extend([
             ("class:running-prompt-separator", "╭─ approval " + "─" * 68),
             ("", f"  {getattr(decision, 'reason', '')}"),
             ("", ""),
             ("", f"  Tool: {getattr(decision, 'tool_name', '')}"),
             ("", f"  Risk: {getattr(getattr(decision, 'risk', ''), 'value', getattr(decision, 'risk', ''))}"),
-        ]
+        ])
         if command:
-            lines.append(("", f"  Command: {command}"))
+            expanded = state.get("command_expanded", False)
+            max_chars = 3000 if expanded else 300
+            max_lines = 80 if expanded else 10
+            display_command = command
+            visible_chars = min(len(command), max_chars)
+            if len(display_command) > max_chars:
+                display_command = display_command[:max_chars] + "..."
+            app = get_app_or_none()
+            columns = app.output.get_size().columns if app is not None else 80
+            wrap_width = max(40, min(120, columns - 12))
+            cmd_lines: list[str] = []
+            for source_line in display_command.split("\n"):
+                wrapped = textwrap.wrap(
+                    source_line,
+                    width=wrap_width,
+                    break_long_words=True,
+                    break_on_hyphens=False,
+                    replace_whitespace=False,
+                    drop_whitespace=False,
+                )
+                cmd_lines.extend(wrapped or [""])
+            total_lines = len(cmd_lines)
+            visible_lines = min(len(cmd_lines), max_lines)
+            if len(cmd_lines) > max_lines:
+                cmd_lines = cmd_lines[:max_lines]
+                cmd_lines.append("...")
+            lines.append(("", f"  Command: {cmd_lines[0]}"))
+            for extra in cmd_lines[1:]:
+                lines.append(("", f"         {extra}"))
+            mode = "expanded" if expanded else "collapsed"
+            next_action = "collapse" if expanded else "expand"
+            lines.append((
+                "class:bottom-toolbar",
+                f"  Command preview: {mode}, showing {visible_chars}/{len(command)} chars, "
+                f"{visible_lines}/{total_lines} lines. Ctrl+O {next_action}.",
+            ))
         lines.append(("class:running-prompt-separator", "╰" + "─" * 79))
-        lines.append(("class:bottom-toolbar", "Use ↑/↓ or 1/2/3, then press Enter."))
-        if approval_key:
-            lines.append(("class:bottom-toolbar", f"Approval key: {approval_key}"))
+        lines.append(("class:bottom-toolbar", "Use ↑/↓ or 1/2/3, then Enter. Ctrl+O toggle command."))
+
+        # Countdown line
+        broker = self.approval_broker
+        if broker is not None and broker._current_deadline is not None:
+            remaining = max(0.0, broker._current_deadline - time.monotonic())
+            if remaining > 0:
+                secs = int(remaining)
+                style = "class:approval-countdown-warn" if secs <= 10 else "class:approval-countdown"
+                lines.append((style, f"⏱ Auto-reject in {secs}s"))
+
         lines.append(("", ""))
         selected = state.get("selected", 0)
         for i, (label, _value) in enumerate(state["choices"], start=1):
@@ -544,7 +713,7 @@ class NaviPromptSession:
             elif self._cancel_requested:
                 fragments.append(("class:bottom-toolbar", "interrupt requested  |  waiting for current operation"))
             else:
-                fragments.append(("class:bottom-toolbar", "enter: newline  |  ctrl+c: interrupt"))
+                fragments.append(("class:bottom-toolbar", "enter: newline  |  ctrl+c/esc: interrupt"))
         return fragments
 
 

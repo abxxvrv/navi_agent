@@ -15,6 +15,7 @@ from ..tools.approval_broker import ApprovalBroker
 from ..paths import get_navi_home, load_navi_dotenv
 from .prompt_ui import NaviPromptSession
 from ..runtime.agent import AgentRuntime
+from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
 from .stream_box import StreamingBox
 from .ui import console
 
@@ -83,10 +84,16 @@ class ChatController:
 
         approval_handler.cancel_current = cancel_approval  # type: ignore[attr-defined]
 
+        def handle_runtime_event(event: dict[str, Any]) -> None:
+            if event.get("type") == "approval_batch_done":
+                self._call_ui(lambda: self.prompt_session.clear_approval(clear_history=True))
+                return
+            self.print_agent_event(event, box=self.stream_box)
+
         self.runtime = AgentRuntime(
             workspace=self.workspace,
             max_steps=self.max_steps,
-            event_handler=lambda e: self.print_agent_event(e, box=self.stream_box),
+            event_handler=handle_runtime_event,
             approval_mode=self.approval_mode,
             approval_handler=approval_handler,
             resume_session_id=self.resume_session_id,
@@ -115,16 +122,21 @@ class ChatController:
             ),
             on_clear=lambda: self._call_ui(self.prompt_session.clear_approval),
         )
+        self.prompt_session.approval_broker = self.approval_broker
 
-        if not self.no_splash and not self.resume_session_id:
-            self.print_splash(
-                self.workspace,
-                self.runtime.router.model_name,
-                self.approval_mode,
-                self.runtime.session_store.session_id,
-            )
+        restore_sigint_trace = self._install_sigint_trace()
+        try:
+            if not self.no_splash and not self.resume_session_id:
+                self.print_splash(
+                    self.workspace,
+                    self.runtime.router.model_name,
+                    self.approval_mode,
+                    self.runtime.session_store.session_id,
+                )
 
-        await self.prompt_session.run_session(on_submit=self.process_message)
+            await self.prompt_session.run_session(on_submit=self.process_message)
+        finally:
+            restore_sigint_trace()
 
         sid = self.runtime.session_store.session_id
         console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
@@ -239,8 +251,15 @@ class ChatController:
 
     def handle_cancel(self) -> None:
         runtime = self.runtime
+        trace_interrupt(
+            "chat_handle_cancel",
+            runtime_exists=runtime is not None,
+            loop_exists=self.loop is not None,
+            cancel_notice_printed=self.cancel_notice_printed,
+        )
         if runtime is not None:
             self.loop.run_in_executor(None, runtime.interrupt)
+            trace_interrupt("chat_runtime_interrupt_scheduled")
         if not self.cancel_notice_printed:
             self.cancel_notice_printed = True
             self.print_live("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
@@ -269,3 +288,61 @@ class ChatController:
         if self.stream_box is None:
             raise RuntimeError("ChatController stream box is not initialized.")
         return self.stream_box
+
+    def _install_sigint_trace(self) -> Callable[[], None]:
+        try:
+            import signal
+            import threading
+
+            if threading.current_thread() is not threading.main_thread():
+                trace_interrupt("sigint_trace_not_installed", reason="not_main_thread")
+                return lambda: None
+
+            previous_handler = signal.getsignal(signal.SIGINT)
+
+            def _sigint_trace_handler(signum, frame) -> None:
+                prompt_session = self.prompt_session
+                prompt_can_handle = (
+                    prompt_session is not None
+                    and getattr(prompt_session, "can_handle_interrupt_signal", False)
+                )
+                trace_interrupt(
+                    "sigint",
+                    signum=signum,
+                    prompt_exists=prompt_session is not None,
+                    prompt_running=getattr(prompt_session, "is_running", None),
+                    prompt_cancel_requested=getattr(prompt_session, "cancel_requested", None),
+                    prompt_force_exit=getattr(prompt_session, "force_exit", None),
+                    prompt_can_handle=prompt_can_handle,
+                    runtime_exists=self.runtime is not None,
+                )
+                if prompt_can_handle and prompt_session is not None:
+                    loop = self.loop
+                    if loop is not None:
+                        loop.call_soon_threadsafe(prompt_session.handle_interrupt_signal)
+                    else:
+                        prompt_session.handle_interrupt_signal()
+                    trace_interrupt("sigint_routed_to_prompt")
+                    return
+
+                if callable(previous_handler):
+                    previous_handler(signum, frame)
+                    return
+                if previous_handler == signal.SIG_IGN:
+                    return
+                raise KeyboardInterrupt()
+
+            signal.signal(signal.SIGINT, _sigint_trace_handler)
+            trace_interrupt("sigint_trace_installed", previous_handler=repr(previous_handler))
+        except Exception as exc:
+            trace_interrupt("sigint_trace_install_failed", error=repr(exc))
+            return lambda: None
+
+        def _restore() -> None:
+            try:
+                signal.signal(signal.SIGINT, previous_handler)
+                trace_interrupt("sigint_trace_restored", previous_handler=repr(previous_handler))
+            except Exception as exc:
+                trace_interrupt("sigint_trace_restore_failed", error=repr(exc))
+
+        return _restore

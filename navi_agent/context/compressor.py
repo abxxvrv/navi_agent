@@ -16,9 +16,8 @@ def _get_navi_home() -> Path:
 
 # 参数配置
 TRIGGER_RATIO = 0.50
-PROTECT_HEAD_ROUNDS = 3
-PROTECT_TAIL_RATIO = 0.05
-CLEARED_MESSAGE = "[Old tool result content cleared]"
+PROTECT_HEAD_ROUNDS = 1
+PROTECT_TAIL_RATIO = 0.01
 COMPACTION_PREFIX = "[CONTEXT COMPACTION]"
 MIN_SUMMARY_TOKENS = 2_000
 MAX_SUMMARY_TOKENS = 12_000
@@ -171,11 +170,14 @@ class ContextCompressor:
     def _prune_tool_results(
         self, middle: list[dict[str, Any]]
     ) -> list[dict[str, Any]]:
-        """预处理：替换旧工具输出为占位符"""
+        """预处理：截断过长的工具输出，保留头尾"""
         result = []
         for msg in middle:
             if msg.get("role") == "tool":
-                result.append({**msg, "content": CLEARED_MESSAGE})
+                content = msg.get("content", "")
+                if isinstance(content, str) and len(content) > 3000:
+                    content = content[:1500] + "\n...[truncated]...\n" + content[-500:]
+                result.append({**msg, "content": content})
             else:
                 result.append(msg)
         return result
