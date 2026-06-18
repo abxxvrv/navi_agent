@@ -34,6 +34,7 @@ from prompt_toolkit.styles import Style as PTStyle
 
 from ..tools.approval import UserApprovalChoice
 from .interrupt_trace import trace_interrupt
+from .paste_trace import summarize_text, trace_paste
 
 
 _NAVI_STYLE = PTStyle.from_dict({
@@ -184,10 +185,43 @@ class NaviPromptSession:
         def _approval_swallow_input(event: KeyPressEvent) -> None:
             event.app.invalidate()
 
+        # ── BracketedPaste binding (before Enter bindings) ──
+
+        @global_bindings.add(Keys.BracketedPaste, eager=True, is_global=True)
+        def _handle_bracketed_paste(event: KeyPressEvent) -> None:
+            data = event.data.replace("\r\n", "\n").replace("\r", "\n")
+            trace_paste(
+                "bracketed_paste_seen",
+                text_summary=summarize_text(data),
+                running=self._running,
+                approval_active=self._approval_state is not None,
+                picker_active=self.model_picker is not None,
+            )
+            # Only insert text in idle state; modal states (approval/picker)
+            # have their own input handling that must not be bypassed.
+            if self._running or self._approval_state is not None or self.model_picker is not None:
+                return
+            event.current_buffer.insert_text(data)
+            trace_paste(
+                "bracketed_paste_inserted",
+                text_summary=summarize_text(data),
+                buffer_len=len(event.current_buffer.text),
+                running=self._running,
+                approval_active=self._approval_state is not None,
+                picker_active=self.model_picker is not None,
+            )
+
         # ── Running key bindings ──
 
         @running_bindings.add("enter", eager=True, filter=Condition(lambda: self._running and self._approval_state is None and not self._approval_history))
         def _(event: KeyPressEvent) -> None:
+            trace_paste(
+                "running_enter_newline",
+                running=self._running,
+                approval_active=self._approval_state is not None,
+                picker_active=self.model_picker is not None,
+                buffer_len=len(event.current_buffer.text),
+            )
             event.current_buffer.insert_text("\n")
             event.app.invalidate()
 
@@ -203,8 +237,32 @@ class NaviPromptSession:
         def _(event: KeyPressEvent) -> None:
             text = event.current_buffer.text.strip()
             if text:
+                trace_paste(
+                    "idle_enter_seen",
+                    text_summary=summarize_text(text),
+                    running=self._running,
+                    approval_active=self._approval_state is not None,
+                    picker_active=self.model_picker is not None,
+                    buffer_len=len(event.current_buffer.text),
+                )
                 event.current_buffer.reset()
+                trace_paste(
+                    "idle_enter_submit",
+                    text_summary=summarize_text(text),
+                    queue_size=self._idle_queue.qsize(),
+                    running=self._running,
+                    approval_active=self._approval_state is not None,
+                    picker_active=self.model_picker is not None,
+                )
                 self._idle_queue.put_nowait(text)
+                trace_paste(
+                    "idle_queue_put",
+                    text_summary=summarize_text(text),
+                    queue_size=self._idle_queue.qsize(),
+                    running=self._running,
+                    approval_active=self._approval_state is not None,
+                    picker_active=self.model_picker is not None,
+                )
 
         @input_bindings.add("escape", "enter", eager=True)
         def _(event: KeyPressEvent) -> None:
@@ -313,6 +371,11 @@ class NaviPromptSession:
         async def message_loop() -> None:
             while True:
                 text = await self._idle_queue.get()
+                trace_paste(
+                    "idle_queue_get",
+                    text_summary=summarize_text(text),
+                    queue_size=self._idle_queue.qsize(),
+                )
                 await on_submit(text)
 
         task = asyncio.ensure_future(message_loop())
@@ -327,6 +390,12 @@ class NaviPromptSession:
 
     def begin_running(self) -> None:
         trace_interrupt("prompt_begin_running")
+        trace_paste(
+            "prompt_begin_running_paste",
+            running=self._running,
+            cancel_requested=self._cancel_requested,
+            force_exit=self._force_exit,
+        )
         self._running = True
         self._cancel_requested = False
         self._force_exit = False
@@ -335,6 +404,12 @@ class NaviPromptSession:
     def end_running(self) -> None:
         trace_interrupt(
             "prompt_end_running",
+            cancel_requested=self._cancel_requested,
+            force_exit=self._force_exit,
+        )
+        trace_paste(
+            "prompt_end_running_paste",
+            running=self._running,
             cancel_requested=self._cancel_requested,
             force_exit=self._force_exit,
         )

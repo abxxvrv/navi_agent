@@ -16,6 +16,7 @@ from ..paths import get_navi_home, load_navi_dotenv
 from .prompt_ui import NaviPromptSession
 from ..runtime.agent import AgentRuntime
 from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
+from .paste_trace import summarize_text, trace_paste
 from .stream_box import StreamingBox
 from .ui import console
 
@@ -142,6 +143,10 @@ class ChatController:
         console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
 
     async def process_message(self, text: str) -> None:
+        trace_paste(
+            "process_message_start",
+            text_summary=summarize_text(text),
+        )
         runtime = self._runtime()
         prompt_session = self._prompt_session()
         stream_box = self._stream_box()
@@ -173,7 +178,17 @@ class ChatController:
         prompt_session.invalidate()
 
         self.cancel_notice_printed = False
+        trace_paste(
+            "process_message_before_begin_running",
+            text_summary=summarize_text(text),
+            prompt_is_running=prompt_session.is_running,
+        )
         prompt_session.begin_running()
+        trace_paste(
+            "process_message_after_begin_running",
+            text_summary=summarize_text(text),
+            prompt_is_running=prompt_session.is_running,
+        )
         stream_box.reset()
 
         async def _tick_toolbar() -> None:
@@ -204,6 +219,15 @@ class ChatController:
 
         stream_box.close_all()
         prompt_session.end_running()
+
+        trace_paste(
+            "process_message_result",
+            text_summary=summarize_text(text),
+            prompt_is_running=prompt_session.is_running,
+            cancel_requested=prompt_session.cancel_requested,
+            force_exit=prompt_session.force_exit,
+            result_ok=self.result_is_ok(result),
+        )
 
         if prompt_session.force_exit:
             prompt_session.exit(result="exit")
