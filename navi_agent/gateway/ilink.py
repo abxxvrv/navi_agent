@@ -229,10 +229,55 @@ def list_weixin_accounts(navi_home: str) -> List[str]:
     accounts: List[str] = []
     for path in sorted(directory.glob("*.json")):
         name = path.name[: -len(".json")]
-        if name.endswith(".sync") or name.endswith(".context-tokens"):
+        if name.endswith((".sync", ".context-tokens", ".allow")):
             continue
         accounts.append(name)
     return accounts
+
+
+def _allow_file(navi_home: str, account_id: str) -> Path:
+    return _account_dir(navi_home) / f"{account_id}.allow.json"
+
+
+def load_allowlist(navi_home: str, account_id: str) -> List[str]:
+    """Return the user_ids permitted to drive this account's bot."""
+    path = _allow_file(navi_home, account_id)
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    allowed = data.get("allowed") if isinstance(data, dict) else None
+    if not isinstance(allowed, list):
+        return []
+    return [str(u).strip() for u in allowed if str(u).strip()]
+
+
+def add_to_allowlist(navi_home: str, account_id: str, user_id: str) -> bool:
+    """Add *user_id* to the allowlist. Returns True if newly added."""
+    user_id = str(user_id).strip()
+    if not user_id:
+        raise ValueError("user_id 不能为空")
+    current = load_allowlist(navi_home, account_id)
+    if user_id in current:
+        return False
+    current.append(user_id)
+    _atomic_json_write(_allow_file(navi_home, account_id), {"allowed": current})
+    return True
+
+
+def remove_from_allowlist(navi_home: str, account_id: str, user_id: str) -> bool:
+    """Remove *user_id* from the allowlist. Returns True if it was present."""
+    user_id = str(user_id).strip()
+    current = load_allowlist(navi_home, account_id)
+    if user_id not in current:
+        return False
+    _atomic_json_write(
+        _allow_file(navi_home, account_id),
+        {"allowed": [u for u in current if u != user_id]},
+    )
+    return True
 
 
 def _sync_buf_path(navi_home: str, account_id: str) -> Path:

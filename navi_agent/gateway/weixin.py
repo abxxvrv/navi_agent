@@ -50,6 +50,7 @@ from .ilink import (
     _split_text_for_weixin_delivery,
     check_weixin_requirements,
     format_message,
+    load_allowlist,
     load_weixin_account,
     send_file,
 )
@@ -208,6 +209,16 @@ class WeixinAdapter:
         if not sender_id or sender_id == self._account_id:
             return
 
+        # 记录 context_token（回复未授权用户也需要它）
+        context_token = str(message.get("context_token") or "").strip()
+        if context_token:
+            self._token_store.set(self._account_id, sender_id, context_token)
+
+        # 访问白名单：仅授权用户可驱动 bot。每条消息重新读盘，使 allow 立即生效。
+        if sender_id not in load_allowlist(self._navi_home, self._account_id):
+            await self._reject_unauthorized(sender_id)
+            return
+
         message_id = str(message.get("message_id") or "").strip()
         if message_id and self._dedup.is_duplicate(message_id):
             return
@@ -221,10 +232,6 @@ class WeixinAdapter:
             return
 
         chat_id = sender_id  # DM only
-
-        context_token = str(message.get("context_token") or "").strip()
-        if context_token:
-            self._token_store.set(self._account_id, sender_id, context_token)
 
         # Handle cancellation *before* taking the per-chat lock — the lock is
         # held by the in-flight turn we want to interrupt.
@@ -278,6 +285,19 @@ class WeixinAdapter:
             )
             self._runtimes[chat_id] = runtime
         return runtime
+
+    async def _reject_unauthorized(self, sender_id: str) -> None:
+        # 限流：同一未授权用户在 dedup TTL 内只提示一次，避免被刷消息放大
+        if self._dedup.is_duplicate(f"unauth-notify:{sender_id}"):
+            return
+        logger.warning("weixin: 拒绝未授权用户 %s", _safe_id(sender_id))
+        await self.send_text(
+            sender_id,
+            "⚠️ 未授权访问。\n"
+            f"你的用户 ID：{sender_id}\n"
+            "如需使用，请在运行 Navi 的机器上执行：\n"
+            f"navi weixin allow {sender_id} --account {self._account_id}",
+        )
 
     # ── Typing indicator ──────────────────────────────────────────────────────
 

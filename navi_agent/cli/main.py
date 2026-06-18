@@ -1338,6 +1338,29 @@ def sessions(
     print_sessions_table(limit=20)
 
 
+def _resolve_weixin_account(account_id: str) -> str:
+    """解析微信账号 id：为空时自动选唯一账号；显式指定时校验其确实已登录。"""
+    from ..gateway.ilink import list_weixin_accounts
+
+    accounts = list_weixin_accounts(str(get_navi_home()))
+    resolved = account_id.strip()
+    if resolved:
+        if resolved not in accounts:
+            known = "\n".join(f"- {a}" for a in accounts) if accounts else "（无，请先运行 `navi weixin login`）"
+            print_error_message(f"账号 '{resolved}' 未登录。已登录的账号：\n{known}")
+            raise typer.Exit(code=1)
+        return resolved
+    if not accounts:
+        print_error_message("没有已登录的微信账号。请先运行 `navi weixin login`。")
+        raise typer.Exit(code=1)
+    if len(accounts) > 1:
+        print_error_message(
+            "存在多个微信账号，请用 --account 指定：\n" + "\n".join(f"- {a}" for a in accounts)
+        )
+        raise typer.Exit(code=1)
+    return accounts[0]
+
+
 @weixin_app.command("login")
 def weixin_login(
     bot_type: Annotated[
@@ -1382,22 +1405,11 @@ def weixin_start(
     Start the WeChat long-poll gateway. Each chat gets its own agent runtime.
     """
     load_navi_dotenv()
-    from ..gateway.ilink import list_weixin_accounts
+    from ..gateway.ilink import load_allowlist
     from ..gateway.weixin import WeixinAdapter
 
     navi_home = str(get_navi_home())
-    resolved_account = account_id.strip()
-    if not resolved_account:
-        accounts = list_weixin_accounts(navi_home)
-        if not accounts:
-            print_error_message("没有已登录的微信账号。请先运行 `navi weixin login`。")
-            raise typer.Exit(code=1)
-        if len(accounts) > 1:
-            print_error_message(
-                "存在多个微信账号，请用 --account 指定：\n" + "\n".join(f"- {a}" for a in accounts)
-            )
-            raise typer.Exit(code=1)
-        resolved_account = accounts[0]
+    resolved_account = _resolve_weixin_account(account_id)
 
     approval_mode = resolve_approval_mode(approval, yolo=False)
     bot_workspace = (workspace or (get_navi_home() / "weixin" / "workspace")).resolve()
@@ -1424,10 +1436,64 @@ def weixin_start(
         )
     )
 
+    if not load_allowlist(navi_home, resolved_account):
+        console.print(
+            "[yellow]⚠️ 访问白名单为空：所有用户消息都会被拒绝（fail-closed）。[/yellow]\n"
+            "[dim]让目标用户给 bot 发一条消息以获取其 ID，再执行 "
+            f"`navi weixin allow <user_id> --account {resolved_account}` 授权。[/dim]"
+        )
+
     try:
         asyncio.run(adapter.run())
     except KeyboardInterrupt:
         console.print("\n[dim]gateway stopped.[/dim]")
+
+
+@weixin_app.command("allow")
+def weixin_allow(
+    user_id: Annotated[str, typer.Argument(help="要授权的微信用户 ID，形如 xxxx@im.bot")],
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """将某个微信用户加入访问白名单。"""
+    from ..gateway.ilink import add_to_allowlist
+
+    resolved = _resolve_weixin_account(account_id)
+    if add_to_allowlist(str(get_navi_home()), resolved, user_id):
+        console.print(f"[green]已授权[/green] {user_id}  →  {resolved}")
+    else:
+        console.print(f"[yellow]{user_id} 已在白名单中。[/yellow]")
+
+
+@weixin_app.command("deny")
+def weixin_deny(
+    user_id: Annotated[str, typer.Argument(help="要移出白名单的微信用户 ID")],
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """将某个微信用户移出访问白名单。"""
+    from ..gateway.ilink import remove_from_allowlist
+
+    resolved = _resolve_weixin_account(account_id)
+    if remove_from_allowlist(str(get_navi_home()), resolved, user_id):
+        console.print(f"[green]已移除[/green] {user_id}")
+    else:
+        console.print(f"[yellow]{user_id} 不在白名单中。[/yellow]")
+
+
+@weixin_app.command("allowlist")
+def weixin_allowlist(
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """列出某账号当前的访问白名单。"""
+    from ..gateway.ilink import load_allowlist
+
+    resolved = _resolve_weixin_account(account_id)
+    users = load_allowlist(str(get_navi_home()), resolved)
+    if not users:
+        console.print(f"[yellow]{resolved} 的白名单为空（所有消息都会被拒绝）。[/yellow]")
+        return
+    console.print(f"[bold]{resolved} 白名单[/bold]")
+    for u in users:
+        console.print(f"- {u}")
 
 
 def main():
