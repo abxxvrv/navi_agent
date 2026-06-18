@@ -158,6 +158,7 @@ class AgentRuntime:
 
         # Ctrl+C 中断信号（流式循环中检查）
         self.cancel_event = threading.Event()
+        self._pending_attachments: list[str] = []
         self._model_stream_runner = ModelStreamRunner(self.router, self.cancel_event)
         self._current_scope: TurnScope | None = None
         # 当前执行线程 ID（用于线程级中断传播）
@@ -363,6 +364,7 @@ class AgentRuntime:
         with self._tool_worker_threads_lock:
             self._tool_worker_threads.clear()
 
+        self._pending_attachments = []
         try:
             # 1. 清理和校验用户输入
             user_input = user_input.encode("utf-8", "replace").decode("utf-8").strip()
@@ -457,6 +459,7 @@ class AgentRuntime:
                 "messages": current_turn_messages,
                 "session_id": self.session_store.session_id,
                 "session_path": str(self.session_store.path),
+                "pending_attachments": list(self._pending_attachments),
             }
         finally:
             scope.close()
@@ -1612,6 +1615,31 @@ class AgentRuntime:
                 navi_home=self.navi_home,
                 current_session_id=self.session_store.session_id,
             ),
+        )
+
+        def attach_file(path: str) -> dict:
+            p = Path(path)
+            if not p.is_absolute():
+                p = (self.workspace / path).resolve()
+            if not p.exists() or not p.is_file():
+                return {"ok": False, "error": f"文件不存在: {path}"}
+            self._pending_attachments.append(str(p))
+            return {"ok": True, "path": str(p), "message": "已登记，将在本轮回复后发送"}
+
+        self.tool_registry.register(
+            name="attach_file",
+            description="登记本地文件，在本轮回复发出后作为附件发给用户。仅在微信网关场景下生效。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "本地文件路径（绝对路径或相对于工作区的路径）。",
+                    },
+                },
+                "required": ["path"],
+            },
+            function=attach_file,
         )
 
     def _init_mcp_tools(self) -> None:

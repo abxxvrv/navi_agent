@@ -67,6 +67,9 @@ app = typer.Typer(
     add_completion=False,
 )
 
+weixin_app = typer.Typer(help="WeChat (iLink) gateway: login and run the bot.")
+app.add_typer(weixin_app, name="weixin")
+
 # =========================
 # UI
 # =========================
@@ -1333,6 +1336,98 @@ def sessions(
     List recent sessions.
     """
     print_sessions_table(limit=20)
+
+
+@weixin_app.command("login")
+def weixin_login(
+    bot_type: Annotated[
+        str,
+        typer.Option("--bot-type", help="iLink bot type passed to the QR endpoint."),
+    ] = "3",
+    timeout: Annotated[
+        int,
+        typer.Option("--timeout", help="Login timeout in seconds."),
+    ] = 480,
+):
+    """
+    Scan a QR code to connect a WeChat account. Credentials are saved under
+    ~/.navi/weixin/accounts/.
+    """
+    load_navi_dotenv()
+    from ..gateway.ilink import qr_login
+
+    creds = asyncio.run(qr_login(str(get_navi_home()), bot_type=bot_type, timeout_seconds=timeout))
+    if not creds:
+        print_error_message("微信登录失败或超时。")
+        raise typer.Exit(code=1)
+    console.print(f"[green]已连接微信账号[/green] {creds['account_id']}")
+
+
+@weixin_app.command("start")
+def weixin_start(
+    account_id: Annotated[
+        str,
+        typer.Option("--account", "-a", help="Account id to run. Defaults to the only saved account."),
+    ] = "",
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Workspace directory for the bot's agent runtimes."),
+    ] = None,
+    approval: Annotated[
+        str,
+        typer.Option("--approval", help="Approval mode: strict, normal, or open."),
+    ] = "open",
+):
+    """
+    Start the WeChat long-poll gateway. Each chat gets its own agent runtime.
+    """
+    load_navi_dotenv()
+    from ..gateway.ilink import list_weixin_accounts
+    from ..gateway.weixin import WeixinAdapter
+
+    navi_home = str(get_navi_home())
+    resolved_account = account_id.strip()
+    if not resolved_account:
+        accounts = list_weixin_accounts(navi_home)
+        if not accounts:
+            print_error_message("没有已登录的微信账号。请先运行 `navi weixin login`。")
+            raise typer.Exit(code=1)
+        if len(accounts) > 1:
+            print_error_message(
+                "存在多个微信账号，请用 --account 指定：\n" + "\n".join(f"- {a}" for a in accounts)
+            )
+            raise typer.Exit(code=1)
+        resolved_account = accounts[0]
+
+    approval_mode = resolve_approval_mode(approval, yolo=False)
+    bot_workspace = (workspace or (get_navi_home() / "weixin" / "workspace")).resolve()
+    bot_workspace.mkdir(parents=True, exist_ok=True)
+
+    try:
+        adapter = WeixinAdapter(
+            resolved_account,
+            workspace=bot_workspace,
+            approval_mode=approval_mode,
+        )
+    except Exception as exc:
+        print_error_message(str(exc))
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"[bold]Account[/bold]: {resolved_account}\n"
+            f"[bold]Workspace[/bold]: {bot_workspace}\n"
+            f"[bold]Approval[/bold]: {approval_mode}\n"
+            f"[dim]Send !cancel in chat to interrupt the current task. Ctrl+C to stop.[/dim]",
+            title="Navi WeChat gateway",
+            border_style="green",
+        )
+    )
+
+    try:
+        asyncio.run(adapter.run())
+    except KeyboardInterrupt:
+        console.print("\n[dim]gateway stopped.[/dim]")
 
 
 def main():

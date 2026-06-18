@@ -111,6 +111,8 @@ class ApprovalManager:
         "web_extract",
         "memory",
         "vision_analyze",
+        "attach_file",
+        "search_session",
     }
 
     WRITE_TOOLS = {
