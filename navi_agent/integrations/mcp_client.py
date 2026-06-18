@@ -50,6 +50,8 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
+import httpx
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -272,11 +274,19 @@ class MCPServerTask:
         headers = config.get("headers", {})
         transport = config.get("transport", "http")
 
+        if config.get("proxy", True):
+            client_factory = None
+        else:
+            client_factory = lambda headers, timeout, auth: httpx.AsyncClient(
+                headers=headers, timeout=timeout, auth=auth,
+                follow_redirects=True, trust_env=False,
+            )
+
         try:
             if transport == "sse":
                 if not _MCP_SSE_AVAILABLE:
                     raise ImportError("SSE transport not available. Upgrade mcp package.")
-                async with sse_client(url, headers=headers) as (read_stream, write_stream):
+                async with sse_client(url, headers=headers, httpx_client_factory=client_factory) if client_factory else sse_client(url, headers=headers) as (read_stream, write_stream):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         self.session = session
@@ -286,7 +296,7 @@ class MCPServerTask:
             else:
                 if not _MCP_HTTP_AVAILABLE:
                     raise ImportError("HTTP transport not available. Upgrade mcp package.")
-                async with streamablehttp_client(url, headers=headers) as (read_stream, write_stream, _):
+                async with streamablehttp_client(url, headers=headers, httpx_client_factory=client_factory) if client_factory else streamablehttp_client(url, headers=headers) as (read_stream, write_stream, _):
                     async with ClientSession(read_stream, write_stream) as session:
                         await session.initialize()
                         self.session = session
