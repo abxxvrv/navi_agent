@@ -141,6 +141,7 @@ class AgentRuntime:
                 project_path=str(self.workspace),
                 provider=_provider,
                 model=_model,
+                defer_persist=True,
             )
             self.conversation_history = []
 

@@ -52,6 +52,32 @@ def test_history_store_persists_tool_names_and_messages(tmp_path):
     assert fts_rows == [("stored in sqlite",)]
 
 
+def test_defer_persist_writes_session_on_first_append(tmp_path):
+    db_path = tmp_path / "history.sqlite3"
+    store = HistoryStore(
+        db_path=db_path,
+        project_path=tmp_path,
+        provider="mimo",
+        model="mimo-v2.5-pro",
+        defer_persist=True,
+    )
+
+    # Deferred: session row not written yet, even after set_tool_names.
+    store.set_tool_names(["read_file", "write_file"])
+    listed = HistoryStore.list_sessions(db_path)
+    assert store.session_id not in {s["session_id"] for s in listed}
+
+    # First append flushes the session row before inserting the message.
+    store.append_message({"role": "user", "content": "hi"})
+
+    listed = HistoryStore.list_sessions(db_path)
+    assert store.session_id in {s["session_id"] for s in listed}
+
+    loaded = HistoryStore.from_existing(db_path, store.session_id)
+    assert loaded.meta["tool_names"] == ["read_file", "write_file"]
+    assert [message["content"] for message in loaded.messages] == ["hi"]
+
+
 def test_history_store_lists_latest_sessions(tmp_path):
     db_path = tmp_path / "history.sqlite3"
     first = HistoryStore(db_path=db_path, project_path=tmp_path, provider="mimo", model="first")

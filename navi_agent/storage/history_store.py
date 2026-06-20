@@ -18,6 +18,7 @@ class HistoryStore:
         provider: str = "",
         model: str = "",
         parent_session_id: str | None = None,
+        defer_persist: bool = False,
     ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,7 @@ class HistoryStore:
             "tool_names": [],
             "parent_session_id": parent_session_id,
         }
+        self._persist_deferred = defer_persist
 
         self._init_db()
         self._upsert_session()
@@ -169,6 +171,10 @@ class HistoryStore:
         self.meta["updated_at"] = now
         if record.get("role") == "user" and self.meta.get("title") == "Untitled session":
             self.meta["title"] = self._make_title(str(record.get("content", "")))
+
+        if getattr(self, "_persist_deferred", False):
+            self._persist_deferred = False
+            self._upsert_session()   # create the session row first (opens its own connection)
 
         seq = len(self.messages) - 1
         raw_json = json.dumps(record, ensure_ascii=False)
@@ -406,6 +412,8 @@ class HistoryStore:
             """)
 
     def _upsert_session(self, conn: sqlite3.Connection | None = None) -> None:
+        if getattr(self, "_persist_deferred", False):
+            return
         usage = self.get_usage()
         params = (
             self.session_id,
