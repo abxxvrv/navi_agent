@@ -1,8 +1,42 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
+import difflib
 
 from ..storage.safe_file import atomic_write_text, file_lock, file_version
+
+
+MAX_DIFF_CHARS = 12000
+
+
+def _make_unified_diff(old_text: str, new_text: str, path: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
+def _count_diff_lines(diff: str) -> tuple[int, int]:
+    added = 0
+    removed = 0
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _truncate_diff(diff: str) -> tuple[str, bool]:
+    if len(diff) <= MAX_DIFF_CHARS:
+        return diff, False
+    return diff[:MAX_DIFF_CHARS], True
 
 
 @dataclass
@@ -88,7 +122,7 @@ class ToolRegistry:
 
         if name == "read_file":
             result = tool.function(**arguments)
-            self._remember_read_version(result)
+            self._remember_read_version(tool, result)
             return result
 
         if name in {"write_file", "patch_file"}:
@@ -96,11 +130,29 @@ class ToolRegistry:
 
         return tool.function(**arguments)
 
-    def _remember_read_version(self, result: Any) -> None:
+    def _resolve_tool_path(self, tool: ToolSpec, path: str) -> Path:
+        raw = Path(path)
+        if raw.is_absolute():
+            return raw.resolve()
+        workspace = getattr(tool.function, "workspace", None)
+        if workspace is not None:
+            return (Path(workspace).resolve() / raw).resolve()
+        return raw.resolve()
+
+    def _result_display_path(self, tool: ToolSpec, target: Path) -> str:
+        workspace = getattr(tool.function, "workspace", None)
+        if workspace is None:
+            return str(target)
+        try:
+            return str(target.resolve().relative_to(Path(workspace).resolve()))
+        except ValueError:
+            return str(target.resolve())
+
+    def _remember_read_version(self, tool: ToolSpec, result: Any) -> None:
         if not isinstance(result, dict) or not result.get("ok") or not result.get("path"):
             return
         try:
-            path = Path(str(result["path"])).resolve()
+            path = self._resolve_tool_path(tool, str(result["path"]))
             version = file_version(path).to_dict()
         except Exception:
             return
@@ -112,7 +164,7 @@ class ToolRegistry:
         if not path_arg:
             return tool.function(**arguments)
 
-        target = Path(str(path_arg)).resolve()
+        target = self._resolve_tool_path(tool, str(path_arg))
         with file_lock(target):
             before = file_version(target).to_dict()
             last_read = self._read_versions.get(str(target))
@@ -127,9 +179,9 @@ class ToolRegistry:
                 }
 
             if tool.name == "write_file":
-                result = self._safe_write_file(tool, arguments, before)
+                result = self._safe_write_file(tool, arguments, target, before)
             else:
-                result = self._safe_patch_file(tool, arguments, before)
+                result = self._safe_patch_file(tool, arguments, target, before)
 
             if isinstance(result, dict) and result.get("ok"):
                 after = file_version(target).to_dict()
@@ -137,13 +189,12 @@ class ToolRegistry:
                 self._read_versions[str(target)] = after
             return result
 
-    def _safe_write_file(self, tool: ToolSpec, arguments: dict, before: dict[str, Any]) -> Any:
+    def _safe_write_file(self, tool: ToolSpec, arguments: dict, target: Path, before: dict[str, Any]) -> Any:
         mode = arguments.get("mode", "overwrite")
         encoding = arguments.get("encoding", "utf-8")
         if mode != "overwrite":
             return tool.function(**arguments)
 
-        target = Path(str(arguments["path"])).resolve()
         if target.exists() and target.is_dir():
             return {"ok": False, "error": "目标路径是目录，不是文件。", "path": arguments["path"]}
 
@@ -161,13 +212,24 @@ class ToolRegistry:
 
         new_text = str(arguments.get("content", ""))
         atomic_write_text(target, new_text, encoding=encoding)
-        result = tool.function(path=str(arguments["path"]), content=new_text, mode="overwrite", encoding=encoding)
-        if isinstance(result, dict):
-            result["previous_version"] = before
-        return result
+        result_path = self._result_display_path(tool, target)
+        diff = _make_unified_diff(old_text, new_text, result_path)
+        added_lines, removed_lines = _count_diff_lines(diff)
+        diff, diff_truncated = _truncate_diff(diff)
+        return {
+            "ok": True,
+            "path": result_path,
+            "mode": mode,
+            "bytes_written": len(new_text.encode(encoding)),
+            "changed": old_text != new_text,
+            "added_lines": added_lines,
+            "removed_lines": removed_lines,
+            "diff": diff,
+            "diff_truncated": diff_truncated,
+            "previous_version": before,
+        }
 
-    def _safe_patch_file(self, tool: ToolSpec, arguments: dict, before: dict[str, Any]) -> Any:
-        target = Path(str(arguments["path"])).resolve()
+    def _safe_patch_file(self, tool: ToolSpec, arguments: dict, target: Path, before: dict[str, Any]) -> Any:
         encoding = arguments.get("encoding", "utf-8")
         old_text = str(arguments.get("old_text", ""))
         new_text = str(arguments.get("new_text", ""))
@@ -201,9 +263,22 @@ class ToolRegistry:
                 "matches": count,
             }
 
+        replacements = count if replace_all else 1
         patched_text = original_text.replace(old_text, new_text) if replace_all else original_text.replace(old_text, new_text, 1)
+        result_path = self._result_display_path(tool, target)
+        diff = _make_unified_diff(original_text, patched_text, result_path)
+        added_lines, removed_lines = _count_diff_lines(diff)
         atomic_write_text(target, patched_text, encoding=encoding)
-        result = tool.function(**arguments)
-        if isinstance(result, dict):
-            result["previous_version"] = before
-        return result
+        diff, diff_truncated = _truncate_diff(diff)
+        return {
+            "ok": True,
+            "path": result_path,
+            "replacements": replacements,
+            "bytes_written": len(patched_text.encode(encoding)),
+            "changed": original_text != patched_text,
+            "added_lines": added_lines,
+            "removed_lines": removed_lines,
+            "diff": diff,
+            "diff_truncated": diff_truncated,
+            "previous_version": before,
+        }
