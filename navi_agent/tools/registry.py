@@ -9,36 +9,6 @@ from ..storage.safe_file import atomic_write_text, file_lock, file_version
 MAX_DIFF_CHARS = 12000
 
 
-def _make_unified_diff(old_text: str, new_text: str, path: str) -> str:
-    return "".join(
-        difflib.unified_diff(
-            old_text.splitlines(keepends=True),
-            new_text.splitlines(keepends=True),
-            fromfile=f"a/{path}",
-            tofile=f"b/{path}",
-        )
-    )
-
-
-def _count_diff_lines(diff: str) -> tuple[int, int]:
-    added = 0
-    removed = 0
-    for line in diff.splitlines():
-        if line.startswith("+++") or line.startswith("---"):
-            continue
-        if line.startswith("+"):
-            added += 1
-        elif line.startswith("-"):
-            removed += 1
-    return added, removed
-
-
-def _truncate_diff(diff: str) -> tuple[str, bool]:
-    if len(diff) <= MAX_DIFF_CHARS:
-        return diff, False
-    return diff[:MAX_DIFF_CHARS], True
-
-
 @dataclass
 class ToolSpec:
     name: str
@@ -122,7 +92,7 @@ class ToolRegistry:
 
         if name == "read_file":
             result = tool.function(**arguments)
-            self._remember_read_version(tool, result)
+            self._remember_read_version(tool, arguments, result)
             return result
 
         if name in {"write_file", "patch_file"}:
@@ -134,25 +104,31 @@ class ToolRegistry:
         raw = Path(path)
         if raw.is_absolute():
             return raw.resolve()
+
         workspace = getattr(tool.function, "workspace", None)
-        if workspace is not None:
-            return (Path(workspace).resolve() / raw).resolve()
-        return raw.resolve()
+        if workspace is None:
+            return raw.resolve()
+
+        workspace_path = Path(workspace).resolve()
+        resolved = (workspace_path / raw).resolve()
+        if not resolved.is_relative_to(workspace_path):
+            raise ValueError("相对路径不能指向工作区外。工作区外的文件请使用绝对路径。")
+        return resolved
 
     def _result_display_path(self, tool: ToolSpec, target: Path) -> str:
         workspace = getattr(tool.function, "workspace", None)
         if workspace is None:
-            return str(target)
+            return str(target.resolve())
         try:
             return str(target.resolve().relative_to(Path(workspace).resolve()))
         except ValueError:
             return str(target.resolve())
 
-    def _remember_read_version(self, tool: ToolSpec, result: Any) -> None:
-        if not isinstance(result, dict) or not result.get("ok") or not result.get("path"):
+    def _remember_read_version(self, tool: ToolSpec, arguments: dict, result: Any) -> None:
+        if not isinstance(result, dict) or not result.get("ok") or not arguments.get("path"):
             return
         try:
-            path = self._resolve_tool_path(tool, str(result["path"]))
+            path = self._resolve_tool_path(tool, str(arguments["path"]))
             version = file_version(path).to_dict()
         except Exception:
             return
@@ -164,7 +140,11 @@ class ToolRegistry:
         if not path_arg:
             return tool.function(**arguments)
 
-        target = self._resolve_tool_path(tool, str(path_arg))
+        try:
+            target = self._resolve_tool_path(tool, str(path_arg))
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc), "path": path_arg}
+
         with file_lock(target):
             before = file_version(target).to_dict()
             last_read = self._read_versions.get(str(target))
@@ -186,42 +166,54 @@ class ToolRegistry:
             if isinstance(result, dict) and result.get("ok"):
                 after = file_version(target).to_dict()
                 result["version"] = after
+                result["previous_version"] = before
                 self._read_versions[str(target)] = after
             return result
 
-    def _safe_write_file(self, tool: ToolSpec, arguments: dict, target: Path, before: dict[str, Any]) -> Any:
+    def _safe_write_file(
+        self,
+        tool: ToolSpec,
+        arguments: dict,
+        target: Path,
+        before: dict[str, Any],
+    ) -> Any:
         mode = arguments.get("mode", "overwrite")
         encoding = arguments.get("encoding", "utf-8")
-        if mode != "overwrite":
-            return tool.function(**arguments)
+        content = str(arguments.get("content", ""))
+        result_path = self._result_display_path(tool, target)
+
+        if mode not in ("overwrite", "append"):
+            return {"ok": False, "error": "mode 必须是 'overwrite' 或 'append'。", "path": arguments.get("path")}
 
         if target.exists() and target.is_dir():
-            return {"ok": False, "error": "目标路径是目录，不是文件。", "path": arguments["path"]}
+            return {"ok": False, "error": "目标路径是目录，不是文件。", "path": arguments.get("path")}
 
-        old_text = ""
-        if target.exists():
-            try:
-                old_text = target.read_text(encoding=encoding)
-            except UnicodeDecodeError:
-                return {
-                    "ok": False,
-                    "error": "目标文件不是指定编码下的有效文本。",
-                    "path": arguments["path"],
-                    "encoding": encoding,
-                }
+        target.parent.mkdir(parents=True, exist_ok=True)
 
-        new_text = str(arguments.get("content", ""))
+        try:
+            old_text = target.read_text(encoding=encoding) if target.exists() else ""
+        except UnicodeDecodeError:
+            return {
+                "ok": False,
+                "error": "目标文件不是指定编码下的有效文本。",
+                "path": arguments.get("path"),
+                "encoding": encoding,
+            }
+
+        new_text = content if mode == "overwrite" else old_text + content
         atomic_write_text(target, new_text, encoding=encoding)
-        result_path = self._result_display_path(tool, target)
-        diff = _make_unified_diff(old_text, new_text, result_path)
+        verified_text = target.read_text(encoding=encoding)
+
+        diff = _make_unified_diff(old_text, verified_text, result_path)
         added_lines, removed_lines = _count_diff_lines(diff)
         diff, diff_truncated = _truncate_diff(diff)
+
         return {
             "ok": True,
             "path": result_path,
             "mode": mode,
-            "bytes_written": len(new_text.encode(encoding)),
-            "changed": old_text != new_text,
+            "bytes_written": len(content.encode(encoding)),
+            "changed": old_text != verified_text,
             "added_lines": added_lines,
             "removed_lines": removed_lines,
             "diff": diff,
@@ -229,18 +221,25 @@ class ToolRegistry:
             "previous_version": before,
         }
 
-    def _safe_patch_file(self, tool: ToolSpec, arguments: dict, target: Path, before: dict[str, Any]) -> Any:
+    def _safe_patch_file(
+        self,
+        tool: ToolSpec,
+        arguments: dict,
+        target: Path,
+        before: dict[str, Any],
+    ) -> Any:
         encoding = arguments.get("encoding", "utf-8")
         old_text = str(arguments.get("old_text", ""))
         new_text = str(arguments.get("new_text", ""))
         replace_all = bool(arguments.get("replace_all", False))
+        result_path = self._result_display_path(tool, target)
 
         if not target.exists():
-            return {"ok": False, "error": "路径不存在。", "path": arguments["path"]}
+            return {"ok": False, "error": "路径不存在。", "path": arguments.get("path")}
         if not target.is_file():
-            return {"ok": False, "error": "路径不是文件。", "path": arguments["path"]}
+            return {"ok": False, "error": "路径不是文件。", "path": arguments.get("path")}
         if old_text == "":
-            return {"ok": False, "error": "old_text 不能为空。", "path": arguments["path"]}
+            return {"ok": False, "error": "old_text 不能为空。", "path": arguments.get("path")}
 
         try:
             original_text = target.read_text(encoding=encoding)
@@ -248,37 +247,72 @@ class ToolRegistry:
             return {
                 "ok": False,
                 "error": "文件不是指定编码下的有效文本。",
-                "path": arguments["path"],
+                "path": arguments.get("path"),
                 "encoding": encoding,
             }
 
         count = original_text.count(old_text)
         if count == 0:
-            return {"ok": False, "error": "文件中未找到 old_text。", "path": arguments["path"]}
+            return {"ok": False, "error": "文件中未找到 old_text。", "path": arguments.get("path")}
         if count > 1 and not replace_all:
             return {
                 "ok": False,
                 "error": f"old_text 出现了 {count} 次。请提供更精确的 old_text，或设置 replace_all=True。",
-                "path": arguments["path"],
+                "path": arguments.get("path"),
                 "matches": count,
             }
 
-        replacements = count if replace_all else 1
         patched_text = original_text.replace(old_text, new_text) if replace_all else original_text.replace(old_text, new_text, 1)
-        result_path = self._result_display_path(tool, target)
-        diff = _make_unified_diff(original_text, patched_text, result_path)
-        added_lines, removed_lines = _count_diff_lines(diff)
+        replacements = count if replace_all else 1
         atomic_write_text(target, patched_text, encoding=encoding)
+        verified_text = target.read_text(encoding=encoding)
+
+        if verified_text != patched_text:
+            return {"ok": False, "error": "补丁已写入，但校验失败。", "path": arguments.get("path")}
+
+        diff = _make_unified_diff(original_text, verified_text, result_path)
+        added_lines, removed_lines = _count_diff_lines(diff)
         diff, diff_truncated = _truncate_diff(diff)
+
         return {
             "ok": True,
             "path": result_path,
             "replacements": replacements,
             "bytes_written": len(patched_text.encode(encoding)),
-            "changed": original_text != patched_text,
+            "changed": original_text != verified_text,
             "added_lines": added_lines,
             "removed_lines": removed_lines,
             "diff": diff,
             "diff_truncated": diff_truncated,
             "previous_version": before,
         }
+
+
+def _make_unified_diff(old_text: str, new_text: str, path: str) -> str:
+    return "".join(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
+def _count_diff_lines(diff: str) -> tuple[int, int]:
+    added = 0
+    removed = 0
+    for line in diff.splitlines():
+        if line.startswith("+++") or line.startswith("---"):
+            continue
+        if line.startswith("+"):
+            added += 1
+        elif line.startswith("-"):
+            removed += 1
+    return added, removed
+
+
+def _truncate_diff(diff: str) -> tuple[str, bool]:
+    if len(diff) <= MAX_DIFF_CHARS:
+        return diff, False
+    return diff[:MAX_DIFF_CHARS], True
