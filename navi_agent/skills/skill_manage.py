@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 from ..paths import get_navi_home
+from ..storage.safe_file import atomic_write_text, file_lock
 
 
 class SkillManageTool:
@@ -75,5 +76,6 @@ class SkillManageTool:
             return {"ok": False, "error": str(e)}
         target.mkdir(parents=True, exist_ok=True)
         sk = target / "SKILL.md"
-        sk.write_text(content, encoding="utf-8")
+        with file_lock(sk):
+            atomic_write_text(sk, content, encoding="utf-8")
         return {"ok": True, "name": name, "path": str(sk)}
