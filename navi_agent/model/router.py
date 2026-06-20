@@ -49,9 +49,27 @@ class MimoProvider(BaseProvider):
         )
 
 
+class LlamaProvider(BaseProvider):
+    """llama.cpp / llama-server 等 OpenAI 兼容本地推理服务。"""
+
+    def create_client(self) -> OpenAI:
+        import httpx
+        http_client = httpx.Client(trust_env=False)
+        return OpenAI(api_key=self.api_key, base_url=self.base_url, http_client=http_client)
+
+    def chat_stream_with_client(self, client, messages, tools, **kwargs):
+        params: dict[str, Any] = dict(
+            model=self.model_name, messages=messages, stream=True,
+        )
+        if tools:
+            params["tools"] = tools
+        return client.chat.completions.create(**params)
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
+    "llama": LlamaProvider,
 }
 
 
