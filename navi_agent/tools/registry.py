@@ -145,16 +145,16 @@ class ToolRegistry:
         except ValueError as exc:
             return {"ok": False, "error": str(exc), "path": path_arg}
 
+        expected_version = self._read_versions.get(str(target))
         with file_lock(target):
             before = file_version(target).to_dict()
-            last_read = self._read_versions.get(str(target))
-            if last_read is not None and before != last_read:
+            if expected_version is not None and before != expected_version:
                 return {
                     "ok": False,
                     "error": "FILE_CHANGED_SINCE_READ",
                     "message": "文件已被其他会话或外部程序修改。请重新 read_file 后再修改。",
                     "path": str(path_arg),
-                    "last_read_version": last_read,
+                    "last_read_version": expected_version,
                     "current_version": before,
                 }
 
