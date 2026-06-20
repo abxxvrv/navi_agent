@@ -16,6 +16,7 @@ from ..paths import get_navi_home, load_navi_dotenv
 from .prompt_ui import NaviPromptSession
 from ..runtime.agent import AgentRuntime
 from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
+from .paste_collapse import expand_paste_references
 from .paste_trace import summarize_text, trace_paste
 from .stream_box import StreamingBox
 from .ui import console
@@ -162,13 +163,18 @@ class ChatController:
         ):
             return
 
+        display_text = text
+        runtime_text = expand_paste_references(text)
+        if runtime_text != display_text:
+            trace_paste("paste_reference_expanded", text_summary=summarize_text(display_text))
+
         if runtime.reviewer.pending_message:
             msg = runtime.reviewer.pending_message
             runtime.reviewer.pending_message = None
             self.print_live(f"[dim]💾 {msg}[/dim]")
 
         self.print_live()
-        self.print_live(Text(f"> {text}", style="#87CEEB"))
+        self.print_live(Text(f"> {display_text}", style="#87CEEB"))
         self.print_live()
 
         import time as _time
@@ -200,7 +206,7 @@ class ChatController:
 
         def runner() -> dict[str, Any]:
             try:
-                return runtime.run_turn(text)
+                return runtime.run_turn(runtime_text)
             except KeyboardInterrupt:
                 return {
                     "ok": False,

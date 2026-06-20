@@ -34,6 +34,7 @@ from prompt_toolkit.styles import Style as PTStyle
 
 from ..tools.approval import UserApprovalChoice
 from .interrupt_trace import trace_interrupt
+from .paste_collapse import _COLLAPSE_MIN_CHARS, _COLLAPSE_MIN_LINES, collapse_large_paste
 from .paste_trace import summarize_text, trace_paste
 
 
@@ -46,6 +47,11 @@ _NAVI_STYLE = PTStyle.from_dict({
     "approval-countdown": "#4ec9b0",
     "approval-countdown-warn": "bold #ff4444",
 })
+
+_IDLE_ENTER_GUARD_SECONDS = 0.08
+_IDLE_PASTE_CAPTURE_STABILITY_SECONDS = 0.25
+_MANUAL_SUBMIT_GAP_SECONDS = 0.05
+
 
 class NaviPromptSession:
     """Thin wrapper around prompt_toolkit — input box only, no conversation display."""
@@ -72,6 +78,16 @@ class NaviPromptSession:
         self._cancel_requested = False
         self._force_exit = False  # Double Ctrl+C → force exit
         self._last_interrupt_time: float = 0.0  # 上次中断键时间（用于 double-press 检测）
+        self._last_buffer_text = ""
+        self._paste_capture_active = False
+        self._paste_capture_until = 0.0
+        self._handling_bracketed_paste = False
+        self._handling_idle_enter_newline = False
+        self._pending_idle_enter_task: asyncio.Task[None] | None = None
+        self._paste_capture_task: asyncio.Task[None] | None = None
+        self._last_char_at: float = 0.0
+        self._paste_counter = 0
+        self._suppress_paste_collapse = False
 
         # Model picker state (None = closed)
         self.model_picker: dict | None = None
@@ -201,7 +217,12 @@ class NaviPromptSession:
             # have their own input handling that must not be bypassed.
             if self._running or self._approval_state is not None or self.model_picker is not None:
                 return
-            event.current_buffer.insert_text(data)
+            data = self._collapse_paste_text(data, source="bracketed_paste")
+            self._handling_bracketed_paste = True
+            try:
+                event.current_buffer.insert_text(data)
+            finally:
+                self._handling_bracketed_paste = False
             trace_paste(
                 "bracketed_paste_inserted",
                 text_summary=summarize_text(data),
@@ -235,34 +256,70 @@ class NaviPromptSession:
 
         @input_bindings.add("enter", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
+            now = time.monotonic()
             text = event.current_buffer.text.strip()
-            if text:
+            if not text:
+                return
+            gap = now - self._last_char_at
+            trace_paste(
+                "idle_enter_seen",
+                text_summary=summarize_text(text),
+                running=self._running,
+                approval_active=self._approval_state is not None,
+                picker_active=self.model_picker is not None,
+                buffer_len=len(event.current_buffer.text),
+                gap=gap,
+            )
+
+            if self._paste_capture_active:
+                if gap >= _MANUAL_SUBMIT_GAP_SECONDS:
+                    # human paused after the paste burst -> exit capture and submit now
+                    self._cancel_paste_capture()
+                    self._collapse_current_buffer_if_large(source="paste_capture_submit")
+                    text = self._buffer.text.strip()   # re-read: placeholder if it collapsed
+                    self._submit_idle(text, mode="capture_exit")
+                    return
+                # still inside the burst -> newline, extend the 250ms window (current behavior)
+                self._handling_idle_enter_newline = True
+                try:
+                    event.current_buffer.insert_text("\n")
+                finally:
+                    self._handling_idle_enter_newline = False
+                self._paste_capture_until = now + _IDLE_PASTE_CAPTURE_STABILITY_SECONDS
                 trace_paste(
-                    "idle_enter_seen",
-                    text_summary=summarize_text(text),
+                    "paste_capture_enter_newline",
+                    text_summary=summarize_text(event.current_buffer.text.strip()),
                     running=self._running,
                     approval_active=self._approval_state is not None,
                     picker_active=self.model_picker is not None,
                     buffer_len=len(event.current_buffer.text),
                 )
-                event.current_buffer.reset()
-                trace_paste(
-                    "idle_enter_submit",
-                    text_summary=summarize_text(text),
-                    queue_size=self._idle_queue.qsize(),
-                    running=self._running,
-                    approval_active=self._approval_state is not None,
-                    picker_active=self.model_picker is not None,
-                )
-                self._idle_queue.put_nowait(text)
-                trace_paste(
-                    "idle_queue_put",
-                    text_summary=summarize_text(text),
-                    queue_size=self._idle_queue.qsize(),
-                    running=self._running,
-                    approval_active=self._approval_state is not None,
-                    picker_active=self.model_picker is not None,
-                )
+                event.app.invalidate()
+                return
+
+            if gap >= _MANUAL_SUBMIT_GAP_SECONDS:
+                # clearly a deliberate submit -> send immediately, no guard wait, no inserted "\n"
+                self._cancel_pending_idle_enter()
+                self._submit_idle(text, mode="immediate")
+                return
+
+            # ambiguous (fast typist OR first Enter of a non-bracketed paste) -> current behavior:
+            # insert newline and arm the 80ms forward-looking guard
+            self._handling_idle_enter_newline = True
+            try:
+                event.current_buffer.insert_text("\n")
+            finally:
+                self._handling_idle_enter_newline = False
+            self._schedule_idle_enter_guard()
+            trace_paste(
+                "idle_enter_guarded",
+                text_summary=summarize_text(event.current_buffer.text.strip()),
+                running=self._running,
+                approval_active=self._approval_state is not None,
+                picker_active=self.model_picker is not None,
+                buffer_len=len(event.current_buffer.text),
+            )
+            event.app.invalidate()
 
         @input_bindings.add("escape", "enter", eager=True)
         def _(event: KeyPressEvent) -> None:
@@ -274,6 +331,8 @@ class NaviPromptSession:
 
         @input_bindings.add("c-d", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
+            self._cancel_pending_idle_enter()
+            self._cancel_paste_capture()
             event.app.exit(result="exit")
 
         @global_bindings.add("c-c", eager=True, is_global=True)
@@ -290,6 +349,7 @@ class NaviPromptSession:
             completer=completer,
             complete_while_typing=False,
         )
+        self._buffer.on_text_changed += self._on_buffer_text_changed
 
         self._layout = Layout(
             FloatContainer(
@@ -383,12 +443,16 @@ class NaviPromptSession:
             with self._patch_stdout():
                 await self._app.run_async()
         finally:
+            self._cancel_pending_idle_enter()
+            self._cancel_paste_capture()
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
             self._loop = None
 
     def begin_running(self) -> None:
+        self._cancel_pending_idle_enter()
+        self._cancel_paste_capture()
         trace_interrupt("prompt_begin_running")
         trace_paste(
             "prompt_begin_running_paste",
@@ -597,6 +661,8 @@ class NaviPromptSession:
             event.app.invalidate()
             return
 
+        self._cancel_pending_idle_enter()
+        self._cancel_paste_capture()
         event.app.exit(result="exit")
 
     def _request_interrupt(self) -> None:
@@ -617,6 +683,166 @@ class NaviPromptSession:
 
         if self._on_cancel:
             self._on_cancel()
+
+    def _on_buffer_text_changed(self, _buffer: Buffer) -> None:
+        current = self._buffer.text
+        if self._handling_bracketed_paste:
+            self._last_buffer_text = current
+            return
+        if self._handling_idle_enter_newline:
+            self._last_buffer_text = current
+            return
+        if self._suppress_paste_collapse:
+            self._suppress_paste_collapse = False
+            self._last_buffer_text = current
+            return
+
+        added_chars = max(0, len(current) - len(self._last_buffer_text))
+        now = time.monotonic()
+        if added_chars > 0:
+            self._last_char_at = now
+            if self._paste_capture_active:
+                self._paste_capture_until = now + _IDLE_PASTE_CAPTURE_STABILITY_SECONDS
+            if self._pending_idle_enter_task is not None and not self._pending_idle_enter_task.done():
+                self._start_paste_capture(now)
+            newlines_added = max(0, current.count("\n") - self._last_buffer_text.count("\n"))
+            is_slash = current.lstrip().startswith("/")
+            if not is_slash and (added_chars >= _COLLAPSE_MIN_CHARS or newlines_added >= _COLLAPSE_MIN_LINES):
+                if current.startswith(self._last_buffer_text):
+                    prefix = self._last_buffer_text
+                    pasted = current[len(prefix):]
+                else:
+                    prefix = ""
+                    pasted = current
+                placeholder = self._collapse_paste_text(pasted, source="buffer_change")
+                new_text = prefix + placeholder
+                if new_text != current:
+                    self._suppress_paste_collapse = True
+                    self._buffer.text = new_text
+                    self._buffer.cursor_position = len(new_text)
+                    self._last_buffer_text = new_text
+                    return
+        self._last_buffer_text = current
+
+    def _collapse_paste_text(self, text: str, *, source: str) -> str:
+        placeholder, paste_file = collapse_large_paste(text, self._paste_counter + 1)
+        if paste_file is not None:
+            self._paste_counter += 1
+            normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+            trace_paste(
+                "paste_collapsed",
+                source=source,
+                line_count=len(normalized.splitlines()),
+                char_count=len(normalized),
+                file_path=str(paste_file),
+            )
+        return placeholder
+
+    def _collapse_current_buffer_if_large(self, *, source: str) -> bool:
+        """Collapse the entire current buffer into a placeholder if it is large.
+
+        Used at the paste_capture boundary, where a non-bracketed paste has
+        streamed into the buffer as a key stream. Returns True if it collapsed.
+        """
+        current = self._buffer.text
+        if current.lstrip().startswith("/"):
+            return False
+        before = self._paste_counter
+        placeholder = self._collapse_paste_text(current, source=source)
+        if self._paste_counter == before:
+            # Below threshold — nothing was collapsed.
+            return False
+        self._suppress_paste_collapse = True
+        self._buffer.text = placeholder
+        self._buffer.cursor_position = len(placeholder)
+        self._last_buffer_text = placeholder
+        return True
+
+    def _start_paste_capture(self, now: float, *, source: str = "key_stream") -> None:
+        was_active = self._paste_capture_active
+        self._paste_capture_active = True
+        self._paste_capture_until = now + _IDLE_PASTE_CAPTURE_STABILITY_SECONDS
+        self._cancel_pending_idle_enter()
+        if self._paste_capture_task is None or self._paste_capture_task.done():
+            self._paste_capture_task = asyncio.create_task(self._finish_paste_capture_when_stable())
+        if not was_active:
+            trace_paste(
+                "paste_capture_start",
+                source=source,
+                buffer_len=len(self._buffer.text),
+            )
+
+    def _schedule_idle_enter_guard(self) -> None:
+        if self._pending_idle_enter_task is None or self._pending_idle_enter_task.done():
+            self._pending_idle_enter_task = asyncio.create_task(self._guarded_idle_enter_submit())
+
+    def _cancel_pending_idle_enter(self) -> None:
+        task = self._pending_idle_enter_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._pending_idle_enter_task = None
+
+    def _submit_idle(self, text: str, *, mode: str) -> None:
+        self._buffer.reset()
+        trace_paste(
+            "idle_enter_submit",
+            text_summary=summarize_text(text),
+            queue_size=self._idle_queue.qsize(),
+            running=self._running,
+            approval_active=self._approval_state is not None,
+            picker_active=self.model_picker is not None,
+            submit_mode=mode,
+        )
+        self._idle_queue.put_nowait(text)
+        trace_paste(
+            "idle_queue_put",
+            text_summary=summarize_text(text),
+            queue_size=self._idle_queue.qsize(),
+            running=self._running,
+            approval_active=self._approval_state is not None,
+            picker_active=self.model_picker is not None,
+            submit_mode=mode,
+        )
+        self._app.invalidate()
+
+    async def _guarded_idle_enter_submit(self) -> None:
+        try:
+            await asyncio.sleep(_IDLE_ENTER_GUARD_SECONDS)
+            if self._paste_capture_active:
+                return
+            if self._running or self._approval_state is not None or self.model_picker is not None:
+                return
+            text = self._buffer.text.strip()
+            if not text:
+                return
+            self._submit_idle(text, mode="guarded")
+        finally:
+            self._pending_idle_enter_task = None
+
+    async def _finish_paste_capture_when_stable(self) -> None:
+        try:
+            while True:
+                delay = self._paste_capture_until - time.monotonic()
+                if delay <= 0:
+                    break
+                await asyncio.sleep(delay)
+            self._paste_capture_active = False
+            self._collapse_current_buffer_if_large(source="paste_capture")
+            trace_paste(
+                "paste_capture_end",
+                buffer_len=len(self._buffer.text),
+            )
+            self._app.invalidate()
+        finally:
+            self._paste_capture_task = None
+
+    def _cancel_paste_capture(self) -> None:
+        task = self._paste_capture_task
+        if task is not None and not task.done():
+            task.cancel()
+        self._paste_capture_task = None
+        self._paste_capture_active = False
+        self._paste_capture_until = 0.0
 
     def _picker_height(self) -> int:
         """Dynamic height for the picker window."""

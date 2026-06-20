@@ -1,5 +1,6 @@
 import asyncio
 import tempfile
+import time
 from io import StringIO
 from pathlib import Path
 
@@ -25,6 +26,181 @@ def _make_prompt(pipe_input, **kwargs):
         output=DummyOutput(),
         **kwargs,
     )
+
+
+async def _run_prompt_input(
+    prompt,
+    pipe_input,
+    writer,
+    *,
+    exit_after_submits=1,
+    timeout=2.0,
+):
+    submitted = []
+
+    async def on_submit(text):
+        submitted.append(text)
+        if exit_after_submits is not None and len(submitted) >= exit_after_submits:
+            prompt.exit()
+
+    task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+    await asyncio.sleep(0.05)
+    await writer()
+    await asyncio.wait_for(task, timeout=timeout)
+    return submitted
+
+
+async def _send_slow_text(pipe_input, text, delay=0.09):
+    for char in text:
+        pipe_input.send_text(char)
+        await asyncio.sleep(delay)
+
+
+def test_idle_enter_submits_plain_input_after_guard():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+
+            async def writer():
+                await _send_slow_text(pipe_input, "hello")
+                pipe_input.send_text("\r")
+
+            submitted = await _run_prompt_input(prompt, pipe_input, writer)
+
+            assert submitted == ["hello"]
+            assert prompt._pending_idle_enter_task is None
+
+    asyncio.run(run())
+
+
+def test_idle_enter_submits_fast_plain_input_after_guard():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+
+            async def writer():
+                pipe_input.send_text("hellox\r")
+
+            submitted = await _run_prompt_input(prompt, pipe_input, writer)
+
+            assert submitted == ["hellox"]
+            assert prompt._pending_idle_enter_task is None
+
+    asyncio.run(run())
+
+
+def test_idle_fast_multiline_key_stream_stays_in_buffer_after_stable():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("line1\rline2\rline3")
+            await asyncio.sleep(0.40)
+
+            assert submitted == []
+            assert prompt._buffer.text == "line1\nline2\nline3"
+            assert prompt._paste_capture_active is False
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_idle_short_multiline_key_stream_stays_in_buffer_after_stable():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("a\rb\rc")
+            await asyncio.sleep(0.40)
+
+            assert submitted == []
+            assert prompt._buffer.text == "a\nb\nc"
+            assert prompt._paste_capture_active is False
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_idle_fast_multiline_key_stream_submits_once_after_user_enter():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+                prompt.exit()
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("line1\rline2\rline3")
+            await asyncio.sleep(0.40)
+            assert submitted == []
+
+            pipe_input.send_text("\r")
+            await asyncio.wait_for(task, timeout=1.0)
+            assert submitted == ["line1\nline2\nline3"]
+
+    asyncio.run(run())
+
+
+def test_bracketed_paste_multiline_stays_in_buffer_without_submit():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("\x1b[200~line1\nline2\x1b[201~")
+            await asyncio.sleep(0.20)
+
+            assert submitted == []
+            assert prompt._buffer.text == "line1\nline2"
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_bracketed_paste_enter_submits_after_guard():
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+
+            async def writer():
+                pipe_input.send_text("\x1b[200~line1\nline2\x1b[201~\r")
+
+            submitted = await _run_prompt_input(prompt, pipe_input, writer)
+
+            assert submitted == ["line1\nline2"]
+            assert prompt._pending_idle_enter_task is None
+
+    asyncio.run(run())
 
 
 def test_prompt_approval_panel_renders_decision():
@@ -523,6 +699,358 @@ def test_splash_matches_kimi_style_welcome_card(monkeypatch):
     assert "Version:" in text
     assert "Commands" not in text
     assert "Press" not in text
+
+
+def test_gap_large_immediate_submit_no_guard():
+    """Enter pressed after a long pause -> immediate submit; no guard task created."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+
+            async def writer():
+                pipe_input.send_text("hi")
+                # Simulate a large gap: set _last_char_at to well in the past
+                prompt._last_char_at = prompt._last_char_at - 0.5  # 500ms ago
+                pipe_input.send_text("\r")
+
+            submitted = await _run_prompt_input(prompt, pipe_input, writer)
+
+            assert submitted == ["hi"]
+            assert prompt._pending_idle_enter_task is None
+
+    asyncio.run(run())
+
+
+def test_gap_large_inside_paste_capture_exits_capture_and_submits():
+    """Enter with large gap while paste_capture_active -> cancels capture and submits immediately."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+                prompt.exit()
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Fast-stream two lines to trigger paste capture
+            pipe_input.send_text("line1\rline2")
+            await asyncio.sleep(0.05)  # short enough to stay in capture window
+
+            # Now simulate a large gap before the final Enter
+            assert prompt._paste_capture_active is True
+            prompt._last_char_at = prompt._last_char_at - 0.5  # 500ms ago
+
+            pipe_input.send_text("\r")
+            await asyncio.wait_for(task, timeout=1.0)
+
+            assert submitted == ["line1\nline2"]
+            assert prompt._paste_capture_active is False
+
+    asyncio.run(run())
+
+
+def test_gap_small_inside_paste_capture_inserts_newline_stays_in_capture():
+    """Enter with small gap while paste_capture_active -> newline inserted, still in capture, nothing queued."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Fast-stream to trigger paste capture
+            pipe_input.send_text("line1\rline2")
+            await asyncio.sleep(0.05)
+
+            assert prompt._paste_capture_active is True
+            # Force a deterministically tiny gap (don't rely on wall-clock, which
+            # can drift past _MANUAL_SUBMIT_GAP_SECONDS under load and flip the branch).
+            prompt._last_char_at = time.monotonic()
+            pipe_input.send_text("\r")
+            await asyncio.sleep(0.02)
+
+            # Nothing should be submitted yet; buffer should have the extra newline
+            assert submitted == []
+            assert prompt._paste_capture_active is True
+            assert "\n" in prompt._buffer.text
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+# ─── Paste-collapse integration tests ────────────────────────────────────────
+
+_BIG_PASTE = "\n".join(f"line {i}" for i in range(10))  # 10 lines, well above threshold
+_SMALL_PASTE = "line1\nline2"  # 2 lines, well below threshold
+
+
+def _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch):
+    """Create a prompt with NAVI_HOME isolated to tmp_path."""
+    import os
+    monkeypatch.setenv("NAVI_HOME", str(tmp_path))
+    return _make_prompt(pipe_input)
+
+
+def test_bracketed_paste_small_not_collapsed(tmp_path, monkeypatch):
+    """Small paste (below thresholds) stays in buffer verbatim."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text(f"\x1b[200~{_SMALL_PASTE}\x1b[201~")
+            await asyncio.sleep(0.20)
+
+            assert prompt._buffer.text == _SMALL_PASTE
+            assert prompt._paste_counter == 0
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_bracketed_paste_large_collapsed(tmp_path, monkeypatch):
+    """Large paste (>=8 lines) -> buffer becomes placeholder, file exists, counter incremented."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text(f"\x1b[200~{_BIG_PASTE}\x1b[201~")
+            await asyncio.sleep(0.20)
+
+            buf = prompt._buffer.text
+            assert buf.startswith("[Pasted text #1:")
+            assert "lines ->" in buf
+            assert prompt._paste_counter == 1
+            # The paste file should exist
+            pastes = list((tmp_path / "pastes").glob("paste_*.txt"))
+            assert len(pastes) == 1
+            assert pastes[0].read_text(encoding="utf-8") == _BIG_PASTE
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_bracketed_paste_prefix_preserved(tmp_path, monkeypatch):
+    """Type a prefix, then paste large text -> buffer == prefix + placeholder."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Type prefix slowly so it's below collapse threshold
+            await _send_slow_text(pipe_input, "look: ")
+            # Now paste large text
+            pipe_input.send_text(f"\x1b[200~{_BIG_PASTE}\x1b[201~")
+            await asyncio.sleep(0.20)
+
+            buf = prompt._buffer.text
+            assert buf.startswith("look: [Pasted text #1:")
+            assert prompt._paste_counter == 1
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_fallback_no_false_collapse_ime_chars(tmp_path, monkeypatch):
+    """Short multi-char insert below threshold (IME style) is NOT collapsed."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Simulate IME-style commit: 12 Chinese chars, all at once, no newlines
+            # This is well below both _COLLAPSE_MIN_CHARS (2000) and _COLLAPSE_MIN_LINES (8)
+            ime_text = "你好世界这是测试文本哈哈"  # 12 chars, 0 newlines
+            pipe_input.send_text(ime_text)
+            await asyncio.sleep(0.10)
+
+            assert prompt._buffer.text == ime_text
+            assert prompt._paste_counter == 0
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_fallback_collapses_large_char_insert(tmp_path, monkeypatch):
+    """Single buffer change inserting >=2000 chars via fallback path collapses."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Directly manipulate buffer to simulate a large non-bracketed paste
+            big_text = "x" * 2500
+            prompt._buffer.text = big_text
+            await asyncio.sleep(0.10)
+
+            buf = prompt._buffer.text
+            assert "[Pasted text #1:" in buf
+            assert prompt._paste_counter == 1
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_fallback_slash_not_collapsed(tmp_path, monkeypatch):
+    """Buffer text starting with / receiving large insert is NOT collapsed (slash guard)."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            # Directly set buffer to a slash command that happens to be very long
+            slash_text = "/" + "x" * 2500
+            prompt._buffer.text = slash_text
+            await asyncio.sleep(0.10)
+
+            # Should NOT have been collapsed
+            assert prompt._paste_counter == 0
+            assert not prompt._buffer.text.startswith("[Pasted text")
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_key_stream_large_collapses_at_stable_end(tmp_path, monkeypatch):
+    """Large key-stream paste -> buffer collapses to placeholder when capture window stabilises."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            big_key_stream = "\r".join(f"line{i}" for i in range(12))
+            pipe_input.send_text(big_key_stream)
+            # Wait longer than the 0.25s stability window
+            await asyncio.sleep(0.40)
+
+            assert submitted == []
+            buf = prompt._buffer.text
+            assert buf.startswith("[Pasted text"), f"expected placeholder, got: {buf!r}"
+            pastes = list((tmp_path / "pastes").glob("paste_*.txt"))
+            assert len(pastes) == 1
+            assert prompt._paste_counter == 1
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_key_stream_large_collapses_on_capture_exit_submit(tmp_path, monkeypatch):
+    """Large key-stream paste followed by a human Enter (large gap) -> submitted text is placeholder."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+                prompt.exit()
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            big_key_stream = "\r".join(f"line{i}" for i in range(12))
+            pipe_input.send_text(big_key_stream)
+            await asyncio.sleep(0.05)  # stay in capture window
+
+            assert prompt._paste_capture_active is True
+            # Simulate large gap (human paused)
+            prompt._last_char_at = time.monotonic() - 0.5
+
+            pipe_input.send_text("\r")
+            await asyncio.wait_for(task, timeout=1.0)
+
+            assert len(submitted) == 1
+            assert submitted[0].startswith("[Pasted text"), f"expected placeholder, got: {submitted[0]!r}"
+            pastes = list((tmp_path / "pastes").glob("paste_*.txt"))
+            assert len(pastes) == 1
+
+    asyncio.run(run())
+
+
+def test_key_stream_small_not_collapsed_after_stable(tmp_path, monkeypatch):
+    """Small key-stream paste (below threshold) stays in buffer unchanged after capture stabilises."""
+    async def run():
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
+            submitted = []
+
+            async def on_submit(text):
+                submitted.append(text)
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("a\rb\rc")
+            await asyncio.sleep(0.40)
+
+            assert submitted == []
+            assert prompt._buffer.text == "a\nb\nc"
+            assert prompt._paste_counter == 0
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
 
 
 def _find_buffer_window(prompt):
