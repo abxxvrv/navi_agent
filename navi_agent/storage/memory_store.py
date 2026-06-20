@@ -131,8 +131,10 @@ class MemoryStore:
 
     def get_text(self, target: str) -> str:
         filename, _ = self._target_info(target)
-        entries = self._load(filename)
-        self._cache_entries(target, entries)
+        path = get_memory_dir() / filename
+        with file_lock(path):
+            entries = self._load(filename)
+            self._cache_entries(target, entries)
         if not entries:
             return ""
         return ENTRY_DELIMITER.join(entries)
