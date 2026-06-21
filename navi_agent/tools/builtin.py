@@ -12,6 +12,8 @@ import time
 import re
 
 from ..runtime.interrupt import is_interrupted
+from ..storage.safe_file import atomic_write_text, file_lock, file_version
+from ..storage.version_tracker import VersionTracker
 
 
 MAX_DIFF_CHARS = 12000
@@ -125,8 +127,9 @@ class ListDirTool:
 
 # 读文件的
 class ReadFileTool:
-    def __init__(self, workspace: str = "."):
+    def __init__(self, workspace: str = ".", tracker: VersionTracker | None = None):
         self.workspace = Path(workspace).resolve() # 转成绝对路径
+        self.tracker = tracker
 
     def __call__(
         self,
@@ -229,6 +232,12 @@ class ReadFileTool:
 
         numbered_content = "\n".join(lines)
 
+        if self.tracker is not None:
+            try:
+                self.tracker.record(target, file_version(target))
+            except Exception:
+                pass
+
         return {
             "ok": True,
             "path": format_result_path(self.workspace, target),
@@ -241,8 +250,9 @@ class ReadFileTool:
 
 # 写文件工具
 class WriteFileTool:
-    def __init__(self, workspace: str = "."):
+    def __init__(self, workspace: str = ".", tracker: VersionTracker | None = None):
         self.workspace = Path(workspace).resolve()
+        self.tracker = tracker
 
     def __call__(
         self,
@@ -276,26 +286,34 @@ class WriteFileTool:
             target.parent.mkdir(parents=True, exist_ok=True)
 
             result_path = format_result_path(self.workspace, target)
-            if target.exists():
-                try:
-                    old_content = target.read_text(encoding=encoding)
-                except UnicodeDecodeError:
-                    return {
-                        "ok": False,
-                        "error": "目标文件不是指定编码下的有效文本。",
-                        "path": path,
-                        "encoding": encoding,
-                    }
-            else:
-                old_content = ""
 
-            file_mode = "w" if mode == "overwrite" else "a"
+            with file_lock(target):
+                if self.tracker is not None:
+                    before = file_version(target)
+                    if not self.tracker.check(target, before):
+                        return VersionTracker.conflict_result(path)
 
-            with open(target, file_mode, encoding=encoding) as f:
-                f.write(content)
+                if target.exists():
+                    try:
+                        old_content = target.read_text(encoding=encoding)
+                    except UnicodeDecodeError:
+                        return {
+                            "ok": False,
+                            "error": "目标文件不是指定编码下的有效文本。",
+                            "path": path,
+                            "encoding": encoding,
+                        }
+                else:
+                    old_content = ""
 
-            new_content = target.read_text(encoding=encoding)
-            diff = make_unified_diff(old_content, new_content, result_path)
+                new_content = content if mode == "overwrite" else old_content + content
+                atomic_write_text(target, new_content, encoding=encoding)
+
+                if self.tracker is not None:
+                    self.tracker.record(target, file_version(target))
+
+            verified_content = target.read_text(encoding=encoding)
+            diff = make_unified_diff(old_content, verified_content, result_path)
             added_lines, removed_lines = count_diff_lines(diff)
             diff, diff_truncated = truncate_diff(diff)
 
@@ -304,7 +322,7 @@ class WriteFileTool:
                 "path": result_path,
                 "mode": mode,
                 "bytes_written": len(content.encode(encoding)),
-                "changed": old_content != new_content,
+                "changed": old_content != verified_content,
                 "added_lines": added_lines,
                 "removed_lines": removed_lines,
                 "diff": diff,
@@ -321,8 +339,9 @@ class WriteFileTool:
 
 # 局部修改文件工具
 class PatchTool:
-    def __init__(self, workspace: str = "."):
+    def __init__(self, workspace: str = ".", tracker: VersionTracker | None = None):
         self.workspace = Path(workspace).resolve()
+        self.tracker = tracker
 
     def __call__(
         self,
@@ -362,55 +381,61 @@ class PatchTool:
                     "path": path,
                 }
 
-            # 7. 读取原文件
-            try:
-                original_text = target.read_text(encoding=encoding)
-            except UnicodeDecodeError:
-                return {
-                    "ok": False,
-                    "error": "文件不是指定编码下的有效文本。",
-                    "path": path,
-                    "encoding": encoding,
-                }
-
-            # 8. 检查 old_text 出现次数
-            count = original_text.count(old_text)
-
-            if count == 0:
-                return {
-                    "ok": False,
-                    "error": "文件中未找到 old_text。",
-                    "path": path,
-                }
-
-            if count > 1 and not replace_all:
-                return {
-                    "ok": False,
-                    "error": (
-                        f"old_text 出现了 {count} 次。"
-                        "请提供更精确的 old_text，或设置 replace_all=True。"
-                    ),
-                    "path": path,
-                    "matches": count,
-                }
-
-            # 9. 替换内容
-            if replace_all:
-                patched_text = original_text.replace(old_text, new_text)
-                replacements = count
-            else:
-                patched_text = original_text.replace(old_text, new_text, 1)
-                replacements = 1
-
-            # 10. 生成 diff，方便用户检查改了什么
             result_path = format_result_path(self.workspace, target)
-            diff = make_unified_diff(original_text, patched_text, result_path)
-            added_lines, removed_lines = count_diff_lines(diff)
 
-            # 11. 写回文件
-            target.write_text(patched_text, encoding=encoding)
+            with file_lock(target):
+                if self.tracker is not None:
+                    before = file_version(target)
+                    if not self.tracker.check(target, before):
+                        return VersionTracker.conflict_result(path)
 
-            # 12. 写完后重新读取，确认真的写成功
+                # 7. 读取原文件
+                try:
+                    original_text = target.read_text(encoding=encoding)
+                except UnicodeDecodeError:
+                    return {
+                        "ok": False,
+                        "error": "文件不是指定编码下的有效文本。",
+                        "path": path,
+                        "encoding": encoding,
+                    }
+
+                # 8. 检查 old_text 出现次数
+                count = original_text.count(old_text)
+
+                if count == 0:
+                    return {
+                        "ok": False,
+                        "error": "文件中未找到 old_text。",
+                        "path": path,
+                    }
+
+                if count > 1 and not replace_all:
+                    return {
+                        "ok": False,
+                        "error": (
+                            f"old_text 出现了 {count} 次。"
+                            "请提供更精确的 old_text，或设置 replace_all=True。"
+                        ),
+                        "path": path,
+                        "matches": count,
+                    }
+
+                # 9. 替换内容
+                if replace_all:
+                    patched_text = original_text.replace(old_text, new_text)
+                    replacements = count
+                else:
+                    patched_text = original_text.replace(old_text, new_text, 1)
+                    replacements = 1
+
+                # 10. 写回文件（原子写入）
+                atomic_write_text(target, patched_text, encoding=encoding)
+
+                if self.tracker is not None:
+                    self.tracker.record(target, file_version(target))
+
+            # 11. 写完后重新读取，确认真的写成功
             verified_text = target.read_text(encoding=encoding)
 
             if verified_text != patched_text:
@@ -419,6 +444,10 @@ class PatchTool:
                     "error": "补丁已写入，但校验失败。",
                     "path": path,
                 }
+
+            # 12. 生成 diff
+            diff = make_unified_diff(original_text, verified_text, result_path)
+            added_lines, removed_lines = count_diff_lines(diff)
 
             # 13. 避免 diff 太长
             diff, diff_truncated = truncate_diff(diff)

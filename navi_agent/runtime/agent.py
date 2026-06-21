@@ -42,6 +42,7 @@ from ..tools.builtin import (
     SearchSessionTool,
 )
 from ..tools.registry import ToolRegistry
+from ..storage.version_tracker import VersionTracker
 from ..context.compressor import ContextCompressor
 from ..storage.memory_store import MemoryStore
 from .background_review import BackgroundReviewer
@@ -1088,6 +1089,7 @@ class AgentRuntime:
 
     def _register_tools(self) -> None:
         workspace = str(self.workspace)
+        tracker = VersionTracker()
 
         # list_dir
         self.tool_registry.register(
@@ -1169,7 +1171,7 @@ class AgentRuntime:
                 },
                 "required": ["path"],
             },
-            function=ReadFileTool(workspace=workspace),
+            function=ReadFileTool(workspace=workspace, tracker=tracker),
         )
 
         # write_file
@@ -1205,7 +1207,7 @@ class AgentRuntime:
                 },
                 "required": ["path", "content"],
             },
-            function=WriteFileTool(workspace=workspace),
+            function=WriteFileTool(workspace=workspace, tracker=tracker),
         )
 
         # patch_file
@@ -1247,7 +1249,7 @@ class AgentRuntime:
                 },
                 "required": ["path", "old_text", "new_text"],
             },
-            function=PatchTool(workspace=workspace),
+            function=PatchTool(workspace=workspace, tracker=tracker),
         )
 
         # skill_view
