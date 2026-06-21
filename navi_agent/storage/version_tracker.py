@@ -22,6 +22,14 @@ class VersionTracker:
         """记录文件版本。"""
         self._versions[str(target.resolve())] = version
 
+    def has_record(self, target: Path) -> bool:
+        """该路径是否有记录（被 read_file 或 write 后 record 过）。"""
+        return str(target.resolve()) in self._versions
+
+    def get(self, target: Path) -> FileVersion | None:
+        """取出该路径上次记录的 FileVersion，无记录返回 None。"""
+        return self._versions.get(str(target.resolve()))
+
     def check(self, target: Path, current: FileVersion) -> bool:
         """检查文件是否与上次记录一致。
 

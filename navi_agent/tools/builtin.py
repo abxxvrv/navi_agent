@@ -289,7 +289,20 @@ class WriteFileTool:
 
             with file_lock(target):
                 if self.tracker is not None:
-                    before = file_version(target)
+                    # 任务 4：未读过就不许覆盖已存在的文件
+                    if (
+                        mode == "overwrite"
+                        and target.exists()
+                        and not self.tracker.has_record(target)
+                    ):
+                        return {
+                            "ok": False,
+                            "error": "MUST_READ_BEFORE_OVERWRITE",
+                            "message": "请先 read_file 确认当前内容，再覆盖此文件。",
+                            "path": path,
+                        }
+
+                    before = file_version(target, prev=self.tracker.get(target))
                     if not self.tracker.check(target, before):
                         return VersionTracker.conflict_result(path)
 
@@ -385,7 +398,7 @@ class PatchTool:
 
             with file_lock(target):
                 if self.tracker is not None:
-                    before = file_version(target)
+                    before = file_version(target, prev=self.tracker.get(target))
                     if not self.tracker.check(target, before):
                         return VersionTracker.conflict_result(path)
 

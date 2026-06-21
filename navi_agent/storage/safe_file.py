@@ -27,12 +27,22 @@ class FileLockTimeout(TimeoutError):
     pass
 
 
-def file_version(path: Path) -> FileVersion:
+def file_version(path: Path, prev: FileVersion | None = None) -> FileVersion:
     path = path.resolve()
     if not path.exists():
         return FileVersion(exists=False, sha256="", mtime_ns=0, size=0)
 
     stat = path.stat()
+
+    # 快路径：prev 存在且 mtime_ns+size 都吻合 → 复用 prev（跳过哈希）
+    if (
+        prev is not None
+        and prev.exists
+        and stat.st_mtime_ns == prev.mtime_ns
+        and stat.st_size == prev.size
+    ):
+        return prev
+
     digest = hashlib.sha256()
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
