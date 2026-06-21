@@ -783,18 +783,37 @@ def handle_slash_command(
     if not command.startswith("/"):
         return False
 
-    if command in {"/exit", "/quit"}:
+    parts = command.split(maxsplit=1)
+    command_name = parts[0]
+    command_args = parts[1] if len(parts) > 1 else ""
+
+    no_args_commands = {
+        "/help",
+        "/clear",
+        "/tools",
+        "/skills",
+        "/sessions",
+        "/approval",
+        "/compress",
+        "/fork",
+        "/exit",
+        "/quit",
+    }
+    if command_name in no_args_commands and command_args:
+        return False
+
+    if command_name in {"/exit", "/quit"}:
         raise EOFError
 
-    if command == "/help":
+    if command_name == "/help":
         print_chat_help()
         return True
 
-    if command == "/clear":
+    if command_name == "/clear":
         console.clear()
         return True
 
-    if command == "/tools":
+    if command_name == "/tools":
         tools = list_runtime_tools(runtime)
 
         if not tools:
@@ -807,7 +826,7 @@ def handle_slash_command(
 
         return True
 
-    if command == "/skills":
+    if command_name == "/skills":
         skills = list_skills_from_navi_home()
 
         if not skills:
@@ -820,14 +839,14 @@ def handle_slash_command(
 
         return True
 
-    if command == "/sessions":
+    if command_name == "/sessions":
         current_session_id = runtime.session_store.session_id if runtime else None
         print_sessions_table(limit=5, current_session_id=current_session_id)
         console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
-    if command.startswith("/search"):
-        query = command[7:].strip()
+    if command_name == "/search":
+        query = command_args
         if not query:
             console.print("[yellow]Usage: /search <query>[/yellow]")
             console.print("[dim]支持关键词、短语（用引号）、布尔（AND/OR/NOT）[/dim]")
@@ -893,11 +912,10 @@ def handle_slash_command(
             console.print(f"[red]搜索失败: {e}[/red]")
             return True
 
-    if command.startswith("/mcp"):
+    if command_name == "/mcp":
         try:
             from ..integrations.mcp_commands import handle_mcp_command
-            mcp_args = command[4:].strip() if len(command) > 4 else ""
-            result = handle_mcp_command(mcp_args, runtime.tool_registry)
+            result = handle_mcp_command(command_args, runtime.tool_registry)
             console.print(result)
         except ImportError:
             console.print("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
@@ -905,11 +923,11 @@ def handle_slash_command(
             console.print(f"[red]MCP command error: {e}[/red]")
         return True
 
-    if command == "/model":
+    if command_name == "/model":
         # 由 process_message 处理（需要 prompt_session 交互）
         return False
 
-    if command == "/approval":
+    if command_name == "/approval":
         mode = getattr(runtime.approval_manager, "mode", None)
         console.print(f"[bold]Approval mode[/bold]: {mode.value if mode else 'unknown'}")
 
@@ -923,7 +941,7 @@ def handle_slash_command(
 
         return True
 
-    if command == "/compress":
+    if command_name == "/compress":
         result = runtime.compress_context_to_new_session()
         if not result.get("ok"):
             console.print(f"[red]Compress failed:[/red] {result.get('error', 'unknown error')}")
@@ -938,7 +956,7 @@ def handle_slash_command(
         console.print(f"[dim]Current session:  {result['new_session_id']}[/dim]")
         return True
 
-    if command == "/fork":
+    if command_name == "/fork":
         import subprocess
         import os
         import sys
@@ -1003,9 +1021,7 @@ def handle_slash_command(
 
         return True
 
-    console.print(f"[yellow]Unknown command:[/yellow] {command}")
-    console.print("Type [cyan]/help[/cyan] to see available commands.")
-    return True
+    return False
 
 
 # =========================
