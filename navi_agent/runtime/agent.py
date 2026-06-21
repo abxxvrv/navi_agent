@@ -4,7 +4,6 @@ import json
 import logging
 import random
 import threading
-from collections import defaultdict
 from collections.abc import Callable
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
@@ -40,6 +39,7 @@ from ..tools.builtin import (
     VisionAnalyzeTool,
     WriteFileTool,
     SearchSessionTool,
+    resolve_path,
 )
 from ..tools.registry import ToolRegistry
 from ..storage.version_tracker import VersionTracker
@@ -776,6 +776,30 @@ class AgentRuntime:
                 self._tool_worker_threads.discard(worker_thread_id)
             set_interrupt(False, worker_thread_id)
 
+    def _execute_single_tool_ordered(
+        self,
+        tool_name: str,
+        tool_args: dict,
+        tool_call_id: str,
+        wait_event: threading.Event | None,
+        done_event: threading.Event | None,
+    ) -> tuple[str, Any, str, dict]:
+        """门闩包装：等前序同文件写入完成后再执行，自身完成后通知后续。"""
+        try:
+            if wait_event is not None:
+                while not wait_event.wait(timeout=0.5):
+                    if self._is_cancelled():
+                        return (
+                            tool_call_id,
+                            {"ok": False, "error": "因前序同文件写入未完成或被中断而跳过"},
+                            tool_name,
+                            tool_args,
+                        )
+            return self._execute_single_tool(tool_name, tool_args, tool_call_id)
+        finally:
+            if done_event is not None:
+                done_event.set()
+
     def _tool_node(self, state: AgentState) -> dict[str, Any]:
         last_message = state["messages"][-1]
         failed_messages: list[dict] = []
@@ -802,32 +826,6 @@ class AgentRuntime:
                 failed_messages.append(tool_message)
                 continue
             parsed.append((tool_call["id"], tool_name, tool_args))
-
-        # 冲突检测：多个工具写同一文件则全部拒绝
-        write_map: dict[str, list[int]] = defaultdict(list)
-        for i, (call_id, tool_name, tool_args) in enumerate(parsed):
-            if tool_name in ("write_file", "patch_file") and tool_args.get("path"):
-                write_map[tool_args["path"]].append(i)
-
-        conflict_indices = set()
-        for path, indices in write_map.items():
-            if len(indices) > 1:
-                conflict_indices.update(indices)
-
-        non_conflicting: list[tuple[str, str, dict]] = []
-        for i, (call_id, tool_name, tool_args) in enumerate(parsed):
-            if i in conflict_indices:
-                error = {"ok": False, "error": f"冲突：多个工具同时写入同一文件 {tool_args.get('path')}"}
-                tool_message = {
-                    "role": "tool",
-                    "tool_call_id": call_id,
-                    "content": json.dumps(error, ensure_ascii=False),
-                }
-                self.session_store.append_message(tool_message)
-                rejected_messages.append(tool_message)
-            else:
-                non_conflicting.append((call_id, tool_name, tool_args))
-        parsed = non_conflicting
 
         # 阶段二：审批
         to_execute: list[tuple[str, str, dict]] = []  # (call_id, name, args)
@@ -858,15 +856,34 @@ class AgentRuntime:
         # 收集多模态图片，稍后注入 user message
         pending_images: list[dict] = []
 
-        # 阶段三：并发执行
+        # 阶段三：并发执行（同一真实路径的写操作按模型顺序串行，其余并行）
         executed_messages: list[dict] = []
         if to_execute:
+            # 顺序门闩：把写同一真实路径的操作按模型顺序串成链，后一个等前一个完成
+            wait_on: dict[str, threading.Event] = {}
+            done_signal: dict[str, threading.Event] = {}
+            last_writer: dict[str, str] = {}
+            for cid, name, args in to_execute:
+                if name not in ("write_file", "patch_file") or not args.get("path"):
+                    continue
+                try:
+                    key = str(resolve_path(self.workspace, str(args["path"])))
+                except Exception:
+                    continue
+                prev = last_writer.get(key)
+                if prev is not None:
+                    wait_on[cid] = done_signal.setdefault(prev, threading.Event())
+                last_writer[key] = cid
+
             interrupted_during_tools = False
             executor = ThreadPoolExecutor(max_workers=len(to_execute))
             wait_for_workers = True
             try:
                 futures = {
-                    executor.submit(self._execute_single_tool, name, args, cid): cid
+                    executor.submit(
+                        self._execute_single_tool_ordered, name, args, cid,
+                        wait_on.get(cid), done_signal.get(cid),
+                    ): cid
                     for cid, name, args in to_execute
                 }
                 results: dict[str, tuple] = {}
