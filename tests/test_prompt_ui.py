@@ -721,8 +721,11 @@ def test_gap_large_immediate_submit_no_guard():
     asyncio.run(run())
 
 
-def test_gap_large_inside_paste_capture_exits_capture_and_submits():
-    """Enter with large gap while paste_capture_active -> cancels capture and submits immediately."""
+def test_enter_in_paste_capture_never_submits_even_with_large_gap():
+    """While a paste streams in, Enter is always a newline — never a submit,
+    even if the gap looks large. Batched key-stream pastes have large inter-batch
+    gaps, so a mid-stream Enter must not be misread as a manual submit (which
+    would split the paste)."""
     async def run():
         with create_pipe_input() as pipe_input:
             prompt = _make_prompt(pipe_input)
@@ -730,7 +733,6 @@ def test_gap_large_inside_paste_capture_exits_capture_and_submits():
 
             async def on_submit(text):
                 submitted.append(text)
-                prompt.exit()
 
             task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
             await asyncio.sleep(0.05)
@@ -738,16 +740,19 @@ def test_gap_large_inside_paste_capture_exits_capture_and_submits():
             # Fast-stream two lines to trigger paste capture
             pipe_input.send_text("line1\rline2")
             await asyncio.sleep(0.05)  # short enough to stay in capture window
-
-            # Now simulate a large gap before the final Enter
             assert prompt._paste_capture_active is True
-            prompt._last_char_at = prompt._last_char_at - 0.5  # 500ms ago
 
+            # Even with a large gap, Enter must NOT submit while in capture.
+            prompt._last_char_at = time.monotonic() - 0.5  # 500ms ago
             pipe_input.send_text("\r")
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.sleep(0.05)
 
-            assert submitted == ["line1\nline2"]
-            assert prompt._paste_capture_active is False
+            assert submitted == []
+            assert prompt._paste_capture_active is True
+            assert "\n" in prompt._buffer.text
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
 
     asyncio.run(run())
 
@@ -994,8 +999,10 @@ def test_key_stream_large_collapses_at_stable_end(tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_key_stream_large_collapses_on_capture_exit_submit(tmp_path, monkeypatch):
-    """Large key-stream paste followed by a human Enter (large gap) -> submitted text is placeholder."""
+def test_key_stream_large_enter_midstream_does_not_submit_collapses_at_stable_end(tmp_path, monkeypatch):
+    """A large key-stream paste must not be submitted by an Enter landing mid-stream
+    (batched delivery makes the gap look large). It collapses into a SINGLE
+    placeholder only when the capture window stabilizes, and stays in the buffer."""
     async def run():
         with create_pipe_input() as pipe_input:
             prompt = _make_prompt_with_pastes(pipe_input, tmp_path, monkeypatch)
@@ -1003,7 +1010,6 @@ def test_key_stream_large_collapses_on_capture_exit_submit(tmp_path, monkeypatch
 
             async def on_submit(text):
                 submitted.append(text)
-                prompt.exit()
 
             task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
             await asyncio.sleep(0.05)
@@ -1011,18 +1017,23 @@ def test_key_stream_large_collapses_on_capture_exit_submit(tmp_path, monkeypatch
             big_key_stream = "\r".join(f"line{i}" for i in range(12))
             pipe_input.send_text(big_key_stream)
             await asyncio.sleep(0.05)  # stay in capture window
-
             assert prompt._paste_capture_active is True
-            # Simulate large gap (human paused)
+
+            # An Enter mid-stream with a large gap must NOT submit.
             prompt._last_char_at = time.monotonic() - 0.5
-
             pipe_input.send_text("\r")
-            await asyncio.wait_for(task, timeout=1.0)
+            await asyncio.sleep(0.05)
+            assert submitted == []
 
-            assert len(submitted) == 1
-            assert submitted[0].startswith("[Pasted text"), f"expected placeholder, got: {submitted[0]!r}"
+            # After the window stabilizes, it collapses once into a placeholder.
+            await asyncio.sleep(0.35)
+            assert submitted == []
+            assert prompt._buffer.text.startswith("[Pasted text")
             pastes = list((tmp_path / "pastes").glob("paste_*.txt"))
             assert len(pastes) == 1
+
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
 
     asyncio.run(run())
 

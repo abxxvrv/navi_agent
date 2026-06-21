@@ -272,14 +272,13 @@ class NaviPromptSession:
             )
 
             if self._paste_capture_active:
-                if gap >= _MANUAL_SUBMIT_GAP_SECONDS:
-                    # human paused after the paste burst -> exit capture and submit now
-                    self._cancel_paste_capture()
-                    self._collapse_current_buffer_if_large(source="paste_capture_submit")
-                    text = self._buffer.text.strip()   # re-read: placeholder if it collapsed
-                    self._submit_idle(text, mode="capture_exit")
-                    return
-                # still inside the burst -> newline, extend the 250ms window (current behavior)
+                # While a paste is streaming in, Enter is ALWAYS a newline — never
+                # a submit. The gap heuristic can't be trusted here: this terminal
+                # delivers key-stream pastes in batches with inter-batch gaps that
+                # exceed _MANUAL_SUBMIT_GAP_SECONDS, so an embedded newline arriving
+                # at a batch boundary would otherwise be misread as a manual submit
+                # and split the paste mid-stream. Submission happens only after the
+                # capture window stabilizes (see _finish_paste_capture_when_stable).
                 self._handling_idle_enter_newline = True
                 try:
                     event.current_buffer.insert_text("\n")
