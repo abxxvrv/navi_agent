@@ -7,7 +7,7 @@ import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterator
+from typing import Callable, Iterator
 
 from ..paths import get_navi_home
 
@@ -24,6 +24,10 @@ class FileVersion:
 
 
 class FileLockTimeout(TimeoutError):
+    pass
+
+
+class FileLockInterrupted(Exception):
     pass
 
 
@@ -103,6 +107,7 @@ def file_lock(
     timeout: float = 10.0,
     poll_interval: float = 0.05,
     stale_after: float = 300.0,
+    should_cancel: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
     lock_path = _lock_path(target)
     started = time.monotonic()
@@ -115,6 +120,8 @@ def file_lock(
                 f.write(token)
             break
         except FileExistsError:
+            if should_cancel is not None and should_cancel():
+                raise FileLockInterrupted(f"抢锁期间收到中断: {target}")
             try:
                 age = time.time() - lock_path.stat().st_mtime
                 if age > stale_after:

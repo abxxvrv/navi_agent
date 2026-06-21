@@ -287,7 +287,7 @@ class WriteFileTool:
 
             result_path = format_result_path(self.workspace, target)
 
-            with file_lock(target):
+            with file_lock(target, should_cancel=is_interrupted):
                 if self.tracker is not None:
                     # 任务 4：未读过就不许覆盖已存在的文件
                     if (
@@ -396,7 +396,7 @@ class PatchTool:
 
             result_path = format_result_path(self.workspace, target)
 
-            with file_lock(target):
+            with file_lock(target, should_cancel=is_interrupted):
                 if self.tracker is not None:
                     before = file_version(target, prev=self.tracker.get(target))
                     if not self.tracker.check(target, before):

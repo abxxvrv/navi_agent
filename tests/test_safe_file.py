@@ -1,6 +1,7 @@
 """Tests for navi_agent.storage.safe_file"""
 
 import os
+import time
 import pytest
 
 from navi_agent.storage.safe_file import atomic_write_text, file_version, file_lock
@@ -169,3 +170,32 @@ class TestFileLock:
         with file_lock(a):
             with file_lock(b):
                 pass
+
+    def test_should_cancel_bails_during_contention(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NAVI_HOME", str(tmp_path / "navi_home"))
+        target = tmp_path / "c.txt"
+        target.write_text("x", encoding="utf-8")
+
+        from navi_agent.storage.safe_file import _lock_path, FileLockInterrupted
+        lp = _lock_path(target)
+        lp.write_text("held", encoding="utf-8")  # 模拟锁被别人占用
+
+        entered = False
+        started = time.monotonic()
+        with pytest.raises(FileLockInterrupted):
+            with file_lock(target, should_cancel=lambda: True, timeout=5.0):
+                entered = True
+
+        assert entered is False  # 中断发生在拿到锁之前，不应进入临界区
+        assert time.monotonic() - started < 1.0  # 立即退出，不应等满 timeout
+
+    def test_should_cancel_false_acquires_normally(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("NAVI_HOME", str(tmp_path / "navi_home"))
+        target = tmp_path / "d.txt"
+        target.write_text("x", encoding="utf-8")
+
+        entered = False
+        with file_lock(target, should_cancel=lambda: False):
+            entered = True
+
+        assert entered is True
