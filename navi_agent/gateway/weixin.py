@@ -428,6 +428,7 @@ class WeixinAdapter:
                 workspace=self._workspace,
                 approval_mode=self._approval_mode,
                 on_output=None,
+                channel="weixin",
             )
             self._runtimes[chat_id] = runtime
         return runtime

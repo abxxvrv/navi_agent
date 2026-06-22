@@ -98,6 +98,7 @@ class AgentRuntime:
         approval_handler: ApprovalHandler | None = None,
         resume_session_id: str | None = None,
         on_output=None,
+        channel: str = "cli",
     ):
         load_navi_dotenv()
 
@@ -107,6 +108,7 @@ class AgentRuntime:
         self.event_handler = event_handler
         self.approval_handler = approval_handler
         self.on_output = on_output
+        self._channel = channel
         self.navi_home = get_navi_home()
         self.approval_manager = ApprovalManager(
             mode=approval_mode,
@@ -1718,30 +1720,32 @@ class AgentRuntime:
             ),
         )
 
-        def attach_file(path: str) -> dict:
-            p = Path(path)
-            if not p.is_absolute():
-                p = (self.workspace / path).resolve()
-            if not p.exists() or not p.is_file():
-                return {"ok": False, "error": f"文件不存在: {path}"}
-            self._pending_attachments.append(str(p))
-            return {"ok": True, "path": str(p), "message": "已登记，将在本轮回复后发送"}
+        # attach_file 仅在接入网关（如微信）时注册；CLI 模式下不暴露给模型。
+        if self._channel != "cli":
+            def attach_file(path: str) -> dict:
+                p = Path(path)
+                if not p.is_absolute():
+                    p = (self.workspace / path).resolve()
+                if not p.exists() or not p.is_file():
+                    return {"ok": False, "error": f"文件不存在: {path}"}
+                self._pending_attachments.append(str(p))
+                return {"ok": True, "path": str(p), "message": "已登记，将在本轮回复后发送"}
 
-        self.tool_registry.register(
-            name="attach_file",
-            description="登记本地文件，在本轮回复发出后作为附件发给用户。仅在微信网关场景下生效。",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": "本地文件路径（绝对路径或相对于工作区的路径）。",
+            self.tool_registry.register(
+                name="attach_file",
+                description="登记本地文件，在本轮回复发出后作为附件发给用户。仅在微信网关场景下生效。",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "本地文件路径（绝对路径或相对于工作区的路径）。",
+                        },
                     },
+                    "required": ["path"],
                 },
-                "required": ["path"],
-            },
-            function=attach_file,
-        )
+                function=attach_file,
+            )
 
     def _init_mcp_tools(self) -> None:
         """初始化 MCP 工具（如果配置了的话）。"""
