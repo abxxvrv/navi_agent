@@ -21,6 +21,7 @@ from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..storage.history_store import HistoryStore
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
+from .init_command import run_doctor, run_init
 from .ui import NaviStreamView, approval_panel, console, format_context_status
 
 
@@ -1281,6 +1282,23 @@ def run(
 
     print_error_message(result_error(result))
     raise typer.Exit(code=1)
+
+
+@app.command()
+def init():
+    """
+    Initialize ~/.navi with prompts, skills, history database, and model config.
+    """
+    run_init()
+
+
+@app.command()
+def doctor():
+    """
+    Check Navi installation and runtime configuration.
+    """
+    if not run_doctor():
+        raise typer.Exit(code=1)
 
 
 @app.command()

@@ -97,7 +97,7 @@ class ModelRouter:
     def _load_config(self) -> dict:
         if self.config_path.is_file():
             try:
-                return json.loads(self.config_path.read_text(encoding="utf-8"))
+                return json.loads(self.config_path.read_text(encoding="utf-8-sig"))
             except Exception:
                 pass
         return {}

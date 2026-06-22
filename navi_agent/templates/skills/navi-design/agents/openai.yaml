@@ -1,0 +1,3 @@
+interface:
+  display_name: "Navi 设计参考"
+  short_description: "参考 Claude Code / KIMI-CLI / Hermes 源码为 navi 设计决策提供方案"

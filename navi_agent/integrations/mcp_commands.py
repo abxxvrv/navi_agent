@@ -246,7 +246,7 @@ def _load_config_file(path: Path) -> dict:
     """加载 config.json。"""
     if path.is_file():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding="utf-8-sig"))
         except Exception:
             pass
     return {}

@@ -34,3 +34,9 @@ navi = "navi_agent.cli.main:main"
 
 [tool.setuptools.packages.find]
 include = ["navi_agent*"]
+
+[tool.setuptools.package-data]
+navi_agent = [
+    "templates/navi_home/*.md",
+    "templates/skills/**/*",
+]

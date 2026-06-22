@@ -413,7 +413,7 @@ def _load_mcp_config() -> Dict[str, dict]:
         config_path = get_config_path()
         if not config_path.is_file():
             return {}
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = json.loads(config_path.read_text(encoding="utf-8-sig"))
         servers = config.get("mcp_servers")
         if not servers or not isinstance(servers, dict):
             return {}
