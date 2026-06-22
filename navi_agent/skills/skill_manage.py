@@ -9,17 +9,31 @@ from ..storage.safe_file import atomic_write_text, file_lock
 
 class SkillManageTool:
     def __init__(self):
-        self.skills_dir = get_navi_home() / "skills"
+        # 惰性导入，避免 skill_manage ↔ tools.builtin ↔ runtime 的循环导入。
+        from ..tools.builtin import PatchTool
 
-    def __call__(self, action: str, name: str = "", content: str = "") -> dict:
+        self.skills_dir = get_navi_home() / "skills"
+        self._patcher = PatchTool(workspace=self.skills_dir)
+
+    def __call__(
+        self,
+        action: str,
+        name: str = "",
+        content: str = "",
+        old_text: str = "",
+        new_text: str = "",
+        replace_all: bool = False,
+    ) -> dict:
         if action == "list":
             return self._list()
         elif action == "read":
             return self._read(name)
         elif action == "write":
             return self._write(name, content)
+        elif action == "patch":
+            return self._patch(name, old_text, new_text, replace_all)
         else:
-            return {"ok": False, "error": f"未知 action: {action}，可选 list / read / write"}
+            return {"ok": False, "error": f"未知 action: {action}，可选 list / read / write / patch"}
 
     def _resolve(self, name: str) -> Path:
         """把技能名解析为 skills/ 下的目录，校验不越界。"""
@@ -79,3 +93,33 @@ class SkillManageTool:
         with file_lock(sk):
             atomic_write_text(sk, content, encoding="utf-8")
         return {"ok": True, "name": name, "path": str(sk)}
+
+    def _patch(self, name: str, old_text: str, new_text: str, replace_all: bool = False) -> dict:
+        try:
+            target = self._resolve(name)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        sk = target / "SKILL.md"
+        if not sk.exists():
+            return {"ok": False, "error": f"技能 '{name}' 不存在"}
+
+        original = sk.read_text(encoding="utf-8")
+        # 复用 patch_file 的全部逻辑（出现次数检查、replace_all、原子写、diff）。
+        # 用相对路径 + skills_dir 作 workspace，resolve_path 会把改动锁在 skills/ 内。
+        result = self._patcher(
+            path=f"{name}/SKILL.md",
+            old_text=old_text,
+            new_text=new_text,
+            replace_all=replace_all,
+        )
+        if not result.get("ok"):
+            return result
+
+        # patch 后校验 frontmatter 仍完整，破坏则回滚（不留半坏的技能文件）。
+        patched = sk.read_text(encoding="utf-8")
+        if (not re.search(r"^---\s*\n", patched)
+                or not re.search(r"^name:\s*\S", patched, re.MULTILINE)
+                or not re.search(r"^description:\s*\S", patched, re.MULTILINE)):
+            atomic_write_text(sk, original, encoding="utf-8")
+            return {"ok": False, "error": "patch 后 frontmatter 不完整（已回滚，未修改文件）"}
+        return result

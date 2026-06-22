@@ -1379,11 +1379,12 @@ class AgentRuntime:
         self.tool_registry.register(
             name="skill_manage",
             description="""
-- 管理技能文件：列出所有技能、查看某个技能的完整内容，或创建/更新技能。
+- 管理技能文件：列出所有技能、查看某个技能的完整内容、创建/覆盖技能，或定向修补技能。
 - 只能在 skills/ 目录下操作。
 - action="list"：列出所有可用技能（名称 + 简介）。
 - action="read"：读取指定技能的完整 SKILL.md 内容，需要 name 参数。
-- action="write"：创建或更新技能，需要 name 和 content 参数。
+- action="write"：创建或整体覆盖技能，需要 name 和 content 参数。
+- action="patch"：在已有技能的 SKILL.md 中做定向文本替换，需要 name、old_text、new_text；old_text 必须精确匹配，默认要求唯一，多处匹配需设 replace_all=true。
 - content 必须是完整的 SKILL.md（含 YAML frontmatter）。
 """,
             parameters={
@@ -1391,16 +1392,29 @@ class AgentRuntime:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "read", "write"],
-                        "description": "操作类型：list（列出技能）、read（读取）、write（创建/更新）",
+                        "enum": ["list", "read", "write", "patch"],
+                        "description": "操作类型：list（列出技能）、read（读取）、write（创建/覆盖）、patch（定向替换）",
                     },
                     "name": {
                         "type": "string",
-                        "description": "技能名称，如 skill-creator。read 和 write 时必填。",
+                        "description": "技能名称，如 skill-creator。read / write / patch 时必填。",
                     },
                     "content": {
                         "type": "string",
                         "description": "完整的 SKILL.md 内容（含 YAML frontmatter），write 时必填。",
+                    },
+                    "old_text": {
+                        "type": "string",
+                        "description": "要查找的精确文本，patch 时必填。",
+                    },
+                    "new_text": {
+                        "type": "string",
+                        "description": "用于替换的新文本，patch 时必填。",
+                    },
+                    "replace_all": {
+                        "type": "boolean",
+                        "description": "是否替换所有匹配项，patch 时可选。",
+                        "default": False,
                     },
                 },
                 "required": ["action"],
