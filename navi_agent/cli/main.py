@@ -375,6 +375,9 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
     elif event_type == "tool_error":
         _p(f"[red]┊ {tool_name} error:[/red] {event.get('error')}")
 
+    elif event_type == "retry":
+        _p(f"[grey50 italic]┊ {event.get('message') or ''}[/grey50 italic]")
+
     elif event_type == "assistant_content":
         pass
 

@@ -192,9 +192,14 @@ class AgentRuntime:
 
         # 初始化 MCP 工具（如果配置了的话）
         self._init_mcp_tools()
-
+        
+        # 1. 把当前 registry 里所有已注册的工具转成 OpenAI API 的 tools 格式
         all_tools_for_api = self.tool_registry.to_openai_tools()
+        
+        # 2. 我们上一次保存的tool名字
         persisted_tool_names = self.session_store.meta.get("tool_names") or []
+        
+        # 3. 如果是 resume 且旧 session 确实记录了工具列表
         if resume_session_id and persisted_tool_names:
             allowed = set(persisted_tool_names)
             self._tools_for_api = [
