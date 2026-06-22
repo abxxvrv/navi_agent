@@ -2,12 +2,16 @@
 WeChat (iLink) gateway adapter for Navi.
 
 Long-polls the iLink ``getupdates`` endpoint and drives a per-chat
-``AgentRuntime``. Each inbound text turn runs the synchronous, blocking
-``runtime.run_turn`` inside ``asyncio.to_thread`` so the poll loop and typing
-refresh keep running concurrently. Replies are formatted for WeChat and sent
-in size-bounded chunks.
+``AgentRuntime``. Each inbound turn (text and/or media) runs the synchronous,
+blocking ``runtime.run_turn`` inside ``asyncio.to_thread`` so the poll loop
+and typing refresh keep running concurrently. Replies are formatted for WeChat
+and sent in size-bounded chunks.
 
-Text only — no media. Entry point: ``asyncio.run(WeixinAdapter(...).run())``.
+Inbound media (image / file / video / voice) is downloaded, decrypted, and
+saved under ``<navi_home>/inbound/<account_id>/``; absolute paths are injected
+into the agent's turn so it can read them directly.
+
+Entry point: ``asyncio.run(WeixinAdapter(...).run())``.
 """
 
 from __future__ import annotations
@@ -16,10 +20,11 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import re
 import uuid
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
@@ -27,6 +32,10 @@ from .ilink import (
     BACKOFF_DELAY_SECONDS,
     CRYPTO_AVAILABLE,
     ILINK_BASE_URL,
+    ITEM_FILE,
+    ITEM_IMAGE,
+    ITEM_VIDEO,
+    ITEM_VOICE,
     LONG_POLL_TIMEOUT_MS,
     MAX_CONSECUTIVE_FAILURES,
     MESSAGE_DEDUP_TTL_SECONDS,
@@ -49,6 +58,7 @@ from .ilink import (
     _send_typing,
     _split_text_for_weixin_delivery,
     check_weixin_requirements,
+    download_inbound_media,
     format_message,
     load_allowlist,
     load_weixin_account,
@@ -193,6 +203,127 @@ class WeixinAdapter:
                 if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
                     consecutive_failures = 0
 
+    # ── Inbound media helpers ─────────────────────────────────────────────────
+
+    def _inbound_dir(self) -> Path:
+        """Return (and create) the directory for inbound media files."""
+        d = Path(self._navi_home) / "inbound" / self._account_id
+        d.mkdir(parents=True, exist_ok=True)
+        return d
+
+    def _safe_filename(self, name: str) -> str:
+        """Sanitize a user-supplied filename, keeping only safe characters."""
+        name = re.sub(r"[^\w.\-]", "_", name)
+        name = re.sub(r"\.{2,}", ".", name)
+        return name[:200] or "file"
+
+    async def _collect_media(
+        self, item_list: List[Dict[str, Any]]
+    ) -> Tuple[List[Path], List[str]]:
+        """Download inbound media items; return (image_paths, text_notes).
+
+        - ITEM_IMAGE: downloaded, saved as <uuid>.jpg, appended to image_paths.
+        - ITEM_FILE: downloaded with original filename (sanitized), note injected.
+        - ITEM_VIDEO: downloaded as <uuid>.mp4, note injected.
+        - ITEM_VOICE: if voice_item.text present, skipped (handled by _extract_text);
+          otherwise downloaded as .silk, note injected.
+        Single-item failures are logged as warnings and skipped.
+        """
+        image_paths: List[Path] = []
+        notes: List[str] = []
+        session = self._send_session  # reuse the send session for downloads
+
+        for item in item_list:
+            item_type = item.get("type")
+
+            if item_type == ITEM_IMAGE:
+                image_item = item.get("image_item") or {}
+                media = image_item.get("media") or {}
+                # Image aeskey may come as a raw hex string at image_item["aeskey"]
+                raw_aeskey = image_item.get("aeskey")
+                if raw_aeskey:
+                    import base64 as _b64
+                    aes_key_b64 = _b64.b64encode(bytes.fromhex(str(raw_aeskey))).decode("ascii")
+                else:
+                    aes_key_b64 = media.get("aes_key")
+                try:
+                    data = await download_inbound_media(
+                        session,
+                        cdn_base_url=WEIXIN_CDN_BASE_URL,
+                        encrypt_query_param=media.get("encrypt_query_param"),
+                        aes_key_b64=aes_key_b64,
+                        full_url=media.get("full_url"),
+                        timeout_seconds=30.0,
+                    )
+                    path = self._inbound_dir() / f"{uuid.uuid4().hex}.jpg"
+                    path.write_bytes(data)
+                    image_paths.append(path)
+                except Exception as exc:
+                    logger.warning("weixin: image download failed: %s", exc)
+
+            elif item_type == ITEM_FILE:
+                file_item = item.get("file_item") or {}
+                media = file_item.get("media") or {}
+                raw_name = self._safe_filename(str(file_item.get("file_name") or "file.bin"))
+                filename = f"{uuid.uuid4().hex}_{raw_name}"
+                try:
+                    data = await download_inbound_media(
+                        session,
+                        cdn_base_url=WEIXIN_CDN_BASE_URL,
+                        encrypt_query_param=media.get("encrypt_query_param"),
+                        aes_key_b64=media.get("aes_key"),
+                        full_url=media.get("full_url"),
+                        timeout_seconds=60.0,
+                    )
+                    path = self._inbound_dir() / filename
+                    path.write_bytes(data)
+                    notes.append(f"[用户发来文件：{path}]")
+                except Exception as exc:
+                    logger.warning("weixin: file download failed: %s", exc)
+
+            elif item_type == ITEM_VIDEO:
+                video_item = item.get("video_item") or {}
+                media = video_item.get("media") or {}
+                filename = f"{uuid.uuid4().hex}.mp4"
+                try:
+                    data = await download_inbound_media(
+                        session,
+                        cdn_base_url=WEIXIN_CDN_BASE_URL,
+                        encrypt_query_param=media.get("encrypt_query_param"),
+                        aes_key_b64=media.get("aes_key"),
+                        full_url=media.get("full_url"),
+                        timeout_seconds=120.0,
+                    )
+                    path = self._inbound_dir() / filename
+                    path.write_bytes(data)
+                    notes.append(f"[用户发来视频：{path}]")
+                except Exception as exc:
+                    logger.warning("weixin: video download failed: %s", exc)
+
+            elif item_type == ITEM_VOICE:
+                voice_item = item.get("voice_item") or {}
+                # If ASR text is present, _extract_text already handles it
+                if voice_item.get("text"):
+                    continue
+                media = voice_item.get("media") or {}
+                filename = f"{uuid.uuid4().hex}.silk"
+                try:
+                    data = await download_inbound_media(
+                        session,
+                        cdn_base_url=WEIXIN_CDN_BASE_URL,
+                        encrypt_query_param=media.get("encrypt_query_param"),
+                        aes_key_b64=media.get("aes_key"),
+                        full_url=media.get("full_url"),
+                        timeout_seconds=60.0,
+                    )
+                    path = self._inbound_dir() / filename
+                    path.write_bytes(data)
+                    notes.append(f"[用户发来语音文件：{path}]")
+                except Exception as exc:
+                    logger.warning("weixin: voice download failed: %s", exc)
+
+        return image_paths, notes
+
     # ── Inbound handling ──────────────────────────────────────────────────────
 
     async def _handle_message_safe(self, message: Dict[str, Any]) -> None:
@@ -223,13 +354,22 @@ class WeixinAdapter:
         if message_id and self._dedup.is_duplicate(message_id):
             return
 
-        text = _extract_text(message.get("item_list") or []).strip()
-        if not text:
+        item_list = message.get("item_list") or []
+        text = _extract_text(item_list).strip()
+        image_paths, notes = await self._collect_media(item_list)
+
+        if not text and not image_paths and not notes:
             return
 
-        content_key = f"content:{sender_id}:{hashlib.md5(text.encode()).hexdigest()}"
-        if self._dedup.is_duplicate(content_key):
-            return
+        # Content-hash dedup only when there is non-empty text (avoids colliding
+        # distinct media-only messages that both have empty text).
+        if text:
+            content_key = f"content:{sender_id}:{hashlib.md5(text.encode()).hexdigest()}"
+            if self._dedup.is_duplicate(content_key):
+                return
+
+        # Compose the turn text: path notes first, then the user's text
+        message_text = "\n".join(notes + ([text] if text else []))
 
         chat_id = sender_id  # DM only
 
@@ -250,9 +390,12 @@ class WeixinAdapter:
 
         async with self._chat_locks[chat_id]:
             runtime = self.get_or_create_runtime(chat_id)
-            logger.info("weixin: inbound from=%s len=%d", _safe_id(sender_id), len(text))
+            logger.info(
+                "weixin: inbound from=%s text_len=%d images=%d notes=%d",
+                _safe_id(sender_id), len(message_text), len(image_paths), len(notes),
+            )
             try:
-                result = await self._run_with_typing(chat_id, runtime, text)
+                result = await self._run_with_typing(chat_id, runtime, message_text, image_paths)
             except Exception as exc:
                 logger.error("weixin: run_turn failed for %s: %s", _safe_id(chat_id), exc)
                 await self.send_text(chat_id, f"处理消息时出错：{exc}")
@@ -301,10 +444,16 @@ class WeixinAdapter:
 
     # ── Typing indicator ──────────────────────────────────────────────────────
 
-    async def _run_with_typing(self, chat_id: str, runtime: AgentRuntime, text: str) -> Dict[str, Any]:
+    async def _run_with_typing(
+        self,
+        chat_id: str,
+        runtime: AgentRuntime,
+        text: str,
+        image_paths: Optional[List[Path]] = None,
+    ) -> Dict[str, Any]:
         typing_task = asyncio.create_task(self._keep_typing(chat_id))
         try:
-            return await asyncio.to_thread(runtime.run_turn, text)
+            return await asyncio.to_thread(runtime.run_turn, text, image_paths)
         finally:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

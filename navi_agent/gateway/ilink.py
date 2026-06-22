@@ -1,16 +1,14 @@
 """
 iLink (WeChat bot) protocol layer for Navi.
 
-Ported from the Hermes weixin adapter — text-only subset. Provides:
+Ported from the Hermes weixin adapter. Provides:
 - iLink endpoint constants and request-header construction
 - async API helpers (getupdates / sendmessage / sendtyping / getconfig)
 - QR login flow
 - account-credential, sync-buffer and context-token persistence
 - message deduplication and typing-ticket caches
 - WeChat-friendly Markdown formatting / chunking
-
-No media (image/voice/file) support: those require AES-128 crypto and are out
-of scope for the basic text gateway.
+- Inbound media download and AES-128-ECB decryption (image/file/video/voice)
 """
 
 from __future__ import annotations
@@ -442,6 +440,110 @@ def _aes128_ecb_encrypt(plaintext: bytes, key: bytes) -> bytes:
     cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
     enc = cipher.encryptor()
     return enc.update(padded) + enc.finalize()
+
+
+def _aes128_ecb_decrypt(ciphertext: bytes, key: bytes) -> bytes:
+    """AES-128-ECB decrypt with PKCS7 unpad (symmetric to _aes128_ecb_encrypt)."""
+    cipher = Cipher(algorithms.AES(key), modes.ECB(), backend=default_backend())
+    decryptor = cipher.decryptor()
+    padded = decryptor.update(ciphertext) + decryptor.finalize()
+    if not padded:
+        return padded
+    pad_len = padded[-1]
+    if 1 <= pad_len <= 16 and padded.endswith(bytes([pad_len]) * pad_len):
+        return padded[:-pad_len]
+    return padded
+
+
+def _parse_aes_key(aes_key_b64: str) -> bytes:
+    """base64 → raw key. 16 raw bytes used directly; 32 bytes = hex string."""
+    decoded = base64.b64decode(aes_key_b64)
+    if len(decoded) == 16:
+        return decoded
+    if len(decoded) == 32:
+        text = decoded.decode("ascii", errors="ignore")
+        if text and all(ch in "0123456789abcdefABCDEF" for ch in text):
+            return bytes.fromhex(text)
+    raise ValueError(f"unexpected aes_key format ({len(decoded)} decoded bytes)")
+
+
+def _cdn_download_url(cdn_base_url: str, encrypted_query_param: str) -> str:
+    """Build a CDN download URL from the encrypted query param token."""
+    from urllib.parse import quote
+    return f"{cdn_base_url.rstrip('/')}/download?encrypted_query_param={quote(encrypted_query_param, safe='')}"
+
+
+async def _download_bytes(
+    session: "aiohttp.ClientSession",
+    *,
+    url: str,
+    timeout_seconds: float = 60.0,
+) -> bytes:
+    """Plain GET download; auth is embedded in the CDN URL."""
+    async def _do() -> bytes:
+        async with session.get(url) as response:
+            response.raise_for_status()
+            return await response.read()
+    return await asyncio.wait_for(_do(), timeout=timeout_seconds)
+
+
+# WeChat CDN hosts that are safe to fetch from for the full_url branch
+_WEIXIN_CDN_ALLOWLIST: frozenset = frozenset({
+    "novac2c.cdn.weixin.qq.com",
+    "ilinkai.weixin.qq.com",
+    "wx.qlogo.cn",
+    "thirdwx.qlogo.cn",
+    "res.wx.qq.com",
+    "mmbiz.qpic.cn",
+    "mmbiz.qlogo.cn",
+})
+
+
+def _assert_weixin_cdn_url(url: str) -> None:
+    """Raise ValueError if *url* is not on the WeChat CDN allowlist (SSRF guard)."""
+    from urllib.parse import urlparse
+    try:
+        parsed = urlparse(url)
+        scheme = parsed.scheme.lower()
+        host = parsed.hostname or ""
+    except Exception as exc:
+        raise ValueError(f"Unparseable media URL: {url!r}") from exc
+    if scheme not in {"http", "https"}:
+        raise ValueError(f"Media URL has disallowed scheme {scheme!r}")
+    if host not in _WEIXIN_CDN_ALLOWLIST:
+        raise ValueError(f"Media URL host {host!r} is not in the WeChat CDN allowlist (SSRF guard)")
+
+
+async def download_inbound_media(
+    session: "aiohttp.ClientSession",
+    *,
+    cdn_base_url: str,
+    encrypt_query_param: Optional[str],
+    aes_key_b64: Optional[str],
+    full_url: Optional[str],
+    timeout_seconds: float,
+) -> bytes:
+    """Download and optionally decrypt an inbound CDN media item.
+
+    Mirrors Hermes _download_and_decrypt_media. Uses encrypt_query_param
+    first; falls back to full_url with SSRF allowlist check.
+    """
+    if not CRYPTO_AVAILABLE:
+        raise RuntimeError("cryptography 未安装，无法解密媒体文件。请执行: pip install cryptography")
+    if encrypt_query_param:
+        raw = await _download_bytes(
+            session,
+            url=_cdn_download_url(cdn_base_url, encrypt_query_param),
+            timeout_seconds=timeout_seconds,
+        )
+    elif full_url:
+        _assert_weixin_cdn_url(full_url)
+        raw = await _download_bytes(session, url=full_url, timeout_seconds=timeout_seconds)
+    else:
+        raise RuntimeError("media item had neither encrypt_query_param nor full_url")
+    if aes_key_b64:
+        raw = _aes128_ecb_decrypt(raw, _parse_aes_key(aes_key_b64))
+    return raw
 
 
 async def send_file(
