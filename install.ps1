@@ -18,7 +18,7 @@ if ($LASTEXITCODE -ne 0) {
     exit $LASTEXITCODE
 }
 
-python -m pipx --version | Out-Null
+python -m pipx --version *> $null
 if ($LASTEXITCODE -ne 0) {
     Write-Host "pipx not found. Installing pipx..."
     python -m pip install --user pipx
