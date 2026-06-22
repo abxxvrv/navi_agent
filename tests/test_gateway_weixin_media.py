@@ -23,7 +23,6 @@ from navi_agent.gateway.ilink import (
     _aes128_ecb_decrypt,
     _aes128_ecb_encrypt,
     _assert_weixin_cdn_url,
-    _cdn_download_url,
     _parse_aes_key,
     download_inbound_media,
 )
@@ -63,12 +62,6 @@ def test_parse_aes_key_32_hex_bytes():
 def test_parse_aes_key_invalid_raises():
     with pytest.raises(ValueError):
         _parse_aes_key(base64.b64encode(b"\x00" * 5).decode("ascii"))
-
-
-def test_cdn_download_url_encodes_param():
-    url = _cdn_download_url("https://novac2c.cdn.weixin.qq.com/c2c", "abc/def==")
-    assert url.startswith("https://novac2c.cdn.weixin.qq.com/c2c/download?encrypted_query_param=")
-    assert "abc%2Fdef%3D%3D" in url or "abc/def" in url  # percent-encoded or safe
 
 
 def test_assert_weixin_cdn_url_allowlisted():
@@ -114,16 +107,17 @@ async def test_download_via_encrypt_query_param_and_decrypt():
     result = await download_inbound_media(
         session,
         cdn_base_url=WEIXIN_CDN_BASE_URL,
-        encrypt_query_param="token123",
+        encrypt_query_param="tok/12==",
         aes_key_b64=aes_key_b64,
         full_url=None,
         timeout_seconds=10.0,
     )
     assert result == plaintext
-    # Should have fetched the CDN download URL (not full_url)
+    # Should have fetched the CDN download URL (not full_url), with the param
+    # percent-encoded (safe='').
     call_url = session.get.call_args[0][0]
     assert "download" in call_url
-    assert "token123" in call_url
+    assert "tok%2F12%3D%3D" in call_url
 
 
 @pytest.mark.asyncio

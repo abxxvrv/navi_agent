@@ -47,17 +47,17 @@ from .ilink import (
     ContextTokenStore,
     MessageDeduplicator,
     TypingTicketCache,
+    _atomic_json_write,
     _extract_text,
     _get_config,
     _get_updates,
     _is_stale_session_ret,
     _load_sync_buf,
     _safe_id,
-    _save_sync_buf,
     _send_message,
     _send_typing,
     _split_text_for_weixin_delivery,
-    check_weixin_requirements,
+    _sync_buf_path,
     download_inbound_media,
     format_message,
     load_allowlist,
@@ -90,7 +90,7 @@ class WeixinAdapter:
         approval_mode: str = "open",
         base_url: Optional[str] = None,
     ):
-        if not check_weixin_requirements():
+        if aiohttp is None:
             raise RuntimeError("aiohttp is required for the Weixin gateway (pip install aiohttp)")
 
         navi_home = str(get_navi_home())
@@ -185,7 +185,10 @@ class WeixinAdapter:
                 new_sync_buf = str(response.get("get_updates_buf") or "")
                 if new_sync_buf:
                     sync_buf = new_sync_buf
-                    _save_sync_buf(self._navi_home, self._account_id, sync_buf)
+                    _atomic_json_write(
+                        _sync_buf_path(self._navi_home, self._account_id),
+                        {"get_updates_buf": sync_buf},
+                    )
 
                 for message in response.get("msgs") or []:
                     asyncio.create_task(self._handle_message_safe(message))

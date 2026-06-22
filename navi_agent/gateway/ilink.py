@@ -98,11 +98,6 @@ _TABLE_RULE_RE = re.compile(r"^\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*:?-{3,}:?\s*\|?\s*
 _FENCE_RE = re.compile(r"^```([^\n`]*)\s*$")
 
 
-def check_weixin_requirements() -> bool:
-    """Return True when runtime dependencies for the text gateway are present."""
-    return AIOHTTP_AVAILABLE
-
-
 def _is_stale_session_ret(
     ret: Optional[int], errcode: Optional[int], errmsg: Optional[str],
 ) -> bool:
@@ -123,25 +118,14 @@ def _safe_id(value: Optional[str], keep: int = 8) -> str:
     return raw[:keep]
 
 
-def _json_dumps(payload: Dict[str, Any]) -> str:
-    return json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
-
-
-def _random_wechat_uin() -> str:
-    value = struct.unpack(">I", secrets.token_bytes(4))[0]
-    return base64.b64encode(str(value).encode("utf-8")).decode("ascii")
-
-
-def _base_info() -> Dict[str, Any]:
-    return {"channel_version": CHANNEL_VERSION}
-
-
 def _headers(token: Optional[str], body: str) -> Dict[str, str]:
     headers = {
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
         "Content-Length": str(len(body.encode("utf-8"))),
-        "X-WECHAT-UIN": _random_wechat_uin(),
+        "X-WECHAT-UIN": base64.b64encode(
+            str(struct.unpack(">I", secrets.token_bytes(4))[0]).encode("utf-8")
+        ).decode("ascii"),
         "iLink-App-Id": ILINK_APP_ID,
         "iLink-App-ClientVersion": str(ILINK_APP_CLIENT_VERSION),
     }
@@ -292,10 +276,6 @@ def _load_sync_buf(navi_home: str, account_id: str) -> str:
         return ""
 
 
-def _save_sync_buf(navi_home: str, account_id: str, sync_buf: str) -> None:
-    _atomic_json_write(_sync_buf_path(navi_home, account_id), {"get_updates_buf": sync_buf})
-
-
 class ContextTokenStore:
     """Disk-backed ``context_token`` cache keyed by account + peer."""
 
@@ -403,7 +383,11 @@ async def _api_post(
     token: Optional[str],
     timeout_ms: int,
 ) -> Dict[str, Any]:
-    body = _json_dumps({**payload, "base_info": _base_info()})
+    body = json.dumps(
+        {**payload, "base_info": {"channel_version": CHANNEL_VERSION}},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
     url = f"{base_url.rstrip('/')}/{endpoint}"
     timeout = aiohttp.ClientTimeout(total=timeout_ms / 1000)
     async with session.post(url, data=body, headers=_headers(token, body), timeout=timeout) as response:
@@ -467,12 +451,6 @@ def _parse_aes_key(aes_key_b64: str) -> bytes:
     raise ValueError(f"unexpected aes_key format ({len(decoded)} decoded bytes)")
 
 
-def _cdn_download_url(cdn_base_url: str, encrypted_query_param: str) -> str:
-    """Build a CDN download URL from the encrypted query param token."""
-    from urllib.parse import quote
-    return f"{cdn_base_url.rstrip('/')}/download?encrypted_query_param={quote(encrypted_query_param, safe='')}"
-
-
 async def _download_bytes(
     session: "aiohttp.ClientSession",
     *,
@@ -531,11 +509,12 @@ async def download_inbound_media(
     if not CRYPTO_AVAILABLE:
         raise RuntimeError("cryptography 未安装，无法解密媒体文件。请执行: pip install cryptography")
     if encrypt_query_param:
-        raw = await _download_bytes(
-            session,
-            url=_cdn_download_url(cdn_base_url, encrypt_query_param),
-            timeout_seconds=timeout_seconds,
+        from urllib.parse import quote
+        download_url = (
+            f"{cdn_base_url.rstrip('/')}/download"
+            f"?encrypted_query_param={quote(encrypt_query_param, safe='')}"
         )
+        raw = await _download_bytes(session, url=download_url, timeout_seconds=timeout_seconds)
     elif full_url:
         _assert_weixin_cdn_url(full_url)
         raw = await _download_bytes(session, url=full_url, timeout_seconds=timeout_seconds)
