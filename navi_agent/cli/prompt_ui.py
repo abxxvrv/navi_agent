@@ -8,10 +8,12 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import inspect
 import threading
 import textwrap
 import time
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style as PTStyle
 
 from ..tools.approval import UserApprovalChoice
+from .clipboard_image import is_supported_image_path, save_clipboard_image
 from .interrupt_trace import trace_interrupt
 from .paste_collapse import _COLLAPSE_MIN_CHARS, _COLLAPSE_MIN_LINES, collapse_large_paste
 from .paste_trace import summarize_text, trace_paste
@@ -63,6 +66,7 @@ class NaviPromptSession:
         completer: Completer | None,
         key_bindings: KeyBindings,
         bottom_toolbar: Callable[[], Any],
+        image_dir: Path | None = None,
         on_cancel: Callable[[], None] | None = None,
         on_approval_response: Callable[[UserApprovalChoice], None] | None = None,
         input: Any = None,
@@ -73,7 +77,10 @@ class NaviPromptSession:
         self._on_cancel = on_cancel
         self._on_approval_response = on_approval_response
         self._custom_io = input is not None or output is not None
-        self._idle_queue: asyncio.Queue[str] = asyncio.Queue()
+        self._idle_queue: asyncio.Queue[tuple[str, list[Path]]] = asyncio.Queue()
+        self._image_dir = image_dir
+        self._attached_images: list[Path] = []
+        self._image_counter = 0
         self._loop: asyncio.AbstractEventLoop | None = None
         self._cancel_requested = False
         self._force_exit = False  # Double Ctrl+C → force exit
@@ -217,6 +224,15 @@ class NaviPromptSession:
             # have their own input handling that must not be bypassed.
             if self._running or self._approval_state is not None or self.model_picker is not None:
                 return
+            text = data.strip()
+            if not text:
+                self.attach_clipboard_image()
+                event.app.invalidate()
+                return
+            pasted_path = Path(text.strip('"')).expanduser()
+            if "\n" not in text and self.attach_image_path(pasted_path):
+                event.app.invalidate()
+                return
             data = self._collapse_paste_text(data, source="bracketed_paste")
             self._handling_bracketed_paste = True
             try:
@@ -258,7 +274,7 @@ class NaviPromptSession:
         def _(event: KeyPressEvent) -> None:
             now = time.monotonic()
             text = event.current_buffer.text.strip()
-            if not text:
+            if not text and not self._attached_images:
                 return
             gap = now - self._last_char_at
             trace_paste(
@@ -328,6 +344,11 @@ class NaviPromptSession:
         def _(event: KeyPressEvent) -> None:
             event.current_buffer.insert_text("\n")
 
+        @input_bindings.add("escape", "v", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
+        def _(event: KeyPressEvent) -> None:
+            self.attach_clipboard_image()
+            event.app.invalidate()
+
         @input_bindings.add("c-d", eager=True, filter=not_running & ~picker_active & ~approval_ui_visible)
         def _(event: KeyPressEvent) -> None:
             self._cancel_pending_idle_enter()
@@ -362,6 +383,11 @@ class NaviPromptSession:
                     content=FormattedTextControl(self._render_approval),
                     dont_extend_height=True,
                     height=self._approval_height,
+                ),
+                Window(
+                    content=FormattedTextControl(self._render_image_bar),
+                    dont_extend_height=True,
+                    height=self._image_bar_height,
                 ),
                 Window(
                     content=FormattedTextControl(self._render_box_top),
@@ -423,19 +449,27 @@ class NaviPromptSession:
     async def run_session(
         self,
         *,
-        on_submit: Callable[[str], Awaitable[None]],
+        on_submit: Callable[..., Awaitable[None]],
     ) -> None:
         self._loop = asyncio.get_running_loop()
+        submit_params = inspect.signature(on_submit).parameters
+        submit_takes_images = any(
+            param.kind == inspect.Parameter.VAR_POSITIONAL
+            for param in submit_params.values()
+        ) or len(submit_params) >= 2
 
         async def message_loop() -> None:
             while True:
-                text = await self._idle_queue.get()
+                text, images = await self._idle_queue.get()
                 trace_paste(
                     "idle_queue_get",
                     text_summary=summarize_text(text),
                     queue_size=self._idle_queue.qsize(),
                 )
-                await on_submit(text)
+                if submit_takes_images:
+                    await on_submit(text, images)
+                else:
+                    await on_submit(text)
 
         task = asyncio.ensure_future(message_loop())
         try:
@@ -539,6 +573,32 @@ class NaviPromptSession:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    def attach_clipboard_image(self) -> bool:
+        image_dir = self._image_dir
+        if image_dir is None:
+            return False
+        self._image_counter += 1
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        path = image_dir / f"clip_{timestamp}_{self._image_counter}.png"
+        if not save_clipboard_image(path):
+            self._image_counter -= 1
+            return False
+        self._attached_images.append(path)
+        self.invalidate()
+        return True
+
+    def attach_image_path(self, path: str | Path) -> bool:
+        p = Path(path).expanduser()
+        if not is_supported_image_path(p):
+            return False
+        if not p.is_absolute():
+            p = p.resolve()
+        if not p.exists() or not p.is_file():
+            return False
+        self._attached_images.append(p)
+        self.invalidate()
+        return True
 
     @property
     def can_handle_interrupt_signal(self) -> bool:
@@ -782,7 +842,10 @@ class NaviPromptSession:
         self._pending_idle_enter_task = None
 
     def _submit_idle(self, text: str, *, mode: str) -> None:
+        images = list(self._attached_images)
         self._buffer.reset()
+        self._attached_images.clear()
+        self.invalidate()
         trace_paste(
             "idle_enter_submit",
             text_summary=summarize_text(text),
@@ -792,7 +855,7 @@ class NaviPromptSession:
             picker_active=self.model_picker is not None,
             submit_mode=mode,
         )
-        self._idle_queue.put_nowait(text)
+        self._idle_queue.put_nowait((text, images))
         trace_paste(
             "idle_queue_put",
             text_summary=summarize_text(text),
@@ -812,7 +875,7 @@ class NaviPromptSession:
             if self._running or self._approval_state is not None or self.model_picker is not None:
                 return
             text = self._buffer.text.strip()
-            if not text:
+            if not text and not self._attached_images:
                 return
             self._submit_idle(text, mode="guarded")
         finally:
@@ -982,6 +1045,35 @@ class NaviPromptSession:
             prefix = "❯" if selected == i - 1 else " "
             style = "class:picker-selected" if selected == i - 1 else ""
             lines.append((style, f"{prefix} [{i}] {label}"))
+        return lines
+
+    def _image_bar_height(self) -> int:
+        if not self._attached_images:
+            return 0
+        return len(self._image_bar_lines())
+
+    def _render_image_bar(self) -> FormattedText:
+        fragments = FormattedText()
+        for line in self._image_bar_lines():
+            fragments.append(("class:bottom-toolbar", line + "\n"))
+        return fragments
+
+    def _image_bar_lines(self) -> list[str]:
+        if not self._attached_images:
+            return []
+        app = get_app_or_none()
+        columns = app.output.get_size().columns if app is not None else 80
+        max_width = max(20, columns - 4)
+        lines: list[str] = []
+        current = "  "
+        for path in self._attached_images:
+            badge = f"[📎 {path.name}]"
+            if current.strip() and len(current) + len(badge) + 1 > max_width:
+                lines.append(current.rstrip())
+                current = "  "
+            current += badge + " "
+        if current.strip():
+            lines.append(current.rstrip())
         return lines
 
     # ------------------------------------------------------------------

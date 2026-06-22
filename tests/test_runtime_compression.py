@@ -10,7 +10,7 @@ class FakeCompressor:
         return self.compressed_messages
 
 
-def test_compress_current_session_to_new_session_switches_runtime_store(tmp_path):
+def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
     parent = HistoryStore(
         db_path=tmp_path / "history.sqlite3",
         project_path=tmp_path,
@@ -31,7 +31,7 @@ def test_compress_current_session_to_new_session_switches_runtime_store(tmp_path
     runtime.conversation_history = AgentRuntime._valid_messages(parent.messages)
     runtime.compressor = FakeCompressor(compressed_messages)
 
-    result = runtime._compress_current_session_to_new_session(reason="manual")
+    result = runtime.compress_context_to_new_session()
 
     assert result["ok"] is True
     assert result["compressed"] is True

@@ -4,6 +4,7 @@ import json
 import logging
 import random
 import threading
+import base64
 from collections.abc import Callable
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
@@ -229,8 +230,8 @@ class AgentRuntime:
     def run_task(self, task: str) -> dict[str, Any]:
         return self._invoke_agent(task, keep_history=False)
 
-    def run_turn(self, user_input: str) -> dict[str, Any]:
-        return self._invoke_agent(user_input, keep_history=True)
+    def run_turn(self, user_input: str, image_paths: list[Path] | None = None) -> dict[str, Any]:
+        return self._invoke_agent(user_input, keep_history=True, image_paths=image_paths)
 
     def interrupt(self, message: str | None = None) -> None:
         """Request the agent to interrupt its current loop.
@@ -356,8 +357,84 @@ class AgentRuntime:
 
         return safe_messages
 
+    def _build_image_history_text(self, user_input: str, image_paths: list[Path]) -> str:
+        if not image_paths:
+            return user_input
+        lines: list[str] = ["用户发送了图片："]
+        for path in image_paths:
+            mime_type = VisionAnalyzeTool.MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
+            lines.append(f"- {mime_type}: {path}")
+        if user_input:
+            lines.append("")
+            lines.append("用户文本：")
+            lines.append(user_input)
+        return "\n".join(lines)
+
+    def _vision_tool(self) -> VisionAnalyzeTool:
+        spec = self.tool_registry._tools.get("vision_analyze")
+        if spec is not None and isinstance(spec.function, VisionAnalyzeTool):
+            return spec.function
+        return VisionAnalyzeTool(
+            workspace=self.workspace,
+            config_path=get_config_path(),
+            session_meta=self.session_store.meta,
+        )
+
+    def _build_image_api_user_message(self, user_input: str, image_paths: list[Path]) -> dict[str, Any]:
+        if not image_paths:
+            return {"role": "user", "content": user_input}
+
+        model_info = (
+            self.router.config
+            .get("providers", {})
+            .get(self.router.provider, {})
+            .get("models", {})
+            .get(self.router.model, {})
+        )
+        if bool(model_info.get("multimodal")):
+            base_text = user_input or "请描述这张图片的内容"
+            path_hints = "\n".join(f"[Image attached at: {path}]" for path in image_paths)
+            api_text = f"{base_text}\n\n{path_hints}" if path_hints else base_text
+            content: list[dict[str, Any]] = [{"type": "text", "text": api_text}]
+            for path in image_paths:
+                try:
+                    raw = path.read_bytes()
+                except Exception as exc:
+                    content.append({"type": "text", "text": f"无法读取图片 {path}: 读取图片失败: {exc}"})
+                    continue
+                mime_type = VisionAnalyzeTool.MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
+                b64 = base64.b64encode(raw).decode("utf-8")
+                content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}})
+            return {"role": "user", "content": content}
+
+        prompt = user_input or "请描述这张图片的内容"
+        parts = ["用户发送了图片："]
+        for path in image_paths:
+            mime_type = VisionAnalyzeTool.MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
+            parts.append(f"- {mime_type}: {path}")
+        parts.extend(["", "图片内容："])
+        vision_tool = self._vision_tool()
+        for index, path in enumerate(image_paths, start=1):
+            result = vision_tool(image_path=str(path), prompt=prompt)
+            if result.get("ok"):
+                parts.append(f"[Image #{index}]")
+                parts.append(str(result.get("content", "")))
+            else:
+                parts.append(f"[Image #{index}]")
+                parts.append(f"无法分析图片：{result.get('error', 'unknown error')}")
+            parts.append("")
+        if user_input:
+            parts.append("用户文本：")
+            parts.append(user_input)
+        return {"role": "user", "content": "\n".join(parts).strip()}
+
     # 调用agent，临时任务、对话模式都会用这个
-    def _invoke_agent(self, user_input: str, keep_history: bool) -> dict[str, Any]:
+    def _invoke_agent(
+        self,
+        user_input: str,
+        keep_history: bool,
+        image_paths: list[Path] | None = None,
+    ) -> dict[str, Any]:
         scope = TurnScope(self.cancel_event)
         scope.reset()
         scope.attach_execution_thread()
@@ -370,7 +447,8 @@ class AgentRuntime:
         try:
             # 1. 清理和校验用户输入
             user_input = user_input.encode("utf-8", "replace").decode("utf-8").strip()
-            if not user_input:
+            image_paths = [Path(path) for path in (image_paths or [])]
+            if not user_input and not image_paths:
                 return {
                     "ok": False,
                     "error": "user_input 不能为空。",
@@ -380,10 +458,12 @@ class AgentRuntime:
             history = self.conversation_history if keep_history else []
 
             # 3. 构造当前用户消息
+            history_text = self._build_image_history_text(user_input, image_paths)
             user_message = {
                 "role": "user",
-                "content": user_input,
+                "content": history_text,
             }
+            api_user_message = self._build_image_api_user_message(user_input, image_paths)
             self._ensure_persisted_system_message()
             snapshot_len = len(self.session_store.messages)
             self.session_store.append_message(user_message)
@@ -391,7 +471,7 @@ class AgentRuntime:
 
             # 4. 构造 graph 初始状态
             turn_state: AgentState = {
-                "messages": [*history, user_message],
+                "messages": [*history, api_user_message],
             }
 
             # 5. 执行 graph
@@ -482,14 +562,7 @@ class AgentRuntime:
         if self._system_prompt:
             self.session_store.append_message({"role": "system", "content": self._system_prompt})
 
-    def compress_context_to_new_session(self) -> dict[str, Any]:
-        return self._compress_current_session_to_new_session(reason="manual")
-
-    def _compress_current_session_to_new_session(
-        self,
-        *,
-        reason: str,
-    ) -> dict[str, Any]:
+    def compress_context_to_new_session(self, *, reason: str = "manual") -> dict[str, Any]:
         old_store = self.session_store
         old_session_id = old_store.session_id
         old_messages = list(old_store.messages)
@@ -563,13 +636,16 @@ class AgentRuntime:
     # 构造真正发给模型的 messages
     def _llm_node(self, state: AgentState) -> dict[str, Any]:
         messages = state["messages"]
+        current_api_user_message = messages[-1] if messages and messages[-1].get("role") == "user" else None
 
         # 压缩检查
         prompt_tokens = self.last_usage.get("prompt_tokens", 0)
         if self.compressor.should_compress(prompt_tokens):
-            result = self._compress_current_session_to_new_session(reason="auto")
+            result = self.compress_context_to_new_session(reason="auto")
             if result.get("ok") and result.get("compressed"):
                 messages = self._valid_messages(self.session_store.messages)
+                if current_api_user_message is not None and messages and messages[-1].get("role") == "user":
+                    messages = [*messages[:-1], current_api_user_message]
             elif not result.get("ok"):
                 self._emit(
                     {

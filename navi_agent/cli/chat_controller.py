@@ -114,6 +114,7 @@ class ChatController:
             bottom_toolbar=lambda: self.render_bottom_toolbar(
                 self.runtime, self.workspace, self.timer
             ),
+            image_dir=navi_home / "images",
             on_cancel=self.handle_cancel,
             on_approval_response=self.handle_approval_response,
         )
@@ -143,7 +144,8 @@ class ChatController:
         sid = self.runtime.session_store.session_id
         console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
 
-    async def process_message(self, text: str) -> None:
+    async def process_message(self, text: str, image_paths: list[Path] | None = None) -> None:
+        image_paths = image_paths or []
         trace_paste(
             "process_message_start",
             text_summary=summarize_text(text),
@@ -152,11 +154,26 @@ class ChatController:
         prompt_session = self._prompt_session()
         stream_box = self._stream_box()
 
-        if text.strip() == "/model":
+        if not image_paths and text.strip() == "/model":
             self.open_model_picker()
             return
 
-        if self.handle_slash_command(
+        stripped = text.strip()
+        if not image_paths and stripped == "/paste":
+            if not prompt_session.attach_clipboard_image():
+                self.print_live("[yellow]No image found in clipboard.[/yellow]")
+            return
+
+        if not image_paths and stripped.startswith("/image "):
+            path_text = stripped[len("/image "):].strip().strip('"')
+            image_path = Path(path_text)
+            if path_text and not image_path.is_absolute():
+                image_path = self.workspace / image_path
+            if not path_text or not prompt_session.attach_image_path(image_path):
+                self.print_live(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
+            return
+
+        if not image_paths and self.handle_slash_command(
             command=text,
             runtime=runtime,
             workspace=self.workspace,
@@ -174,7 +191,12 @@ class ChatController:
             self.print_live(f"[dim]💾 {msg}[/dim]")
 
         self.print_live()
-        self.print_live(Text(f"> {display_text}", style="#87CEEB"))
+        display_lines = [f"  [image] {path}" for path in image_paths]
+        if display_text:
+            display_lines.append(f"> {display_text}")
+        elif not display_lines:
+            display_lines.append(">")
+        self.print_live(Text("\n".join(display_lines), style="#87CEEB"))
         self.print_live()
 
         import time as _time
@@ -206,7 +228,7 @@ class ChatController:
 
         def runner() -> dict[str, Any]:
             try:
-                return runtime.run_turn(runtime_text)
+                return runtime.run_turn(runtime_text, image_paths=image_paths)
             except KeyboardInterrupt:
                 return {
                     "ok": False,
