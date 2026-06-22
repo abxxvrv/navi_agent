@@ -3,8 +3,6 @@
 import os
 import pytest
 
-# 先导入 runtime 以打破循环引用（runtime → builtin → runtime.interrupt → runtime/__init__）
-import navi_agent.runtime.agent  # noqa: F401
 from navi_agent.tools.builtin import ReadFileTool, WriteFileTool, PatchTool
 from navi_agent.storage.version_tracker import VersionTracker
 

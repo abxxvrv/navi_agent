@@ -1,9 +1,5 @@
 """skill_manage 的 patch action 单测。"""
 
-# 先导入 runtime 包，按生产顺序加载 tools.builtin，避免 builtin↔runtime 的预存循环导入
-# 在 builtin 被首个导入时触发。
-import navi_agent.runtime  # noqa: F401
-
 from navi_agent.skills.skill_manage import SkillManageTool
 
 SKILL = """---

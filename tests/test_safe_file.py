@@ -122,8 +122,6 @@ class TestFileVersionFastPath:
         """集成测试：read→(不改动)→write 验证流程正常。"""
         monkeypatch.setenv("NAVI_HOME", str(tmp_path / "navi_home"))
 
-        # 先导入以打破循环引用
-        import navi_agent.runtime.agent  # noqa: F401
         from navi_agent.tools.builtin import ReadFileTool, WriteFileTool
         from navi_agent.storage.version_tracker import VersionTracker
 
