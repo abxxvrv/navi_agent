@@ -109,6 +109,10 @@ def test_non_multimodal_image_becomes_description_text(tmp_path):
     assert f"description for {image}" in user_content
     assert "data:image" not in user_content
 
+    stored_user = [m for m in runtime.session_store.messages if m.get("role") == "user"][0]
+    assert "[Image #1]" in stored_user["content"]
+    assert f"description for {image}" in stored_user["content"]
+
 
 def test_non_multimodal_image_failure_is_text(tmp_path):
     image = tmp_path / "img.webp"
@@ -125,3 +129,6 @@ def test_non_multimodal_image_failure_is_text(tmp_path):
 
     user_content = runtime.graph.state["messages"][-1]["content"]
     assert "无法分析图片：vision missing" in user_content
+
+    stored_user = [m for m in runtime.session_store.messages if m.get("role") == "user"][0]
+    assert "无法分析图片：vision missing" in stored_user["content"]

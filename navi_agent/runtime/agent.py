@@ -466,11 +466,17 @@ class AgentRuntime:
 
             # 3. 构造当前用户消息
             history_text = self._build_image_history_text(user_input, image_paths)
+            api_user_message = self._build_image_api_user_message(user_input, image_paths)
+            # 模型看到的若是纯文本（含辅助视觉转出的“图片内容”），就原样落盘，
+            # 让历史 == 模型实际看到的；多模态那版 content 是 base64 图片，仍只存轻量路径。
+            if isinstance(api_user_message["content"], str):
+                persisted_content = api_user_message["content"]
+            else:
+                persisted_content = history_text
             user_message = {
                 "role": "user",
-                "content": history_text,
+                "content": persisted_content,
             }
-            api_user_message = self._build_image_api_user_message(user_input, image_paths)
             self._ensure_persisted_system_message()
             snapshot_len = len(self.session_store.messages)
             self.session_store.append_message(user_message)
