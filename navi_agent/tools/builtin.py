@@ -659,6 +659,7 @@ class RunCommandTool:
 
             popen_kwargs = dict(
                 cwd=str(target_cwd),
+                stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
             )

@@ -204,7 +204,7 @@ class NaviPromptSession:
                 state["command_expanded"] = not state.get("command_expanded", False)
                 event.app.invalidate()
 
-        @approval_bindings.add(Keys.Any, filter=approval_ui_visible, eager=True)
+        @approval_bindings.add(Keys.Any, filter=approval_active, eager=True)
         def _approval_swallow_input(event: KeyPressEvent) -> None:
             event.app.invalidate()
 
@@ -511,6 +511,7 @@ class NaviPromptSession:
             force_exit=self._force_exit,
         )
         self._running = False
+        self._reassert_console_input_mode()
         self._app.invalidate()
 
     def show_approval(self, decision: Any) -> None:
@@ -1079,6 +1080,43 @@ class NaviPromptSession:
     # ------------------------------------------------------------------
     # Internal
     # ------------------------------------------------------------------
+
+    def _reassert_console_input_mode(self) -> None:
+        """Re-apply prompt_toolkit's raw + VT100 console input mode (Windows).
+
+        A child process spawned during a turn (``run_command`` → ``bash``)
+        shares the console and can clear ``ENABLE_VIRTUAL_TERMINAL_INPUT``.
+        prompt_toolkit only sets that flag once, when the Application starts,
+        so it is never restored mid-session. With the flag gone the VT100
+        console reader drops arrow-key events (they arrive with UnicodeChar
+        ``\\x00``), so the cursor can't move even though typing still works.
+        Re-assert the mode whenever we return to the idle input box.
+        """
+        inp = getattr(self._app, "input", None)
+        reader = getattr(inp, "console_input_reader", None)
+        if reader is None or not getattr(inp, "_use_virtual_terminal_input", False):
+            return
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            ENABLE_PROCESSED_INPUT = 0x0001
+            ENABLE_LINE_INPUT = 0x0002
+            ENABLE_ECHO_INPUT = 0x0004
+            ENABLE_VIRTUAL_TERMINAL_INPUT = 0x0200
+
+            kernel32 = ctypes.windll.kernel32
+            mode = wintypes.DWORD()
+            if not kernel32.GetConsoleMode(reader.handle, ctypes.byref(mode)):
+                return
+            new_mode = (
+                mode.value
+                & ~(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT)
+            ) | ENABLE_VIRTUAL_TERMINAL_INPUT
+            if new_mode != mode.value:
+                kernel32.SetConsoleMode(reader.handle, new_mode)
+        except Exception:
+            pass
 
     def _patch_stdout(self):
         if self._custom_io:
