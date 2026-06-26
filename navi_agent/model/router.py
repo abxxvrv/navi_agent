@@ -66,10 +66,15 @@ class LlamaProvider(BaseProvider):
         return client.chat.completions.create(**params)
 
 
+class LMStudioProvider(LlamaProvider):
+    """LM Studio OpenAI-compatible local server."""
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
     "llama": LlamaProvider,
+    "lmstudio": LMStudioProvider,
 }
 
 

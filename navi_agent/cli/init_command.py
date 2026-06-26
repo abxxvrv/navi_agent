@@ -34,6 +34,10 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "deepseek-v4-pro": {"context_window": 1048576},
         },
     },
+    "lmstudio": {
+        "base_url": "http://localhost:1234/v1",
+        "models": {},
+    },
 }
 
 
@@ -68,9 +72,14 @@ def _prompt_provider_config(title: str, existing: dict[str, Any]) -> tuple[str, 
 
     provider_defaults = PROVIDERS[selected]
     current_provider = existing.get("providers", {}).get(selected, {})
-    old_key = str(current_provider.get("api_key", ""))
+    existing_key = str(current_provider.get("api_key", ""))
+    old_key = existing_key
+    if selected == "lmstudio":
+        old_key = old_key or "lm-studio"
     prompt = "API key"
-    if old_key:
+    if selected == "lmstudio" and not existing_key:
+        prompt = "API key (leave empty to use lm-studio)"
+    elif old_key:
         prompt = "API key (leave empty to keep existing)"
     api_key = typer.prompt(prompt, default="", hide_input=sys.stdin.isatty(), show_default=False).strip()
     if not api_key:
@@ -83,6 +92,44 @@ def _prompt_provider_config(title: str, existing: dict[str, Any]) -> tuple[str, 
         "Base URL",
         default=str(current_provider.get("base_url") or provider_defaults["base_url"]),
     ).strip()
+
+    if selected == "lmstudio":
+        current_models = current_provider.get("models", {}) if isinstance(current_provider, dict) else {}
+        model_names = list(current_models) if isinstance(current_models, dict) else []
+        default_model = str(existing.get("default_model") or (model_names[0] if model_names else ""))
+
+        selected_model = ""
+        while not selected_model:
+            selected_model = typer.prompt("Model ID", default=default_model, show_default=bool(default_model)).strip()
+            if not selected_model:
+                console.print("[yellow]Model ID is required.[/yellow]")
+
+        model_info = current_models.get(selected_model, {}) if isinstance(current_models, dict) else {}
+        while True:
+            raw_context = typer.prompt(
+                "Context window",
+                default=str(model_info.get("context_window", 32768)),
+            ).strip()
+            try:
+                context_window = int(raw_context)
+                if context_window > 0:
+                    break
+            except ValueError:
+                pass
+            console.print("[yellow]Context window must be a positive integer.[/yellow]")
+
+        new_model_info: dict[str, Any] = {"context_window": context_window}
+        if typer.confirm(
+            "Model supports vision/multimodal input?",
+            default=bool(model_info.get("multimodal", False)),
+        ):
+            new_model_info["multimodal"] = True
+
+        return selected, selected_model, {
+            "api_key": api_key,
+            "base_url": base_url,
+            "models": {selected_model: new_model_info},
+        }
 
     models = list(provider_defaults["models"])
     default_model = str(existing.get("default_model") or models[0])
