@@ -225,7 +225,104 @@ for i, tr in enumerate(rows):
     print(f'R{i}: ' + ' | '.join(cell_texts))
 ```
 
-#### 5. 填写单元格
+#### 5a. 简单字段填写（直接字符串替换）
+
+当只需要填写几个简单空白字段（如"学院：____"、"日期：____ 年 月 日"），不需要复杂表格操作时，直接用 Python 字符串替换 XML 比 lxml 解析更简单高效。
+
+```python
+# 直接读取 XML 文本并替换
+with open('unpacked_form/word/document.xml', 'r', encoding='utf-8') as f:
+    content = f.read()
+
+# 定位目标：找到"学院（中心）："后的空白 run
+old = '学院（中心）：</w:t>\n      </w:r>\n      <w:r>\n        <w:rPr>\n          ...\n        </w:rPr>\n        <w:t xml:space="preserve">                  </w:t>'
+new = '学院（中心）：数学与信息科学学院</w:t>'
+
+content = content.replace(old, new, 1)  # 只替换第一处
+
+with open('unpacked_form/word/document.xml', 'w', encoding='utf-8') as f:
+    f.write(content)
+```
+
+**关键步骤**：
+1. 用 pandoc 读取文档找到目标字段
+2. 解包 docx
+3. 用 `repr()` 打印目标字段周围的 XML，确认精确的标签结构和空格数量
+4. 构造匹配字符串，用 `replace(old, new, 1)` 替换
+5. 重新打包
+
+**常见陷阱**：
+- 空格数量必须精确匹配（`xml:space="preserve"` 的内容）
+- 日期字段通常分布在多个 run 中（年/月/日各一个 run + 空格 run），需要逐个替换
+- 替换后用 pandoc 验证：`pandoc output.docx -t markdown --wrap=none | grep "目标字段"`
+
+#### 5b. 封面信息转表格（文本→表格对齐）
+
+当需要将封面的散乱文本（如"姓名：XXX"、"学院：XXX"）转为整齐的表格形式时。
+
+**典型场景**：课程设计/论文封面的个人信息区域，需要左列标签对齐+右列内容带下划线。
+
+**关键原则**：
+1. **先读原始格式再动手** — 必须先用 python-docx 读取每个 paragraph 的 run 信息（font.name、font.size、bold），保留原始设置
+2. **只转换需要对齐的字段** — 题目、成绩等不需要对齐的段落保持原样不动
+3. **label 匹配时去除空格** — 原文可能是"姓    名"、"学    院"，匹配时用 `label.replace(' ', '')` 统一处理
+4. **中文冒号 `：` 分隔** — 原文中用中文冒号作为标签和值的分隔符
+5. **遇到格式说明段落要截断** — 如"成绩："之后可能出现页边距说明等非封面内容，需设置 `found_stop = True` 停止收集
+
+**python-docx 实现要点**：
+
+```python
+# 1. 收集封面字段（只取需要的，排除题目/成绩）
+cover_fields = ['姓名', '学院', '专业班级', '学号', '指导教师']
+
+# 2. 读取原始格式
+for run in paragraph.runs:
+    font_size = run.font.size        # 保留原始大小
+    font_bold = run.font.bold        # 保留原始加粗
+    east_asia = run._element.rPr.rFonts.get(qn('w:eastAsia'))  # 保留中文字体
+
+# 3. 创建表格，保留原始格式写入
+run = cell.paragraphs[0].add_run(original_text)
+run.font.size = original_size       # 不改大小！
+run.font.name = '宋体'              # 保留原字体
+run._element.rPr.rFonts.set(qn('w:eastAsia'), '宋体')
+
+# 4. 表格边框处理
+#    - 整表：所有边框设为 none
+#    - 值列：只加 bottom border（下划线效果）
+#    - label 列：无边框
+
+# 5. label 列居中对齐（分散对齐需在 Word 中手动设置，python-docx 不直接支持）
+```
+
+**XML 边框模板**（表格无边框 + 值列底部线）：
+```python
+# 表格无边框
+'<w:tblBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+'<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:bottom w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:insideH w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:insideV w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'</w:tblBorders>'
+
+# 值列单元格底部线
+'<w:tcBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+'<w:top w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:left w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'<w:bottom w:val="single" w:sz="12" w:space="0" w:color="000000"/>'
+'<w:right w:val="none" w:sz="0" w:space="0" w:color="auto"/>'
+'</w:tcBorders>'
+```
+
+**用户偏好**：
+- 用户要求先备份副本再修改（`cp 原文件 原文件_backup.docx`）
+- 只转换指定字段，不动其他内容（题目/成绩等保持原段落）
+- 字体/大小必须与原文完全一致，只做结构重组（表格化+对齐）
+- 封面姓名如有错误（如"任君昊"应为"任军昊"），先确认再修改
+
+#### 5c. 填写单元格（复杂表格）
 
 核心函数：
 

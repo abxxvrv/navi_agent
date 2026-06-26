@@ -1,6 +1,6 @@
 ---
 name: pptx
-description: "演示文稿创建、编辑和分析。当用户需要处理 PowerPoint 演示文稿（.pptx 文件）时使用，包括创建新演示文稿、修改内容、处理布局、添加批注或演讲者备注等。也适用于将 guizang-ppt HTML 转换为 PPTX。"
+description: "演示文稿创建、编辑和分析。当用户需要处理 PowerPoint 演示文稿（.pptx 文件）时使用，包括创建新演示文稿、修改内容、处理布局、添加批注或演讲者备注等。也适用于将 guizang-ppt HTML 转换为 PPTX。也适用于基于 Word/文本文档生成学术汇报 PPT（docx→PPT），包含中文学术 PPT 配色方案、卡片布局、条形图、表格等常用模式。触发词：做PPT、做个PPT、演示文稿、slides、presentation、汇报PPT。"
 metadata:
   short-description: "PowerPoint 演示文稿创建、编辑与分析"
 ---
@@ -203,7 +203,207 @@ where soffice
 
 ---
 
-## 7. 代码风格
+## 7. 从文档生成 PPT（docx → PPT 工作流）
+
+当用户要求"基于某个 Word 文档做一个 PPT"时，使用以下工作流：
+
+### 7.1 提取文档文本
+
+优先用 `markitdown`，不可用时用 `python-docx` 降级（python-docx 几乎总是已安装）：
+
+```bash
+# 方法1：markitdown（优先，需 pip install markitdown）
+python -m markitdown 文档.docx
+
+# 方法2：python-docx 降级（可靠，通常已安装）
+python -c "
+import docx
+doc = docx.Document('文档.docx')
+for p in doc.paragraphs:
+    if p.text.strip():
+        print(p.text)
+"
+```
+
+> **注意**：`read_file` 读取 .docx 会得到乱码（二进制），必须用上述命令行方式提取文本。
+
+### 7.2 结构化内容
+
+从提取的文本中识别文档结构，规划幻灯片：
+
+1. **标题页**：文档标题 + 作者 + 机构 + 日期
+2. **目录页**：章节列表，每项带编号和简述
+3. **内容页**：按章节拆分，每章 1-3 页幻灯片
+4. **结尾页**：感谢 / Q&A
+
+### 7.3 生成 PPT
+
+用方式 B（pptxgenjs）编写 JS 脚本生成。参考下方学术中文 PPT 模式。
+
+---
+
+## 8. 学术中文 PPT 模式（pptxgenjs）
+
+创建中文学术/课程报告 PPT 时的通用模式和样式参考。
+
+### 8.1 配色方案
+
+#### 浅色方案（默认）
+```javascript
+const C = {
+  primary: '1B4F72',   // 深蓝 - 标题、强调
+  accent:  '2E86C1',   // 亮蓝 - 装饰、链接
+  light:   'EBF5FB',   // 浅蓝 - 背景高亮区
+  dark:    '0B2F4A',   // 深蓝黑 - 正文
+  white:   'FFFFFF',
+  gray:    '7F8C8D',   // 次要文字
+  red:     'E74C3C',   // 警告/重要
+  green:   '27AE60',   // 成功/低风险
+  orange:  'F39C12',   // 中等/中风险
+  bg:      'F8FBFE',   // 幻灯片背景
+};
+```
+
+#### 深色方案（高对比度商务风格）
+黑底 + 暖米白文字 + 赤陶红强调色，视觉冲击力强，适合发布会/答辩/营销。
+```javascript
+const C = {
+  bg:       '000000',   // 纯黑背景
+  bgAlt:    '181818',   // 近黑辅底（卡片/区块）
+  text:     'F8E8D8',   // 暖米白主文字
+  accent:   'C05137',   // 赤陶红强调色
+  gray:     '8A8A8A',   // 次要文字
+  dimText:  'A0A0A0',   // 淡化文字
+  accentLt: 'E07040',   // 浅赤陶（中等强调）
+};
+```
+
+**从参考图片提取配色**：当用户提供参考图片要求匹配风格时，用 PIL 提取主色：
+```python
+from PIL import Image
+import numpy as np
+from collections import Counter
+
+def extract_colors(path, n=5):
+    img = Image.open(path).convert('RGB').resize((200, 200))
+    pixels = (np.array(img).reshape(-1, 3) // 8) * 8  # 量化去噪
+    for color, count in Counter(map(tuple, pixels.tolist())).most_common(n):
+        print(f'  #{color[0]:02x}{color[1]:02x}{color[2]:02x}  ({count/len(pixels)*100:.1f}%)')
+
+# 橙红系强调色单独提取（小面积但关键）
+def find_accent(path):
+    img = Image.open(path).convert('RGB')
+    pixels = np.array(img).reshape(-1, 3)
+    mask = (pixels[:,0]>150) & (pixels[:,1]<150) & (pixels[:,2]<120) & (pixels[:,0]>pixels[:,1])
+    accent = pixels[mask]
+    if len(accent) > 0:
+        avg = accent.mean(axis=0).astype(int)
+        print(f'  #{avg[0]:02x}{avg[1]:02x}{avg[2]:02x}')
+```
+
+提取后根据图片风格选择浅色或深色方案模板，将提取的 hex 值填入对应角色。
+
+### 8.2 常用布局模式
+
+#### 数据卡片（顶部统计数字）
+```javascript
+// 三个并排卡片，展示关键数据
+const stats = [
+  { val: '5.37亿', label: '全球患者', color: C.red },
+  { val: '1.4亿',  label: '中国患者', color: C.orange },
+  { val: '12.8%',  label: '患病率',   color: C.accent },
+];
+stats.forEach((st, i) => {
+  const x = 5 + i * 31;
+  s.addShape('roundRect', { x: `${x}%`, y: '18%', w: '27%', h: '14%',
+    fill: { color: C.white }, shadow: { type: 'outer', blur: 6, offset: 2, color: 'D5D8DC' }, rectRadius: 0.08 });
+  s.addText(st.val, { x: `${x}%`, y: '18%', w: '27%', h: '8%',
+    fontSize: 24, fontFace: 'Arial', color: st.color, bold: true, align: 'center', valign: 'middle' });
+  s.addText(st.label, { x: `${x}%`, y: '26%', w: '27%', h: '5%',
+    fontSize: 11, fontFace: 'Arial', color: C.gray, align: 'center', valign: 'middle' });
+});
+```
+
+#### 横向条形图（特征重要性等）
+```javascript
+const features = [
+  { name: 'HbA1c',       val: 0.2173, color: 'E74C3C' },
+  { name: '空腹血糖',     val: 0.1487, color: 'F39C12' },
+  { name: '多尿',        val: 0.0824, color: '2E86C1' },
+];
+const maxVal = 0.25;
+features.forEach((f, i) => {
+  const y = 18 + i * 7.5;
+  const barW = (f.val / maxVal) * 45;  // 最大占 45% 宽度
+  s.addText(f.name, { x: '3%', y: `${y}%`, w: '30%', h: '5%',
+    fontSize: 10, align: 'right', valign: 'middle' });
+  s.addShape('roundRect', { x: '35%', y: `${y+0.5}%`, w: '48%', h: '4%',
+    fill: { color: 'EBF5FB' }, rectRadius: 0.03 });
+  s.addShape('roundRect', { x: '35%', y: `${y+0.5}%`, w: `${barW}%`, h: '4%',
+    fill: { color: f.color }, rectRadius: 0.03 });
+  s.addText(f.val.toFixed(4), { x: `${35+barW}%`, y: `${y}%`, w: '10%', h: '5%',
+    fontSize: 10, bold: true, align: 'left', valign: 'middle' });
+});
+```
+
+#### 分层风险卡片（三列带边框颜色）
+```javascript
+const risks = [
+  { level: '低风险', pct: '60.5%', actual: '6.16%',  color: '27AE60' },
+  { level: '中风险', pct: '1.8%',  actual: '60.00%', color: 'F39C12' },
+  { level: '高风险', pct: '37.7%', actual: '93.43%', color: 'E74C3C' },
+];
+risks.forEach((r, i) => {
+  const x = 5 + i * 31;
+  s.addShape('roundRect', { x: `${x}%`, y: '18%', w: '27%', h: '38%',
+    fill: { color: C.white }, line: { color: r.color, width: 2.5 }, rectRadius: 0.1 });
+  // ... 标题、占比、实际患病率依次排列
+});
+```
+
+#### 页脚模式
+```javascript
+function addFooter(slide, pageNum) {
+  slide.addText('机构名称', { x: 0, y: '95%', w: '100%', h: '5%',
+    fontSize: 8, color: C.gray, align: 'left', margin: [0,0,0,40] });
+  slide.addText(`${pageNum}`, { x: 0, y: '95%', w: '100%', h: '5%',
+    fontSize: 8, color: C.gray, align: 'right', margin: [0,40,0,0] });
+}
+```
+
+### 8.3 深浅交替主题
+
+当用户要求深浅搭配（避免全部黑底或全部白底单调）时，定义两套色板并交替使用：
+
+```javascript
+const D = { bg: '000000', bgAlt: '181818', text: 'F8E8D8', dim: 'A0A0A0', accent: 'C05137', accentLt: 'E07040', gray: '8A8A8A', line: '2A2A2A' };
+const L = { bg: 'F0E0D0', bgAlt: 'F8E8D8', text: '1A1A1A', dim: '5A5A5A', accent: 'C05137', accentLt: 'E07040', gray: '8A8A8A', line: 'D8C8B8' };
+
+// 推荐交替模式（内容页浅色更易读）：
+// 1-封面: DARK  2-目录: LIGHT  3-背景: DARK  4-数据: LIGHT
+// 5-分析: DARK  6-模型: LIGHT  7-特征: DARK  8-分层: LIGHT
+// 9-结论: DARK  10-致谢: DARK
+
+function footer(slide, n, theme) {
+  const c = theme === 'dark' ? D : L;
+  // footer 颜色跟随主题
+}
+```
+
+两套色板共用同一 accent 色保持统一感。`bgAlt` 用于卡片/区块背景，`line` 用于分割线和边框。
+
+### 8.4 注意事项
+
+- 中文 PPT 字体统一用 `'Arial'`（pptxgenjs 不支持自定义中文字体名）
+- 颜色只用 6 位 hex，不支持 rgba
+- 表格用 `s.addTable()` 实现，表头行用 fill 背景色，行交替用 `bg`/`bgAlt` 增加层次
+- 信息提示框用 `roundRect` + 浅色填充 + 左侧彩色竖条
+- **不要使用 emoji**：PPT 中的编号、标记、分隔符全部用纯文字/色块/数字，不用 emoji 字符。用 `1.` `2.` `3.` 代替 `1️⃣`，用色块标签代替图标，用 `***` 代替 `★`。pptxgenjs 的 emoji 渲染在不同系统上不一致。
+- **用户偏好**：用户不喜欢 emoji，要求用纯文字/色块标识。深色页面放"震撼数据+结论"，浅色页面放"详细内容+表格"，节奏感更好。
+
+---
+
+## 9. 代码风格
 
 - 代码简洁，避免冗余变量和不必要的 print
 - 生成 PPTX 相关的 JS/Python 代码时，优先使用 skill 目录下的脚本

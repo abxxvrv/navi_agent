@@ -13,6 +13,10 @@ CLI-Hub is a marketplace of agent-native command-line interfaces that make profe
 
 ```bash
 # Install the CLI Hub package manager
+# 推荐使用 uv tool 安装（环境隔离）
+uv tool install cli-anything-hub
+
+# 或者使用 pip
 pip install cli-anything-hub
 
 # Browse all available CLIs
@@ -86,7 +90,15 @@ Each CLI provides stateful operations, JSON output for agents, REPL mode, and in
 
 ## How to Use
 
-1. **Install cli-hub**: `pip install cli-anything-hub`
+1. **Install cli-hub**: `# 推荐使用 uv tool 安装（环境隔离）
+uv tool install cli-anything-hub
+
+# 或者使用 pip
+pip install cli-anything-hub`
+uv tool install cli-anything-hub
+
+# 或者使用 pip
+pip install cli-anything-hub`
 2. **Find your tool**: `cli-hub search <keyword>` or `cli-hub list -c <category>`
 3. **Install**: `cli-hub install <name>` (installs the `cli-anything-<name>` pip package)
 4. **Run**: `cli-anything-<name>` for REPL, or `cli-anything-<name> <command>` for one-shot
@@ -96,6 +108,10 @@ Each CLI provides stateful operations, JSON output for agents, REPL mode, and in
 
 ```bash
 # Install the hub
+# 推荐使用 uv tool 安装（环境隔离）
+uv tool install cli-anything-hub
+
+# 或者使用 pip
 pip install cli-anything-hub
 
 # Find what you need

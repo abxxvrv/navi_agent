@@ -23,6 +23,32 @@ equipped with procedural knowledge that no model can fully possess.
 3. Domain expertise - Company-specific knowledge, schemas, business logic
 4. Bundled resources - Scripts, references, and assets for complex and repetitive tasks
 
+### Skill Deprecation and Pointers
+
+When a skill becomes obsolete or is merged into another skill:
+
+1. **Mark as deprecated**: Add `[已废弃]` to the description field in SKILL.md frontmatter
+2. **Include pointer**: Clearly state which skill to use instead
+3. **Keep directory**: Retain the old skill directory for backward compatibility
+4. **Minimal content**: The SKILL.md body should only contain the deprecation notice and pointer
+
+Example SKILL.md for deprecated skill:
+```yaml
+---
+name: old-skill-name
+description: "[已废弃] 此技能已合并到 new-skill-name。请使用 new-skill-name 替代。"
+---
+
+# 已废弃
+
+此技能内容已合并到 `new-skill-name` 技能中，请使用该技能替代。
+```
+
+This approach ensures:
+- Existing references to the skill name still work
+- Users are clearly directed to the updated skill
+- No duplicate content maintenance
+
 ## Core Principles
 
 ### Concise is Key
