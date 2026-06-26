@@ -1385,12 +1385,13 @@ class AgentRuntime:
         self.tool_registry.register(
             name="skill_manage",
             description="""
-- 管理技能文件：列出所有技能、查看某个技能的完整内容、创建/覆盖技能，或定向修补技能。
+- 管理技能文件：列出所有技能、查看某个技能的完整内容、创建/覆盖技能、定向修补技能，或删除技能目录。
 - 只能在 skills/ 目录下操作。
 - action="list"：列出所有可用技能（名称 + 简介）。
 - action="read"：读取指定技能的完整 SKILL.md 内容，需要 name 参数。
 - action="write"：创建或整体覆盖技能，需要 name 和 content 参数。
 - action="patch"：在已有技能的 SKILL.md 中做定向文本替换，需要 name、old_text、new_text；old_text 必须精确匹配，默认要求唯一，多处匹配需设 replace_all=true。
+- action="delete"：删除指定技能目录，需要 name 参数；目标目录必须包含 SKILL.md。
 - content 必须是完整的 SKILL.md（含 YAML frontmatter）。
 """,
             parameters={
@@ -1398,12 +1399,12 @@ class AgentRuntime:
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["list", "read", "write", "patch"],
-                        "description": "操作类型：list（列出技能）、read（读取）、write（创建/覆盖）、patch（定向替换）",
+                        "enum": ["list", "read", "write", "patch", "delete"],
+                        "description": "操作类型：list（列出技能）、read（读取）、write（创建/覆盖）、patch（定向替换）、delete（删除技能目录）",
                     },
                     "name": {
                         "type": "string",
-                        "description": "技能名称，如 skill-creator。read / write / patch 时必填。",
+                        "description": "技能名称，如 skill-creator。read / write / patch / delete 时必填。",
                     },
                     "content": {
                         "type": "string",

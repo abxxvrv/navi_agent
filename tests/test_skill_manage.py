@@ -1,4 +1,4 @@
-"""skill_manage 的 patch action 单测。"""
+"""skill_manage 的 patch/delete action 单测。"""
 
 from navi_agent.skills.skill_manage import SkillManageTool
 
@@ -60,3 +60,49 @@ def test_patch_breaking_frontmatter_rolls_back(tmp_path):
     r = t(action="patch", name="demo", old_text="description: a demo skill\n", new_text="")
     assert r["ok"] is False
     assert "description: a demo skill" in t(action="read", name="demo")["content"]
+
+
+def test_delete_removes_entire_skill_directory(tmp_path):
+    t = _tool(tmp_path)
+    assert t(action="write", name="demo", content=SKILL)["ok"]
+    resource = t.skills_dir / "demo" / "examples" / "sample.txt"
+    resource.parent.mkdir(parents=True)
+    resource.write_text("sample", encoding="utf-8")
+
+    r = t(action="delete", name="demo")
+
+    assert r["ok"] is True
+    assert r["deleted"] is True
+    assert not (t.skills_dir / "demo").exists()
+    assert t(action="read", name="demo")["ok"] is False
+
+
+def test_delete_missing_skill_fails(tmp_path):
+    t = _tool(tmp_path)
+
+    r = t(action="delete", name="missing")
+
+    assert r["ok"] is False
+    assert "不存在" in r["error"]
+
+
+def test_delete_refuses_directory_without_skill_file(tmp_path):
+    t = _tool(tmp_path)
+    target = t.skills_dir / "demo"
+    target.mkdir(parents=True)
+    (target / "notes.txt").write_text("not a skill", encoding="utf-8")
+
+    r = t(action="delete", name="demo")
+
+    assert r["ok"] is False
+    assert target.exists()
+    assert (target / "notes.txt").exists()
+
+
+def test_delete_invalid_name_fails(tmp_path):
+    t = _tool(tmp_path)
+
+    r = t(action="delete", name="../demo")
+
+    assert r["ok"] is False
+    assert "不合法" in r["error"]

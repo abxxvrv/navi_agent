@@ -1,6 +1,7 @@
 """skill_manage — 管理技能文件（读/写/列出），仅限 skills/ 目录。"""
 
 import re
+import shutil
 from pathlib import Path
 
 from ..paths import get_navi_home
@@ -32,8 +33,10 @@ class SkillManageTool:
             return self._write(name, content)
         elif action == "patch":
             return self._patch(name, old_text, new_text, replace_all)
+        elif action == "delete":
+            return self._delete(name)
         else:
-            return {"ok": False, "error": f"未知 action: {action}，可选 list / read / write / patch"}
+            return {"ok": False, "error": f"未知 action: {action}，可选 list / read / write / patch / delete"}
 
     def _resolve(self, name: str) -> Path:
         """把技能名解析为 skills/ 下的目录，校验不越界。"""
@@ -123,3 +126,14 @@ class SkillManageTool:
             atomic_write_text(sk, original, encoding="utf-8")
             return {"ok": False, "error": "patch 后 frontmatter 不完整（已回滚，未修改文件）"}
         return result
+
+    def _delete(self, name: str) -> dict:
+        try:
+            target = self._resolve(name)
+        except ValueError as e:
+            return {"ok": False, "error": str(e)}
+        sk = target / "SKILL.md"
+        if not target.is_dir() or not sk.exists():
+            return {"ok": False, "error": f"技能 '{name}' 不存在"}
+        shutil.rmtree(target)
+        return {"ok": True, "name": name, "deleted": True, "path": str(target)}
