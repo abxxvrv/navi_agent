@@ -74,7 +74,7 @@ class MemoryStore:
             current_len = len(ENTRY_DELIMITER.join(entries))
             if current_len + len(content) + 1 > limit:
                 self._cache_entries(target, entries)
-                return {"success": False, "error": f"超出限制 ({current_len}/{limit})"}
+                return {"success": False, "error": f"超出限制 ({current_len}/{limit})，如果要增加内容，先删除旧记忆后再增加，删除和添加应该仔细思考判断"}
 
             entries.append(content)
             self._save_locked(target, entries)
@@ -102,7 +102,7 @@ class MemoryStore:
             test_entries[matches[0]] = new_content
             if len(ENTRY_DELIMITER.join(test_entries)) > limit:
                 self._cache_entries(target, entries)
-                return {"success": False, "error": "替换后超出限制"}
+                return {"success": False, "error": "替换后超出限制，考虑精简增加内容或者删除旧记忆后再替换，删除和添加应该仔细思考判断"}
 
             entries[matches[0]] = new_content
             self._save_locked(target, entries)
