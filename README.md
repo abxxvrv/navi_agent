@@ -172,7 +172,8 @@ Navi 中的 LM Studio 配置示例：
 | `read_file` | 分段读取文本文件 |
 | `write_file` | 创建、覆盖或追加文本文件 |
 | `patch_file` | 精确替换已有文本 |
-| `run_command` | 运行短时间、非交互式命令 |
+| `bash` | 运行短时间、非交互式 Bash 命令 |
+| `powershell` | Windows 下运行短时间、非交互式 PowerShell 命令 |
 | `vision_analyze` | 辅助分析图片 |
 | `search_session` | 搜索 SQLite 会话历史 |
 | `skill_view` | 查看技能的 `SKILL.md` |

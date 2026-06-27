@@ -57,11 +57,11 @@ event_handler(tool_result) → 只显示 "exit_code=0  2.3s" [不重复 stdout]
 
 **问题**：`RunCommandTool` 通过 `on_output` 实时输出 stdout，`print_agent_event` 又输出 `tool_result.output`，导致双份。
 
-**修复**：`print_agent_event` 中 `run_command` 的处理只显示元信息：
+**修复**：`print_agent_event` 中命令工具的处理只显示元信息：
 
 ```python
 # main.py print_agent_event
-elif tool_name == "run_command":
+elif tool_name in {"bash", "powershell"}:
     exit_code = tool_result.get("exit_code")
     if tool_result.get("ok") or exit_code == 0:
         _p(f"[green]┊ exit_code=0[/green]{elapsed_str}")
@@ -86,7 +86,7 @@ elif tool_name == "run_command":
 |------|----------|------|
 | **实时显示** | 通过 `on_output` 逐行输出到 CLI，**不截断** | 无 |
 | **返回值** | 工具返回给模型的 `output` 字段超过阈值时截断 | `max_output_chars` = 50,000 字符 |
-| **UI 摘要** | `print_agent_event` 对 `run_command` 只显示 exit_code | 不显示输出内容 |
+| **UI 摘要** | `print_agent_event` 对命令工具只显示 exit_code | 不显示输出内容 |
 
 **截断实现**（`builtin.py` RunCommandTool）：
 

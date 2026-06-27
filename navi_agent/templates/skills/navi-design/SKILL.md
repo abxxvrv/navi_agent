@@ -1372,7 +1372,7 @@ write_file(path="notes.html", content="<!DOCTYPE html>...")
 
 # 生成 .pdf（先写 md，再转换）
 write_file(path="notes.md", content="...")
-run_command(command="pandoc notes.md -o notes.pdf")
+bash(command="pandoc notes.md -o notes.pdf")
 
 # 修改已有文件
 patch_file(path="notes.md", old_text="旧内容", new_text="新内容")
@@ -1386,7 +1386,7 @@ patch_file(path="notes.md", old_text="旧内容", new_text="新内容")
 - `read_file` - 读取
 - `write_file` - 创建/覆盖（任意格式）
 - `patch_file` - 局部修改
-- `run_command` - 执行任意命令（转换格式、运行代码、验证结果）
+- `bash` - 执行 Bash 命令（转换格式、运行代码、验证结果）
 
 ---
 

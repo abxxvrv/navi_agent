@@ -28,7 +28,7 @@ metadata:
 - html2pptx.md: `%NAVI_HOME%/skills/pptx/html2pptx.md`
 - ooxml.md: `%NAVI_HOME%/skills/pptx/ooxml.md`
 
-执行脚本时使用 `run_command` 工具，例如：
+执行脚本时使用 `bash` 工具，例如：
 ```bash
 python "%NAVI_HOME%/skills/pptx/scripts/thumbnail.py" presentation.pptx
 ```
