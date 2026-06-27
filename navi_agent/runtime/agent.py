@@ -47,6 +47,7 @@ from ..storage.version_tracker import VersionTracker
 from ..context.compressor import ContextCompressor
 from ..storage.memory_store import MemoryStore
 from .background_review import BackgroundReviewer
+from .sub_agent import prepare_agent, EXPLORE_TOOLS
 from ..skills.skill_manage import SkillManageTool
 
 from ..tools.approval import (
@@ -1110,6 +1111,7 @@ class AgentRuntime:
         tool_call_id: str,
         tool_name: str,
         tool_args: dict[str, Any],
+        scope: TurnScope | None = None,
     ) -> dict[str, Any] | None:
         # 根据工具名字和参数，生成一个选择：看看是允许、拒绝、问用户的哪一种
         decision = self.approval_manager.check_tool_call(tool_name, tool_args)
@@ -1130,13 +1132,14 @@ class AgentRuntime:
             return tool_result
 
         try:
-            self._raise_if_cancelled()
+            approval_scope = scope or self._require_scope()
+            approval_scope.raise_if_cancelled()
             user_choice = wait_approval(
-                self._require_scope(),
+                approval_scope,
                 self.approval_handler,
                 decision,
             )
-            self._raise_if_cancelled()
+            approval_scope.raise_if_cancelled()
             approved = self.approval_manager.resolve_user_choice(decision, user_choice) # 这是个 bool 值
         except Exception as exc:
             reason = f"审批处理失败：{exc}"
@@ -1741,6 +1744,59 @@ class AgentRuntime:
             ),
         )
 
+        # agent：派生子 agent 处理独立子任务
+        self.tool_registry.register(
+            name="agent",
+            description="""
+- 派生一个子 agent 来自主完成一个独立的子任务，并把结果汇报回来。
+- action="run"：阻塞执行，子 agent 跑完后把结果作为本工具的结果返回。
+- subagent_type="explore"：只读探索型。拥有全部只读工具（找文件、搜内容、读文件、搜网络/会话），无法修改任何东西。适合在代码库中定位文件、搜索关键词、回答关于代码库的问题。
+- subagent_type="general"：通用型。拥有除本工具外的全部工具（含写文件、执行命令），有风险操作仍会经过用户审批。适合需要多步执行、可能修改文件的子任务。
+- prompt 要写成自包含的完整任务描述：子 agent 看不到你当前的对话，只能看到 prompt。
+- 何时用：需要把一块边界清晰、可独立完成的工作交出去时；尤其是探索类任务，交给 explore 能省下主对话的上下文。
+""",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["run"],
+                        "description": "执行方式。run=阻塞执行，子 agent 结果作为工具结果返回。",
+                    },
+                    "subagent_type": {
+                        "type": "string",
+                        "enum": ["explore", "general"],
+                        "description": "子 agent 类型。explore=只读探索，general=通用任务。",
+                    },
+                    "prompt": {
+                        "type": "string",
+                        "description": "给子 agent 的完整、自包含的任务描述（作为 user 消息传入）。",
+                        "minLength": 1,
+                    },
+                    "model": {
+                        "type": "object",
+                        "description": "（可选）为子 agent 指定模型；不传则用主模型。",
+                        "properties": {
+                            "provider": {"type": "string", "description": "供应商名，如 deepseek / mimo。"},
+                            "model": {"type": "string", "description": "模型名。"},
+                        },
+                    },
+                    "actor_id": {
+                        "type": "string",
+                        "description": "（可选，暂未启用恢复）用于恢复已有子 agent；会话间不共享。",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "description": "（可选）超时毫秒数，到点返回已有进展。默认 600000（10 分钟）。",
+                        "default": 600000,
+                        "minimum": 1,
+                    },
+                },
+                "required": ["action", "subagent_type", "prompt"],
+            },
+            function=self._run_subagent,
+        )
+
         # attach_file 仅在接入网关（如微信）时注册；CLI 模式下不暴露给模型。
         if self._channel != "cli":
             def attach_file(path: str) -> dict:
@@ -1767,6 +1823,119 @@ class AgentRuntime:
                 },
                 function=attach_file,
             )
+
+    def _run_subagent(
+        self,
+        action: str,
+        subagent_type: str,
+        prompt: str,
+        model: dict[str, Any] | None = None,
+        actor_id: str | None = None,
+        timeout_ms: int = 600_000,
+    ) -> dict[str, Any]:
+        """agent 工具入口：按类型构造并同步运行一个子 agent。
+
+        actor_id 暂仅作为参数接收，恢复逻辑后续实现。
+        """
+        if action != "run":
+            return {"ok": False, "error": f"未知 action：{action}，应为 run。"}
+        if not isinstance(prompt, str) or not prompt.strip():
+            return {"ok": False, "error": "prompt 必须是非空字符串。"}
+        if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms < 1:
+            return {"ok": False, "error": "timeout_ms 必须是大于等于 1 的整数。"}
+
+        # 工具集 + 内置系统提示词文件（各从 ~/.navi 下的 .txt 加载）
+        if subagent_type == "explore":
+            tool_names = [n for n in EXPLORE_TOOLS if n in self.tool_registry._tools]
+            prompt_file = "subagent-explore-prompt.txt"
+        elif subagent_type == "general":
+            tool_names = [n for n in self.tool_registry._tools if n != "agent"]
+            prompt_file = "subagent-general-prompt.txt"
+        else:
+            return {"ok": False, "error": f"未知 subagent_type：{subagent_type}，应为 explore 或 general。"}
+
+        # 两类提示词都走主 agent 的同一套变量替换（NAVI_OS / NAVI_WORK_DIR / NAVI_SKILLS 等）；
+        # Jinja 只替换模板中实际出现的占位符，未用到的变量不会注入内容。
+        template = self.context_manager._read_text_file(self.navi_home / prompt_file, None)
+        system_prompt = self.context_manager._render_system_prompt_template(
+            template,
+            agents_md=self.context_manager.load_agents_md(),
+            skills_prompt=self.context_manager.build_skill_index_prompt(),
+        ) if template else self._system_prompt
+
+        # 选模型：不传用主 router，传了就按 provider + model 新建
+        router = self.router
+        if model:
+            router = ModelRouter(get_config_path(), provider=model.get("provider", ""), model=model.get("model", ""))
+            if router._provider is None:
+                return {"ok": False, "error": f"模型不可用：provider={model.get('provider')!r} 未在 config.json 中配置。"}
+
+        # 子 agent 使用自己的 scope：timeout 只取消子 agent，父 Ctrl+C 再通过 aborter 转发。
+        parent_scope = self._require_scope()
+        child_scope = TurnScope(threading.Event())
+        stream_runner = ModelStreamRunner(router, child_scope.cancel_event)
+
+        # 子工具走父审批：被拒/拒绝时返回错误结果，允许时真正执行
+        def _exec(name: str, args: dict[str, Any]) -> Any:
+            denied = self._handle_approval(
+                tool_call_id="subagent",
+                tool_name=name,
+                tool_args=args,
+                scope=child_scope,
+            )
+            if denied is not None:
+                return denied
+            return self.tool_registry.invoke(name, args)
+
+        agent = prepare_agent(
+            router=router,
+            tool_names=tool_names,
+            tool_registry=self.tool_registry,
+            system_prompt=system_prompt,
+            tool_executor=_exec,
+            scope=child_scope,
+            stream_runner=stream_runner,
+        )
+
+        # 子 agent 在嵌套线程里跑，本线程用带超时的 join 当“外部 watcher”：
+        #  - join 到点仍存活  => 超时：cancel child scope，返回超时结果（主 agent 继续）
+        #  - join 提前返回带 KeyboardInterrupt => Ctrl+C：向上传播（整轮停）
+        box: dict[str, Any] = {}
+
+        def _runner() -> None:
+            child_scope.attach_execution_thread()
+            try:
+                with tool_worker(child_scope):
+                    box["result"] = agent.run(user_input=prompt)
+            except BaseException as exc:  # 含 KeyboardInterrupt，交由本线程判定来源
+                box["exc"] = exc
+            finally:
+                child_scope.close()
+
+        worker = threading.Thread(target=_runner, daemon=True)
+        with parent_scope.aborter(lambda: child_scope.cancel("父 agent 中断")):
+            worker.start()
+            worker.join(timeout=max(0.001, timeout_ms / 1000))
+
+            if worker.is_alive():
+                # 超时：只取消 child scope，父 agent 收到 timeout 工具结果后继续。
+                child_scope.cancel("子 agent 超时")
+                worker.join(timeout=2.0)
+                if parent_scope.is_cancelled():
+                    raise KeyboardInterrupt("用户中断")
+                return {"ok": True, "content": "(子 agent 超时，已请求停止)", "timeout": True}
+
+        exc = box.get("exc")
+        if isinstance(exc, KeyboardInterrupt):
+            raise exc
+        if exc is not None:
+            return {"ok": False, "error": str(exc)}
+
+        result = box["result"]
+        return {
+            "ok": True,
+            "content": result.content,
+        }
 
     def _init_mcp_tools(self) -> None:
         """初始化 MCP 工具（如果配置了的话）。"""

@@ -5,10 +5,28 @@ from __future__ import annotations
 import json
 from typing import Any, Callable, TYPE_CHECKING
 
+from .interruptible import run_model_stream
+
 if TYPE_CHECKING:
     from ..storage.agent_store import AgentInstanceStore
     from ..model.router import ModelRouter
+    from ..model.request import ModelStreamRunner
     from ..tools.registry import ToolRegistry
+    from .interrupt_scope import TurnScope
+
+
+# explore 子 agent 的只读工具集（从父注册表中存在的工具里挑）
+EXPLORE_TOOLS = (
+    "list_dir",
+    "read_file",
+    "grep",
+    "glob",
+    "skill_view",
+    "web_search",
+    "web_extract",
+    "vision_analyze",
+    "search_session",
+)
 
 
 class SubAgentResult:
@@ -46,6 +64,9 @@ class SubAgent:
         system_prompt: str | None = None,
         agent_id: str | None = None,
         store: AgentInstanceStore | None = None,
+        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+        scope: TurnScope | None = None,
+        stream_runner: ModelStreamRunner | None = None,
     ):
         self.router = router
         self.tools = tools
@@ -53,6 +74,9 @@ class SubAgent:
         self.system_prompt = system_prompt
         self.agent_id = agent_id
         self.store = store
+        self.tool_executor = tool_executor
+        self.scope = scope
+        self.stream_runner = stream_runner
         self.context: list[dict[str, Any]] = []
 
     def run(
@@ -60,7 +84,7 @@ class SubAgent:
         user_input: str,
         context_messages: list[dict[str, Any]] | None = None,
     ) -> SubAgentResult:
-        """同步执行子 agent。"""
+        """同步执行子 agent。超时由调用方（_run_subagent）从外部强制，不在此处自查。"""
         messages: list[dict[str, Any]] = []
 
         if self.system_prompt:
@@ -77,6 +101,10 @@ class SubAgent:
         new_turn_start = len(messages)
 
         while True:
+            # Ctrl+C / 父 agent 取消（含外部超时触发的 set_interrupt）：被取消即抛出向上传播
+            if self.scope is not None:
+                self.scope.raise_if_cancelled()
+
             steps += 1
 
             # 调用 LLM（流式收集）
@@ -136,10 +164,20 @@ class SubAgent:
 
     def _call_llm(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         """流式调用 LLM，返回 (content, tool_calls)。"""
-        stream = self.router.chat_stream(
-            messages=messages,
-            tools=self.tools if self.tools else [],
-        )
+        # 有 scope + runner 时走可中断的轮询式流（Ctrl+C 能掐断卡住的流）；
+        # 否则退回裸 chat_stream（如后台审查路径，行为不变）。
+        if self.scope is not None and self.stream_runner is not None:
+            stream = run_model_stream(
+                self.scope,
+                self.stream_runner,
+                messages=messages,
+                tools=self.tools if self.tools else [],
+            )
+        else:
+            stream = self.router.chat_stream(
+                messages=messages,
+                tools=self.tools if self.tools else [],
+            )
 
         content_parts: list[str] = []
         tool_calls_map: dict[int, dict[str, Any]] = {}
@@ -178,6 +216,9 @@ class SubAgent:
         if name not in self.tool_handlers:
             return {"ok": False, "error": f"Unknown tool: {name}"}
         try:
+            # tool_executor 存在时走父 runtime（带审批），否则直接调处理函数
+            if self.tool_executor is not None:
+                return self.tool_executor(name, args)
             return self.tool_handlers[name](**args)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -190,6 +231,9 @@ def prepare_agent(
     system_prompt: str | None = None,
     agent_id: str | None = None,
     store: AgentInstanceStore | None = None,
+    tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+    scope: TurnScope | None = None,
+    stream_runner: ModelStreamRunner | None = None,
 ) -> SubAgent:
     """从父 ToolRegistry 按名字取工具，构造 SubAgent。
 
@@ -200,6 +244,7 @@ def prepare_agent(
         system_prompt: 子 agent 的系统提示词，None = 无。
         agent_id: 恢复已有实例的 ID，None = 新建。
         store: 实例存储，传入时启用持久化。
+        tool_executor: 工具执行回调 (name, args) -> result，传入时子工具走它（用于接入父审批）。
     """
     # 恢复模式：从 store 加载 meta 和 context
     if agent_id and store:
@@ -238,6 +283,9 @@ def prepare_agent(
         system_prompt=system_prompt,
         agent_id=agent_id,
         store=store,
+        tool_executor=tool_executor,
+        scope=scope,
+        stream_runner=stream_runner,
     )
     agent.context = context
     return agent

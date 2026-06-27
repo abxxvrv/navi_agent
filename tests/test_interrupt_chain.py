@@ -1,16 +1,18 @@
 import queue
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
-from navi_agent.tools.approval import UserApprovalChoice
+from navi_agent.tools.approval import ApprovalManager, UserApprovalChoice
 from navi_agent.runtime.interrupt import clear_all, is_interrupted, set_interrupt
 from navi_agent.runtime.interrupt_scope import TurnScope
 from navi_agent.runtime.interruptible import wait_approval
 from navi_agent.model.request import ModelStreamRunner
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.tools.builtin import RunCommandTool
+from navi_agent.tools.registry import ToolRegistry
 
 
 class _FakeRegistry:
@@ -19,6 +21,46 @@ class _FakeRegistry:
 
     def invoke(self, _name, _args):
         return self.fn()
+
+
+class _FakeContextManager:
+    def _read_text_file(self, _path, default=None):
+        return default
+
+    def _render_system_prompt_template(self, template, **_kwargs):
+        return template
+
+    def load_agents_md(self):
+        return ""
+
+    def build_skill_index_prompt(self):
+        return ""
+
+
+def _make_subagent_runtime(tmp_path):
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.tool_registry = ToolRegistry()
+    runtime.tool_registry.register(
+        "run_command",
+        "",
+        {"type": "object"},
+        lambda **_kwargs: {"ok": True},
+    )
+    runtime.context_manager = _FakeContextManager()
+    runtime.navi_home = Path(tmp_path)
+    runtime._system_prompt = "system"
+    runtime.router = object()
+    runtime.approval_manager = ApprovalManager(
+        mode="strict",
+        workspace=Path(tmp_path),
+        navi_home=Path(tmp_path),
+    )
+    runtime._emit = lambda _event: None
+    runtime.cancel_event = threading.Event()
+    runtime._current_scope = TurnScope(runtime.cancel_event)
+    runtime._current_scope.reset()
+    runtime._current_scope.attach_execution_thread()
+    return runtime
 
 
 def test_runtime_interrupt_reaches_registered_tool_worker():
@@ -263,4 +305,217 @@ def test_run_command_kills_process_when_interrupted(monkeypatch, tmp_path):
     assert result["error"] == "命令执行已中断。"
     assert fake_proc_holder["proc"].killed is True
 
+    clear_all()
+
+
+def test_subagent_timeout_cancels_pending_approval(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    entered = threading.Event()
+    released = threading.Event()
+    cancelled = threading.Event()
+
+    def approval_handler(_decision):
+        entered.set()
+        released.wait(timeout=5)
+        return UserApprovalChoice.REJECT
+
+    def cancel_current():
+        cancelled.set()
+        released.set()
+
+    approval_handler.cancel_current = cancel_current
+    runtime.approval_handler = approval_handler
+
+    class FakeAgent:
+        def __init__(self, executor):
+            self.executor = executor
+
+        def run(self, user_input):
+            self.executor("run_command", {"command": "python train.py"})
+            return type("Result", (), {"content": "done", "steps": 1, "tool_calls_made": []})()
+
+    def fake_prepare_agent(**kwargs):
+        return FakeAgent(kwargs["tool_executor"])
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", fake_prepare_agent)
+
+    result = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="run command",
+        timeout_ms=100,
+    )
+
+    assert entered.is_set()
+    assert cancelled.is_set()
+    assert result["timeout"] is True
+    assert runtime.cancel_event.is_set() is False
+
+    runtime._current_scope.close()
+    clear_all()
+
+
+def test_subagent_rejects_invalid_action_prompt_and_timeout(tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+
+    bad_action = runtime._run_subagent(
+        action="resume",
+        subagent_type="general",
+        prompt="x",
+        timeout_ms=100,
+    )
+    empty_prompt = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="",
+        timeout_ms=100,
+    )
+    blank_prompt = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="   ",
+        timeout_ms=100,
+    )
+    bad_timeout = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="x",
+        timeout_ms=0,
+    )
+
+    assert bad_action == {"ok": False, "error": "未知 action：resume，应为 run。"}
+    assert empty_prompt == {"ok": False, "error": "prompt 必须是非空字符串。"}
+    assert blank_prompt == {"ok": False, "error": "prompt 必须是非空字符串。"}
+    assert bad_timeout == {"ok": False, "error": "timeout_ms 必须是大于等于 1 的整数。"}
+
+    runtime._current_scope.close()
+    clear_all()
+
+
+def test_subagent_success_result_only_returns_content(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+
+    class FakeAgent:
+        def run(self, user_input):
+            return type("Result", (), {"content": "done", "steps": 7, "tool_calls_made": [{"name": "x"}]})()
+
+    def fake_prepare_agent(**_kwargs):
+        return FakeAgent()
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", fake_prepare_agent)
+
+    result = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="x",
+        timeout_ms=1000,
+    )
+
+    assert result == {"ok": True, "content": "done"}
+
+    runtime._current_scope.close()
+    clear_all()
+
+
+def test_subagent_timeout_cancel_survives_parent_scope_close(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, scope):
+            self.scope = scope
+
+        def run(self, user_input):
+            entered.set()
+            release.wait(timeout=5)
+            captured["cancelled_after_release"] = self.scope.cancel_event.is_set()
+            finished.set()
+            if self.scope.cancel_event.is_set():
+                raise KeyboardInterrupt("子 agent 超时")
+            captured["continued"] = True
+            return type("Result", (), {"content": "done", "steps": 1, "tool_calls_made": []})()
+
+    def fake_prepare_agent(**kwargs):
+        captured["scope"] = kwargs["scope"]
+        return FakeAgent(kwargs["scope"])
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", fake_prepare_agent)
+
+    result = runtime._run_subagent(
+        action="run",
+        subagent_type="general",
+        prompt="block",
+        timeout_ms=100,
+    )
+
+    assert entered.is_set()
+    assert result["timeout"] is True
+
+    runtime._current_scope.close()
+    release.set()
+    assert finished.wait(timeout=1)
+    assert captured["cancelled_after_release"] is True
+    assert captured.get("continued") is not True
+
+    clear_all()
+
+
+def test_parent_interrupt_cancels_subagent_approval(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    entered = threading.Event()
+    released = threading.Event()
+    cancelled = threading.Event()
+    result = {}
+
+    def approval_handler(_decision):
+        entered.set()
+        released.wait(timeout=5)
+        return UserApprovalChoice.REJECT
+
+    def cancel_current():
+        cancelled.set()
+        released.set()
+
+    approval_handler.cancel_current = cancel_current
+    runtime.approval_handler = approval_handler
+
+    class FakeAgent:
+        def __init__(self, executor):
+            self.executor = executor
+
+        def run(self, user_input):
+            self.executor("run_command", {"command": "python train.py"})
+            return type("Result", (), {"content": "done", "steps": 1, "tool_calls_made": []})()
+
+    def fake_prepare_agent(**kwargs):
+        return FakeAgent(kwargs["tool_executor"])
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", fake_prepare_agent)
+
+    def run_subagent():
+        try:
+            result["value"] = runtime._run_subagent(
+                action="run",
+                subagent_type="general",
+                prompt="run command",
+                timeout_ms=5_000,
+            )
+        except KeyboardInterrupt as exc:
+            result["error"] = exc
+
+    thread = threading.Thread(target=run_subagent)
+    thread.start()
+    assert entered.wait(timeout=1)
+
+    runtime._current_scope.cancel("用户中断")
+    thread.join(timeout=1)
+
+    assert cancelled.is_set()
+    assert isinstance(result.get("error"), KeyboardInterrupt)
+    assert "value" not in result
+
+    runtime._current_scope.close()
     clear_all()
