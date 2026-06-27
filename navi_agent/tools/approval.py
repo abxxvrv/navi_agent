@@ -91,7 +91,8 @@ class ApprovalManager:
     """
 
     COMMAND_TOOLS = {
-        "run_command"
+        "bash",
+        "powershell",
     }
 
     READ_ONLY_TOOLS = {

@@ -9,6 +9,7 @@ from collections.abc import Callable
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import os
+import platform
 import time
 from pathlib import Path
 from typing import Any, Literal
@@ -151,7 +152,7 @@ class AgentRuntime:
             self.conversation_history = []
 
         self.tool_registry = ToolRegistry()
-        self.memory_store = MemoryStore()
+        self.memory_store = MemoryStore(project_path=self.workspace)
         self.context_manager = ContextManager(
             workspace=str(self.workspace),
             skills_path=str(self.navi_home / "skills"),
@@ -182,7 +183,7 @@ class AgentRuntime:
         # resume 时优先复用旧 session 的系统提示词，保持一致性
         persisted_system = self._get_persisted_system_message()
         if persisted_system is not None:
-            self._system_prompt = persisted_system
+            self._system_prompt = persisted_system.replace("run_command", "bash")
         else:
             skill_index_prompt = self.context_manager.build_skill_index_prompt()
             _messages = self.context_manager.build_runtime_messages(
@@ -201,6 +202,10 @@ class AgentRuntime:
         
         # 2. 我们上一次保存的tool名字
         persisted_tool_names = self.session_store.meta.get("tool_names") or []
+        persisted_tool_names = [
+            "bash" if name == "run_command" else name
+            for name in persisted_tool_names
+        ]
         
         # 3. 如果是 resume 且旧 session 确实记录了工具列表
         if resume_session_id and persisted_tool_names:
@@ -1433,9 +1438,9 @@ class AgentRuntime:
             visible=False,
         )
 
-        # run_command
+        # bash
         self.tool_registry.register(
-            name="run_command",
+            name="bash",
             description="""
 - 可以运行短时间、非交互式的 Bash 命令。
 - 写完代码后，使用该工具运行测试、检查语法或查看错误信息。
@@ -1477,6 +1482,52 @@ class AgentRuntime:
                 ),
             ),
         )
+
+        if platform.system() == "Windows":
+            self.tool_registry.register(
+                name="powershell",
+                description="""
+- 可以运行短时间、非交互式的 PowerShell 命令。
+- 只在 Windows 环境可用；需要 PowerShell 语法时使用它，不要用 bash 硬凑。
+- 写完 Windows/PowerShell 相关代码后，可用该工具运行测试、检查语法或查看错误信息。
+- 该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。
+- 不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。
+- 对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。
+""",
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "command": {
+                            "type": "string",
+                            "description": "要运行的短时间、非交互式 PowerShell 命令。",
+                        },
+                        "cwd": {
+                            "type": "string",
+                            "description": "命令运行目录。默认相对于工作区；工作区外的目录请使用绝对路径。",
+                            "default": ".",
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "description": "命令超时时间，单位秒。",
+                            "default": 60,
+                            "maximum": 300,
+                        },
+                        "encoding": {
+                            "type": "string",
+                            "description": "输出解码编码。",
+                            "default": "utf-8",
+                        },
+                    },
+                    "required": ["command"],
+                },
+                function=RunCommandTool(
+                    workspace=workspace,
+                    shell="powershell",
+                    on_output=lambda *args, **kwargs: (
+                        self.on_output(*args, **kwargs) if self.on_output else None
+                    ),
+                ),
+            )
 
         # glob
         self.tool_registry.register(
@@ -1648,6 +1699,8 @@ class AgentRuntime:
 
         # memory
         def memory_tool(action: str, target: str, content: str = None, old_text: str = None) -> dict:
+            if target not in {"memory", "user", "project"}:
+                return {"success": False, "error": f"未知记忆目标 '{target}'"}
             if action == "add":
                 if not content:
                     return {"success": False, "error": "add 操作需要 content 参数"}
@@ -1667,8 +1720,9 @@ class AgentRuntime:
             name="memory",
             description="""
 - 管理持久化记忆，跨会话保留。
-- 存储目标 memory：你的笔记（环境事实、项目约定、工具特性、经验教训）。
+- 存储目标 memory：你的全局笔记（跨项目环境事实、工具特性、通用经验教训）。
 - 存储目标 user：用户画像（用户偏好、沟通风格、工作习惯、技术栈）。
+- 存储目标 project：当前工作区项目记忆（项目约定、运行方式、架构边界），保存到工作区 .navi/memories/PROJECT.txt。
 - action="add"：添加一条新记忆。
 - action="replace"：更新已有记忆（用 old_text 定位，用 content 替换）。
 - action="remove"：删除已有记忆（用 old_text 定位）。
@@ -1685,8 +1739,8 @@ class AgentRuntime:
                     },
                     "target": {
                         "type": "string",
-                        "enum": ["memory", "user"],
-                        "description": "存储目标。memory=你的笔记，user=用户画像。",
+                        "enum": ["memory", "user", "project"],
+                        "description": "存储目标。memory=你的笔记，user=用户画像，project=当前工作区项目记忆。",
                     },
                     "content": {
                         "type": "string",

@@ -580,19 +580,23 @@ class RunCommandTool:
         max_timeout: int = 300,
         max_output_chars: int = 50_000,
         on_output=None,
+        shell: str = "bash",
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
         self.max_timeout = max_timeout
         self.max_output_chars = max_output_chars
         self.on_output = on_output
-        if platform.system() == "Linux":
-            self.bash_path = "/bin/bash"
+        self.shell = shell
+        if shell == "powershell":
+            self.shell_path = shutil.which("pwsh") or shutil.which("powershell")
+        elif platform.system() == "Linux":
+            self.shell_path = "/bin/bash"
         else:
-            self.bash_path = self._resolve_bash_path()
+            self.shell_path = self._resolve_bash_path()
 
-        # 打印找到的 git bash 路径
-        # print(f"[navi] run_command bash_path={self.bash_path}")
+        # 打印找到的 shell 路径
+        # print(f"[navi] shell_path={self.shell_path}")
 
     def __call__(
         self,
@@ -648,13 +652,14 @@ class RunCommandTool:
                 timeout_seconds = self.max_timeout
 
             # 3. 执行命令
-            if self.bash_path is None:
+            if self.shell_path is None:
+                shell_label = "PowerShell" if self.shell == "powershell" else "Git Bash bash.exe"
                 return {
                     "ok": False,
-                    "error": "未找到 Git Bash bash.exe，请安装 Git for Windows 或设置 GIT_BASH。",
+                    "error": f"未找到 {shell_label}。",
                     "command": command,
                     "cwd": str(target_cwd),
-                    "shell": "git-bash",
+                    "shell": self.shell,
                 }
 
             popen_kwargs = dict(
@@ -668,10 +673,21 @@ class RunCommandTool:
             else:
                 popen_kwargs["start_new_session"] = True
 
-            proc = subprocess.Popen(
-                [self.bash_path, "-lc", command],
-                **popen_kwargs,
-            )
+            if self.shell == "powershell":
+                argv = [
+                    self.shell_path,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ]
+            else:
+                argv = [self.shell_path, "-lc", command]
+
+            proc = subprocess.Popen(argv, **popen_kwargs)
 
             timed_out = False
             interrupted = False
@@ -722,6 +738,7 @@ class RunCommandTool:
                     "output_truncated": output_truncated,
                     "error": "命令执行已中断。",
                     "interrupted": True,
+                    "shell": self.shell,
                 }
 
             if timed_out:
@@ -731,6 +748,7 @@ class RunCommandTool:
                     "output": output,
                     "output_truncated": output_truncated,
                     "error": "命令执行超时。",
+                    "shell": self.shell,
                 }
 
             return {
@@ -738,6 +756,7 @@ class RunCommandTool:
                 "exit_code": proc.returncode,
                 "output": output,
                 "output_truncated": output_truncated,
+                "shell": self.shell,
             }
 
         except Exception as e:
