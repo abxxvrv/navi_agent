@@ -70,22 +70,21 @@ class LMStudioProvider(LlamaProvider):
     """LM Studio OpenAI-compatible local server."""
 
 
-class OpenAICompatibleProvider(BaseProvider):
-    """通用 OpenAI 兼容 API 提供方。未显式注册的 provider 均走此路径。"""
+class QwenProvider(BaseProvider):
+    """阿里云百炼 DashScope（OpenAI 兼容）。"""
 
     def chat_stream_with_client(self, client, messages, tools, **kwargs):
-        params: dict[str, Any] = dict(
-            model=self.model_name, messages=messages, stream=True,
-            stream_options={"include_usage": True},
+        return client.chat.completions.create(
+            model=self.model_name, messages=messages, tools=tools,
+            stream=True, stream_options={"include_usage": True},
+            extra_body={"thinking": {"type": "enabled"}},
         )
-        if tools:
-            params["tools"] = tools
-        return client.chat.completions.create(**params)
 
 
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
+    "qwen": QwenProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
 }
@@ -124,7 +123,9 @@ class ModelRouter:
         entry = self.config.get("providers", {}).get(provider_name)
         if not entry:
             return None
-        provider_cls = PROVIDER_CLASSES.get(provider_name, OpenAICompatibleProvider)
+        provider_cls = PROVIDER_CLASSES.get(provider_name)
+        if not provider_cls:
+            return None
         return provider_cls(api_key=entry["api_key"], base_url=entry["base_url"], model_name=model_name)
 
     def chat_stream(self, messages, tools, **kwargs):
