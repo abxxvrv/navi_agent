@@ -41,7 +41,7 @@ def _make_subagent_runtime(tmp_path):
     runtime = AgentRuntime.__new__(AgentRuntime)
     runtime.tool_registry = ToolRegistry()
     runtime.tool_registry.register(
-        "run_command",
+        "bash",
         "",
         {"type": "object"},
         lambda **_kwargs: {"ok": True},
@@ -287,7 +287,7 @@ def test_run_command_kills_process_when_interrupted(monkeypatch, tmp_path):
     monkeypatch.setattr("navi_agent.tools.builtin.subprocess.Popen", fake_popen)
 
     tool = RunCommandTool(workspace=str(tmp_path))
-    tool.bash_path = "bash"
+    tool.shell_path = "bash"
 
     def fake_kill(proc):
         proc.killed = True
@@ -331,7 +331,7 @@ def test_subagent_timeout_cancels_pending_approval(monkeypatch, tmp_path):
             self.executor = executor
 
         def run(self, user_input):
-            self.executor("run_command", {"command": "python train.py"})
+            self.executor("bash", {"command": "python train.py"})
             return type("Result", (), {"content": "done", "steps": 1, "tool_calls_made": []})()
 
     def fake_prepare_agent(**kwargs):
@@ -487,7 +487,7 @@ def test_parent_interrupt_cancels_subagent_approval(monkeypatch, tmp_path):
             self.executor = executor
 
         def run(self, user_input):
-            self.executor("run_command", {"command": "python train.py"})
+            self.executor("bash", {"command": "python train.py"})
             return type("Result", (), {"content": "done", "steps": 1, "tool_calls_made": []})()
 
     def fake_prepare_agent(**kwargs):

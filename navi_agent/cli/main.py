@@ -315,7 +315,7 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
         box.close_all()
 
     if event_type == "tool_start":
-        if tool_name == "run_command":
+        if tool_name in {"bash", "powershell"}:
             command = tool_args.get("command", "")
             _p(f"[dim]┊ preparing {tool_name}[/dim] [bold]{command}[/bold]")
         elif tool_name in {"write_file", "patch_file"}:
@@ -360,7 +360,7 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
             if tool_result.get("diff_truncated"):
                 _p("[yellow]┊ diff truncated[/yellow]")
 
-        elif tool_name == "run_command":
+        elif tool_name in {"bash", "powershell"}:
             exit_code = tool_result.get("exit_code")
             if tool_result.get("ok") or exit_code == 0:
                 _p(f"[green]┊ exit_code=0[/green]{elapsed_str}")
@@ -562,7 +562,7 @@ def list_runtime_tools(runtime: AgentRuntime) -> list[str]:
         "read_file",
         "write_file",
         "patch_file",
-        "run_command",
+        "bash",
     ]
 
 

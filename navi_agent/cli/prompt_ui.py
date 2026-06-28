@@ -1084,7 +1084,7 @@ class NaviPromptSession:
     def _reassert_console_input_mode(self) -> None:
         """Re-apply prompt_toolkit's raw + VT100 console input mode (Windows).
 
-        A child process spawned during a turn (``run_command`` → ``bash``)
+        A child process spawned during a turn (``bash`` / ``powershell``)
         shares the console and can clear ``ENABLE_VIRTUAL_TERMINAL_INPUT``.
         prompt_toolkit only sets that flag once, when the Application starts,
         so it is never restored mid-session. With the flag gone the VT100

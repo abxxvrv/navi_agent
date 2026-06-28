@@ -38,5 +38,6 @@ include = ["navi_agent*"]
 [tool.setuptools.package-data]
 navi_agent = [
     "templates/navi_home/*.md",
+    "templates/navi_home/*.txt",
     "templates/skills/**/*",
 ]

@@ -122,7 +122,7 @@ READ_ONLY_TOOLS = {
 |------|------|---------|
 | `READ_ONLY_TOOLS` | 只读，自动允许 | 不修改文件系统、不执行命令 |
 | `WRITE_TOOLS` | 写入，按规则审批 | 修改文件（write_file, patch_file 等） |
-| `COMMAND_TOOLS` | 命令执行，最严格 | 执行 shell 命令（run_command） |
+| `COMMAND_TOOLS` | 命令执行，最严格 | 执行 shell 命令（bash / powershell） |
 
 ### Step 4：验证
 

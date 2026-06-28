@@ -152,6 +152,7 @@ class ContextManager:
             NAVI_SKILLS=skills_prompt,
             NAVI_MEMORY=self.memory_store.get_text("memory") if self.memory_store else "",
             NAVI_USER=self.memory_store.get_text("user") if self.memory_store else "",
+            NAVI_PROJECT_MEMORY=self.memory_store.get_text("project") if self.memory_store else "",
         )
 
     def _parse_skill_frontmatter(self, content: str) -> dict[str, str]:

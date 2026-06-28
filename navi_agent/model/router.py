@@ -70,9 +70,21 @@ class LMStudioProvider(LlamaProvider):
     """LM Studio OpenAI-compatible local server."""
 
 
+class QwenProvider(BaseProvider):
+    """阿里云百炼 DashScope（OpenAI 兼容）。"""
+
+    def chat_stream_with_client(self, client, messages, tools, **kwargs):
+        return client.chat.completions.create(
+            model=self.model_name, messages=messages, tools=tools,
+            stream=True, stream_options={"include_usage": True},
+            extra_body={"thinking": {"type": "enabled"}},
+        )
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
+    "qwen": QwenProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
 }

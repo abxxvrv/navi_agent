@@ -286,7 +286,7 @@ class NaviStreamView:
                 console.print(BulletColumns(Syntax(diff, "diff", word_wrap=True), bullet=Text(" ")))
             if result.get("diff_truncated"):
                 console.print(BulletColumns(Text("diff truncated", style="yellow"), bullet=Text(" ")))
-        elif name == "run_command":
+        elif name in {"bash", "powershell"}:
             exit_code = result.get("exit_code")
             style = "green" if exit_code == 0 else "dark_red"
             console.print(BulletColumns(Text(f"exit_code={exit_code}", style=style), bullet=Text(" ")))
@@ -308,7 +308,7 @@ class NaviStreamView:
 
 
 def _tool_detail(name: str, args: dict[str, Any]) -> str:
-    if name == "run_command":
+    if name in {"bash", "powershell"}:
         return str(args.get("command") or "")
     if name in {"read_file", "write_file", "patch_file", "list_dir", "glob", "grep"}:
         return str(args.get("path") or args.get("pattern") or ".")

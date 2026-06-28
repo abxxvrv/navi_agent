@@ -11,6 +11,7 @@ import threading
 import time
 import re
 
+from ..model.router import ModelRouter
 from ..runtime.interrupt import is_interrupted
 from ..storage.safe_file import atomic_write_text, file_lock, file_version
 from ..storage.version_tracker import VersionTracker
@@ -580,19 +581,23 @@ class RunCommandTool:
         max_timeout: int = 300,
         max_output_chars: int = 50_000,
         on_output=None,
+        shell: str = "bash",
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
         self.max_timeout = max_timeout
         self.max_output_chars = max_output_chars
         self.on_output = on_output
-        if platform.system() == "Linux":
-            self.bash_path = "/bin/bash"
+        self.shell = shell
+        if shell == "powershell":
+            self.shell_path = shutil.which("pwsh") or shutil.which("powershell")
+        elif platform.system() == "Linux":
+            self.shell_path = "/bin/bash"
         else:
-            self.bash_path = self._resolve_bash_path()
+            self.shell_path = self._resolve_bash_path()
 
-        # 打印找到的 git bash 路径
-        # print(f"[navi] run_command bash_path={self.bash_path}")
+        # 打印找到的 shell 路径
+        # print(f"[navi] shell_path={self.shell_path}")
 
     def __call__(
         self,
@@ -648,13 +653,14 @@ class RunCommandTool:
                 timeout_seconds = self.max_timeout
 
             # 3. 执行命令
-            if self.bash_path is None:
+            if self.shell_path is None:
+                shell_label = "PowerShell" if self.shell == "powershell" else "Git Bash bash.exe"
                 return {
                     "ok": False,
-                    "error": "未找到 Git Bash bash.exe，请安装 Git for Windows 或设置 GIT_BASH。",
+                    "error": f"未找到 {shell_label}。",
                     "command": command,
                     "cwd": str(target_cwd),
-                    "shell": "git-bash",
+                    "shell": self.shell,
                 }
 
             popen_kwargs = dict(
@@ -668,10 +674,24 @@ class RunCommandTool:
             else:
                 popen_kwargs["start_new_session"] = True
 
-            proc = subprocess.Popen(
-                [self.bash_path, "-lc", command],
-                **popen_kwargs,
-            )
+            if self.shell == "powershell":
+                # 强制 PowerShell 以 UTF-8 输出，否则在非 UTF-8 代码页（如中文 Windows 的 cp936）
+                # 下输出会被按 utf-8 解码成乱码。
+                command = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command
+                argv = [
+                    self.shell_path,
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-ExecutionPolicy",
+                    "Bypass",
+                    "-Command",
+                    command,
+                ]
+            else:
+                argv = [self.shell_path, "-lc", command]
+
+            proc = subprocess.Popen(argv, **popen_kwargs)
 
             timed_out = False
             interrupted = False
@@ -722,6 +742,7 @@ class RunCommandTool:
                     "output_truncated": output_truncated,
                     "error": "命令执行已中断。",
                     "interrupted": True,
+                    "shell": self.shell,
                 }
 
             if timed_out:
@@ -731,6 +752,7 @@ class RunCommandTool:
                     "output": output,
                     "output_truncated": output_truncated,
                     "error": "命令执行超时。",
+                    "shell": self.shell,
                 }
 
             return {
@@ -738,6 +760,7 @@ class RunCommandTool:
                 "exit_code": proc.returncode,
                 "output": output,
                 "output_truncated": output_truncated,
+                "shell": self.shell,
             }
 
         except Exception as e:
@@ -1332,24 +1355,22 @@ class VisionAnalyzeTool:
         self.workspace = workspace
         self.session_meta = session_meta
         self.config_path = config_path
-        # 辅助视觉配置只需读一次（不随会话变化）
-        self.aux_config = self._load_aux_config(config_path)
+        # 辅助视觉模型路由（和主模型同体系，只需 provider + model）
+        vision_provider, vision_model = self._load_aux_config(config_path)
+        self._vision_router = ModelRouter(config_path, vision_provider, vision_model)
 
     @staticmethod
-    def _load_aux_config(config_path: Path) -> dict:
-        """读取辅助视觉模型配置（全局固定，不随会话变化）。"""
+    def _load_aux_config(config_path: Path) -> tuple[str, str]:
+        """读取辅助视觉模型配置（全局固定，不随会话变化）。
+        返回 (provider, model)。"""
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except Exception:
-            return {}
+            return ("mimo", "mimo-v2.5")
         aux = cfg.get("auxiliary", {}).get("vision", {})
-        if not aux.get("base_url"):
-            mimo = cfg.get("providers", {}).get("mimo", {})
-            aux.setdefault("base_url", mimo.get("base_url", ""))
-            aux.setdefault("api_key", mimo.get("api_key", ""))
-        if not aux.get("model"):
-            aux["model"] = "mimo-v2.5"
-        return aux
+        provider = aux.get("provider", "mimo")
+        model = aux.get("model", "mimo-v2.5")
+        return (provider, model)
 
     def _main_supports_vision(self) -> bool:
         """实时读取当前主模型是否支持多模态（反映 /model 切换）。"""
@@ -1414,62 +1435,35 @@ class VisionAnalyzeTool:
 
     def _call_auxiliary_vision(self, image_data_url: str, prompt: str) -> dict:
         """调用辅助视觉模型分析图片，返回文字描述。"""
-        import urllib.request
-        import urllib.error
+        if self._vision_router._provider is None:
+            return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 对应的 provider/model 不匹配任何已配置的 provider）。"}
 
-        base_url = self.aux_config.get("base_url", "").rstrip("/")
-        api_key = self.aux_config.get("api_key", "")
-        model = self.aux_config.get("model", "mimo-v2.5")
-
-        if not base_url or not api_key:
-            return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 或 providers.mimo）。"}
-
-        full_prompt = prompt
-
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                        {"type": "text", "text": full_prompt},
-                    ],
-                }
-            ],
-            "max_completion_tokens": 2048,
-        }
+        model = self._vision_router.model_name
+        client = self._vision_router.create_request_client()
 
         try:
-            body = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                f"{base_url}/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json", "api-key": api_key},
-                method="POST",
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                max_tokens=2048,
+                stream=False,
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
 
-            choices = data.get("choices", [])
-            if not choices:
-                return {"ok": False, "error": "辅助视觉模型未返回结果。", "raw": data}
-
+            choice = response.choices[0]
             return {
                 "ok": True,
-                "content": choices[0].get("message", {}).get("content", ""),
-                "model": data.get("model", model),
-                "usage": data.get("usage", {}),
+                "content": choice.message.content or "",
+                "model": response.model or model,
+                "usage": response.usage.model_dump() if response.usage else {},
             }
-        except urllib.error.HTTPError as exc:
-            error_body = ""
-            try:
-                error_body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "detail": error_body}
-        except urllib.error.URLError as exc:
-            return {"ok": False, "error": f"网络错误: {exc.reason}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 

@@ -1,4 +1,4 @@
-"""记忆存储 - 管理 MEMORY.md 和 USER.md"""
+"""记忆存储 - 管理全局 MEMORY/USER 和项目记忆"""
 
 import os
 from pathlib import Path
@@ -18,41 +18,69 @@ def get_memory_dir() -> Path:
 
 
 class MemoryStore:
-    def __init__(self, memory_limit: int = 2000, user_limit: int = 1000):
+    def __init__(
+        self,
+        memory_limit: int = 2000,
+        user_limit: int = 1000,
+        project_limit: int = 2200,
+        project_path: str | Path | None = None,
+    ):
         self.memory_limit = memory_limit
         self.user_limit = user_limit
+        self.project_limit = project_limit
+        self.project_memory_path = (
+            Path(project_path).resolve() / ".navi" / "memories" / "PROJECT.txt"
+            if project_path is not None
+            else None
+        )
         self.memory_entries = self._load("MEMORY.md")
         self.user_entries = self._load("USER.md")
+        self.project_entries = self._load("PROJECT.txt") if self.project_memory_path else []
 
     def _target_info(self, target: str) -> tuple[str, int]:
+        if target == "project":
+            return "PROJECT.txt", self.project_limit
         if target == "user":
             return "USER.md", self.user_limit
-        return "MEMORY.md", self.memory_limit
+        if target == "memory":
+            return "MEMORY.md", self.memory_limit
+        raise ValueError(f"未知记忆目标: {target}")
+
+    def _path_for(self, filename: str) -> Path:
+        if filename == "PROJECT.txt":
+            return self.project_memory_path
+        return get_memory_dir() / filename
 
     def _load(self, filename: str) -> list[str]:
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
         if not path.exists():
             return []
         content = path.read_text(encoding="utf-8")
         return [e.strip() for e in content.split(ENTRY_DELIMITER) if e.strip()]
 
     def _cache_entries(self, target: str, entries: list[str]) -> None:
-        if target == "user":
+        if target == "project":
+            self.project_entries = entries
+        elif target == "user":
             self.user_entries = entries
         else:
             self.memory_entries = entries
 
     def _save_locked(self, target: str, entries: list[str]) -> None:
         filename, _ = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
         path.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(path, ENTRY_DELIMITER.join(entries), encoding="utf-8")
         self._cache_entries(target, entries)
 
     def _save(self, target: str):
-        entries = self.user_entries if target == "user" else self.memory_entries
+        entries = (
+            self.project_entries
+            if target == "project"
+            else self.user_entries if target == "user" else self.memory_entries
+        )
         filename, _ = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
         with file_lock(path):
             self._save_locked(target, entries)
 
@@ -62,7 +90,7 @@ class MemoryStore:
             return {"success": False, "error": "内容不能为空"}
 
         filename, limit = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
 
         with file_lock(path):
             entries = self._load(filename)
@@ -71,8 +99,9 @@ class MemoryStore:
                 self._cache_entries(target, entries)
                 return {"success": False, "error": "条目已存在"}
 
+            test_entries = [*entries, content]
             current_len = len(ENTRY_DELIMITER.join(entries))
-            if current_len + len(content) + 1 > limit:
+            if len(ENTRY_DELIMITER.join(test_entries)) > limit:
                 self._cache_entries(target, entries)
                 return {"success": False, "error": f"超出限制 ({current_len}/{limit})，如果要增加内容，先删除旧记忆后再增加，删除和添加应该仔细思考判断"}
 
@@ -85,7 +114,7 @@ class MemoryStore:
         new_content = new_content.strip()
 
         filename, limit = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
 
         with file_lock(path):
             entries = self._load(filename)
@@ -112,7 +141,7 @@ class MemoryStore:
         old_text = old_text.strip()
 
         filename, _ = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
 
         with file_lock(path):
             entries = self._load(filename)
@@ -131,7 +160,7 @@ class MemoryStore:
 
     def get_text(self, target: str) -> str:
         filename, _ = self._target_info(target)
-        path = get_memory_dir() / filename
+        path = self._path_for(filename)
         with file_lock(path):
             entries = self._load(filename)
             self._cache_entries(target, entries)

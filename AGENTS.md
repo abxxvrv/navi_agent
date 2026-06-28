@@ -72,10 +72,10 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `navi_agent/runtime/interruptible.py`: 阻塞操作的统一入口，当前包含 `run_model_stream()`、`wait_approval()`、`tool_worker()`。
 - `navi_agent/model/request.py`: 模型流式请求 worker。runtime 控制线程轮询 chunk 和 cancel，必要时 abort 当前请求。
 - `navi_agent/model/router.py`: 模型 provider/router。普通调用保留共享 client，交互中断路径使用 request-local client。
-- `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 需要能在中断时杀掉 subprocess；`SearchSessionTool` 支持 DISCOVERY/SCROLL/BROWSE 三种模式。
+- `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 支撑对外的 `bash` / `powershell` 命令工具，并需要能在中断时杀掉 subprocess；`SearchSessionTool` 支持 DISCOVERY/SCROLL/BROWSE 三种模式。
 - `navi_agent/tools/registry.py`: 工具注册表。
 - `navi_agent/storage/history_store.py`: SQLite 会话历史存储。FTS5 全文搜索（unicode61 + trigram 双表，触发器自动同步）。关键方法：`search_messages()`、`get_messages_around()`、`get_anchored_view()`（window + bookends）、`get_session()`、`list_sessions_rich()`。
-- `navi_agent/storage/memory_store.py`: 长期记忆存储。
+- `navi_agent/storage/memory_store.py`: 长期记忆存储，包含全局 MEMORY/USER 和当前工作区 `.navi/memories/PROJECT.txt` 项目记忆。
 - `navi_agent/storage/agent_store.py`: 子 agent 实例存储。
 - `navi_agent/context/context_manager.py`: 运行上下文组装。
 - `navi_agent/context/compressor.py`: 上下文压缩。
@@ -99,5 +99,5 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ## 7. 未完成任务
 
 - 第三阶段尚未做：`RuntimeEvent` / `UiEvent` 类型、`terminal_renderer.py`、统一状态栏数据模型。
-- 工具系统尚未全面 context 化：还没有 `ToolExecutionContext(scope)`，所以 `RunCommandTool` 仍通过现有 `is_interrupted()` 路径杀 subprocess。
+- 工具系统尚未全面 context 化：还没有 `ToolExecutionContext(scope)`，所以 `bash` / `powershell` 背后的 `RunCommandTool` 仍通过现有 `is_interrupted()` 路径杀 subprocess。
 - `cli/main.py` 尚未完全变成“只保留命令入口和启动 controller”；仍有部分历史 helper 留在里面。
