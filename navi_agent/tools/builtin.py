@@ -11,6 +11,7 @@ import threading
 import time
 import re
 
+from ..model.router import ModelRouter
 from ..runtime.interrupt import is_interrupted
 from ..storage.safe_file import atomic_write_text, file_lock, file_version
 from ..storage.version_tracker import VersionTracker
@@ -1354,24 +1355,22 @@ class VisionAnalyzeTool:
         self.workspace = workspace
         self.session_meta = session_meta
         self.config_path = config_path
-        # 辅助视觉配置只需读一次（不随会话变化）
-        self.aux_config = self._load_aux_config(config_path)
+        # 辅助视觉模型路由（和主模型同体系，只需 provider + model）
+        vision_provider, vision_model = self._load_aux_config(config_path)
+        self._vision_router = ModelRouter(config_path, vision_provider, vision_model)
 
     @staticmethod
-    def _load_aux_config(config_path: Path) -> dict:
-        """读取辅助视觉模型配置（全局固定，不随会话变化）。"""
+    def _load_aux_config(config_path: Path) -> tuple[str, str]:
+        """读取辅助视觉模型配置（全局固定，不随会话变化）。
+        返回 (provider, model)。"""
         try:
             cfg = json.loads(config_path.read_text(encoding="utf-8"))
         except Exception:
-            return {}
+            return ("mimo", "mimo-v2.5")
         aux = cfg.get("auxiliary", {}).get("vision", {})
-        if not aux.get("base_url"):
-            mimo = cfg.get("providers", {}).get("mimo", {})
-            aux.setdefault("base_url", mimo.get("base_url", ""))
-            aux.setdefault("api_key", mimo.get("api_key", ""))
-        if not aux.get("model"):
-            aux["model"] = "mimo-v2.5"
-        return aux
+        provider = aux.get("provider", "mimo")
+        model = aux.get("model", "mimo-v2.5")
+        return (provider, model)
 
     def _main_supports_vision(self) -> bool:
         """实时读取当前主模型是否支持多模态（反映 /model 切换）。"""
@@ -1436,62 +1435,35 @@ class VisionAnalyzeTool:
 
     def _call_auxiliary_vision(self, image_data_url: str, prompt: str) -> dict:
         """调用辅助视觉模型分析图片，返回文字描述。"""
-        import urllib.request
-        import urllib.error
+        if self._vision_router._provider is None:
+            return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 对应的 provider/model 不匹配任何已配置的 provider）。"}
 
-        base_url = self.aux_config.get("base_url", "").rstrip("/")
-        api_key = self.aux_config.get("api_key", "")
-        model = self.aux_config.get("model", "mimo-v2.5")
-
-        if not base_url or not api_key:
-            return {"ok": False, "error": "辅助视觉模型未配置（config.json 中 auxiliary.vision 或 providers.mimo）。"}
-
-        full_prompt = prompt
-
-        payload = {
-            "model": model,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "image_url", "image_url": {"url": image_data_url}},
-                        {"type": "text", "text": full_prompt},
-                    ],
-                }
-            ],
-            "max_completion_tokens": 2048,
-        }
+        model = self._vision_router.model_name
+        client = self._vision_router.create_request_client()
 
         try:
-            body = json.dumps(payload).encode("utf-8")
-            req = urllib.request.Request(
-                f"{base_url}/chat/completions",
-                data=body,
-                headers={"Content-Type": "application/json", "api-key": api_key},
-                method="POST",
+            response = client.chat.completions.create(
+                model=model,
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": image_data_url}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }
+                ],
+                max_tokens=2048,
+                stream=False,
             )
-            with urllib.request.urlopen(req, timeout=60) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
 
-            choices = data.get("choices", [])
-            if not choices:
-                return {"ok": False, "error": "辅助视觉模型未返回结果。", "raw": data}
-
+            choice = response.choices[0]
             return {
                 "ok": True,
-                "content": choices[0].get("message", {}).get("content", ""),
-                "model": data.get("model", model),
-                "usage": data.get("usage", {}),
+                "content": choice.message.content or "",
+                "model": response.model or model,
+                "usage": response.usage.model_dump() if response.usage else {},
             }
-        except urllib.error.HTTPError as exc:
-            error_body = ""
-            try:
-                error_body = exc.read().decode("utf-8", errors="replace")
-            except Exception:
-                pass
-            return {"ok": False, "error": f"HTTP {exc.code}: {exc.reason}", "detail": error_body}
-        except urllib.error.URLError as exc:
-            return {"ok": False, "error": f"网络错误: {exc.reason}"}
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
 
