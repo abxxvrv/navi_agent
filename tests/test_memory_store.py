@@ -141,16 +141,17 @@ class TestMemoryStore:
             assert "用户叫李四" in store2.user_entries
 
     def test_project_memory_creates_project_navi_file(self, tmp_path):
-        """项目记忆写入当前项目 .navi。"""
+        """项目记忆写入当前项目 .navi，文件在首次 add 时才创建。"""
         with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "global"):
             store = MemoryStore(project_path=tmp_path)
 
             assert store.project_memory_path == tmp_path / ".navi" / "memories" / "PROJECT.txt"
-            assert store.project_memory_path.is_file()
+            assert not store.project_memory_path.exists()
 
             result = store.add("project", "本项目使用 pytest")
 
             assert result["success"] is True
+            assert store.project_memory_path.is_file()
             assert "本项目使用 pytest" in store.get_text("project")
             assert store.project_memory_path.read_text(encoding="utf-8") == "本项目使用 pytest"
 

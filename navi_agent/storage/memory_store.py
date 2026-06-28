@@ -36,9 +36,6 @@ class MemoryStore:
         self.memory_entries = self._load("MEMORY.md")
         self.user_entries = self._load("USER.md")
         self.project_entries = self._load("PROJECT.txt") if self.project_memory_path else []
-        if self.project_memory_path is not None:
-            self.project_memory_path.parent.mkdir(parents=True, exist_ok=True)
-            self.project_memory_path.touch(exist_ok=True)
 
     def _target_info(self, target: str) -> tuple[str, int]:
         if target == "project":
@@ -50,7 +47,7 @@ class MemoryStore:
         raise ValueError(f"未知记忆目标: {target}")
 
     def _path_for(self, filename: str) -> Path:
-        if filename == "PROJECT.txt" and self.project_memory_path is not None:
+        if filename == "PROJECT.txt":
             return self.project_memory_path
         return get_memory_dir() / filename
 

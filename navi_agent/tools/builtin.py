@@ -674,6 +674,9 @@ class RunCommandTool:
                 popen_kwargs["start_new_session"] = True
 
             if self.shell == "powershell":
+                # 强制 PowerShell 以 UTF-8 输出，否则在非 UTF-8 代码页（如中文 Windows 的 cp936）
+                # 下输出会被按 utf-8 解码成乱码。
+                command = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command
                 argv = [
                     self.shell_path,
                     "-NoLogo",
