@@ -1492,6 +1492,22 @@ class VisionAnalyzeTool:
         return self._call_auxiliary_vision(image_data_url, prompt)
 
 
+def _resolve_to_root(store, session_id: str) -> str:
+    """沿 parent_session_id 链找到根 session。"""
+    visited = set()
+    cur = session_id
+    while cur and cur not in visited:
+        visited.add(cur)
+        meta = store.get_session(cur)
+        if not meta:
+            break
+        parent = meta.get("parent_session_id")
+        if not parent:
+            break
+        cur = parent
+    return cur
+
+
 class SearchSessionTool:
     """会话搜索工具，两种模式（和 Hermes 三模式一致，但 SCROLL 由 read_session 工具接管）。
 
@@ -1556,21 +1572,6 @@ class SearchSessionTool:
         except Exception as e:
             return {"ok": False, "error": f"搜索失败: {str(e)}"}
 
-    def _resolve_to_root(self, store, session_id: str) -> str:
-        """沿 parent_session_id 链找到根 session。"""
-        visited = set()
-        cur = session_id
-        while cur and cur not in visited:
-            visited.add(cur)
-            meta = store.get_session(cur)
-            if not meta:
-                break
-            parent = meta.get("parent_session_id")
-            if not parent:
-                break
-            cur = parent
-        return cur
-
     def _discover(self, store, query: str, limit: int, sort: str) -> dict:
         """DISCOVERY 模式：FTS5 搜索 + lineage 去重 + bookends。"""
         limit = max(1, min(limit, 10))
@@ -1584,7 +1585,7 @@ class SearchSessionTool:
         if not raw_results:
             return {"ok": True, "query": query, "results": [], "count": 0}
 
-        current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
+        current_root = _resolve_to_root(store, self.current_session_id) if self.current_session_id else None
 
         # 按 lineage 去重
         seen: dict[str, dict] = {}
@@ -1592,7 +1593,7 @@ class SearchSessionTool:
             raw_sid = r.get("session_id")
             if not raw_sid:
                 continue
-            resolved = self._resolve_to_root(store, raw_sid)
+            resolved = _resolve_to_root(store, raw_sid)
             # 跳过当前 session lineage
             if current_root and resolved == current_root:
                 continue
@@ -1644,7 +1645,7 @@ class SearchSessionTool:
         """
         limit = max(1, min(limit, 20))
 
-        current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
+        current_root = _resolve_to_root(store, self.current_session_id) if self.current_session_id else None
 
         # 多取 5 条作为过滤当前会话 lineage 的缓冲：当前会话的 root 可能落在结果前部，
         # 过滤后需要补位。+5 是保守值（实际最多过滤 1 条，因为 list 已排除子会话）。
@@ -1664,15 +1665,22 @@ class SearchSessionTool:
             if not sessions:
                 return {"ok": True, "results": []}
 
-            # 批量取这些 session 的最新 3 条 user/assistant 消息（2 次查询，避免 N+1）
+            # 批量取这些 session 的最新 3 条 user/assistant 消息。窗口函数在 DB 侧就只
+            # 返回每会话 3 行（rn=1 为最新），避免把长会话的全部正文拉进内存。
             sids = [s["session_id"] for s in sessions]
             placeholders = ",".join("?" * len(sids))
             msg_rows = conn.execute(
-                f"""SELECT session_id, id, seq, role, content_text
-                    FROM messages
-                    WHERE session_id IN ({placeholders})
-                      AND role IN ('user', 'assistant')
-                    ORDER BY session_id, seq DESC""",
+                f"""SELECT session_id, id, role, content_text FROM (
+                        SELECT session_id, id, seq, role, content_text,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY session_id ORDER BY seq DESC
+                               ) AS rn
+                        FROM messages
+                        WHERE session_id IN ({placeholders})
+                          AND role IN ('user', 'assistant')
+                    )
+                    WHERE rn <= 3
+                    ORDER BY session_id, rn""",
                 sids,
             ).fetchall()
 
@@ -1767,21 +1775,6 @@ class ReadSessionTool:
         self.navi_home = navi_home
         self.current_session_id = current_session_id
 
-    def _resolve_to_root(self, store, session_id: str) -> str:
-        """沿 parent_session_id 链找到根 session。"""
-        visited = set()
-        cur = session_id
-        while cur and cur not in visited:
-            visited.add(cur)
-            meta = store.get_session(cur)
-            if not meta:
-                break
-            parent = meta.get("parent_session_id")
-            if not parent:
-                break
-            cur = parent
-        return cur
-
     def __call__(
         self,
         session_id: str,
@@ -1811,8 +1804,8 @@ class ReadSessionTool:
 
             # 拒绝在当前活跃 session lineage 内读取（内容已在上下文中）
             if self.current_session_id:
-                a_root = self._resolve_to_root(store, session_id)
-                c_root = self._resolve_to_root(store, self.current_session_id)
+                a_root = _resolve_to_root(store, session_id)
+                c_root = _resolve_to_root(store, self.current_session_id)
                 if a_root and c_root and a_root == c_root:
                     return {"ok": False, "error": "该会话在当前 lineage 内，内容已在上下文中。"}
 
@@ -1862,18 +1855,11 @@ class ReadSessionTool:
                     content = content[:max_chars_per_message] + f"\n...[truncated, 原文 {original_len} 字符]"
                     single_truncated = True
 
-                # 第 2 层：总字符截断
-                if current_chars + len(content) > max_chars:
-                    remaining = max_chars - current_chars
-                    if remaining > 0:
-                        content = content[:remaining] + "\n...[truncated by max_chars]"
-                        single_truncated = True
-                        messages.append({
-                            "id": r["id"],
-                            "role": r["role"],
-                            "content": content,
-                            "truncated": True,
-                        })
+                # 第 2 层：总字符截断。超预算且本页已有内容 → 不追加这条，
+                # 留到下一页完整重读（游标停在上一条，不会丢内容）。
+                # 若它是本页第一条，则照常追加（已被第 1 层限制在 max_chars_per_message
+                # 内），保证超长消息不会因预算太小而永远读不到。
+                if current_chars + len(content) > max_chars and messages:
                     has_more = True
                     break
 
