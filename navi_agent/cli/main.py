@@ -71,6 +71,9 @@ app = typer.Typer(
 weixin_app = typer.Typer(help="WeChat (iLink) gateway: login and run the bot.")
 app.add_typer(weixin_app, name="weixin")
 
+qq_app = typer.Typer(help="QQ Bot gateway: login and run the bot.")
+app.add_typer(qq_app, name="qq")
+
 # =========================
 # UI
 # =========================
@@ -1525,6 +1528,160 @@ def weixin_allowlist(
 
     resolved = _resolve_weixin_account(account_id)
     users = load_allowlist(str(get_navi_home()), resolved)
+    if not users:
+        console.print(f"[yellow]{resolved} 的白名单为空（所有消息都会被拒绝）。[/yellow]")
+        return
+    console.print(f"[bold]{resolved} 白名单[/bold]")
+    for u in users:
+        console.print(f"- {u}")
+
+
+def _resolve_qq_account(account_id: str) -> str:
+    """解析 QQ 账号 id：为空时自动选唯一账号；显式指定时校验其确实已登录。"""
+    from ..gateway.qqbot import list_qq_accounts
+
+    accounts = list_qq_accounts(str(get_navi_home()))
+    resolved = account_id.strip()
+    if resolved:
+        if resolved not in accounts:
+            known = "\n".join(f"- {a}" for a in accounts) if accounts else "（无，请先运行 `navi qq login`）"
+            print_error_message(f"账号 '{resolved}' 未登录。已登录的账号：\n{known}")
+            raise typer.Exit(code=1)
+        return resolved
+    if not accounts:
+        print_error_message("没有已登录的 QQ 账号。请先运行 `navi qq login`。")
+        raise typer.Exit(code=1)
+    if len(accounts) > 1:
+        print_error_message(
+            "存在多个 QQ 账号，请用 --account 指定：\n" + "\n".join(f"- {a}" for a in accounts)
+        )
+        raise typer.Exit(code=1)
+    return accounts[0]
+
+
+@qq_app.command("login")
+def qq_login(
+    timeout: Annotated[
+        int,
+        typer.Option("--timeout", help="Login timeout in seconds."),
+    ] = 600,
+):
+    """
+    Scan a QR code to connect a QQ bot. Credentials are saved under
+    ~/.navi/qq/accounts/.
+    """
+    load_navi_dotenv()
+    from ..gateway.qqbot import qr_login
+
+    creds = asyncio.run(qr_login(str(get_navi_home()), timeout_seconds=timeout))
+    if not creds:
+        print_error_message("QQ 登录失败或超时。")
+        raise typer.Exit(code=1)
+    console.print(f"[green]已连接 QQ 账号[/green] {creds['account_id']}")
+
+
+@qq_app.command("start")
+def qq_start(
+    account_id: Annotated[
+        str,
+        typer.Option("--account", "-a", help="Account id to run. Defaults to the only saved account."),
+    ] = "",
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Workspace directory for the bot's agent runtimes."),
+    ] = None,
+    approval: Annotated[
+        str,
+        typer.Option("--approval", help="Approval mode: strict, normal, or open."),
+    ] = "open",
+):
+    """
+    Start the QQ gateway. Each chat gets its own agent runtime.
+    """
+    load_navi_dotenv()
+    from ..gateway.qqbot import load_qq_allowlist
+    from ..gateway.qq import QqAdapter
+
+    navi_home = str(get_navi_home())
+    resolved_account = _resolve_qq_account(account_id)
+
+    approval_mode = resolve_approval_mode(approval, yolo=False)
+    bot_workspace = (workspace or (get_navi_home() / "qq" / "workspace")).resolve()
+    bot_workspace.mkdir(parents=True, exist_ok=True)
+
+    try:
+        adapter = QqAdapter(
+            resolved_account,
+            workspace=bot_workspace,
+            approval_mode=approval_mode,
+        )
+    except Exception as exc:
+        print_error_message(str(exc))
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"[bold]Account[/bold]: {resolved_account}\n"
+            f"[bold]Workspace[/bold]: {bot_workspace}\n"
+            f"[bold]Approval[/bold]: {approval_mode}\n"
+            f"[dim]Send !cancel in chat to interrupt the current task. Ctrl+C to stop.[/dim]",
+            title="Navi QQ gateway",
+            border_style="green",
+        )
+    )
+
+    if not load_qq_allowlist(navi_home, resolved_account):
+        console.print(
+            "[yellow]⚠️ 访问白名单为空：所有用户消息都会被拒绝（fail-closed）。[/yellow]\n"
+            "[dim]让目标用户给 bot 发一条消息以获取其 ID，再执行 "
+            f"`navi qq allow <user_id> --account {resolved_account}` 授权。[/dim]"
+        )
+
+    try:
+        asyncio.run(adapter.run())
+    except KeyboardInterrupt:
+        console.print("\n[dim]gateway stopped.[/dim]")
+
+
+@qq_app.command("allow")
+def qq_allow(
+    user_id: Annotated[str, typer.Argument(help="要授权的 QQ 用户 openid")],
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """将某个 QQ 用户加入访问白名单。"""
+    from ..gateway.qqbot import add_to_qq_allowlist
+
+    resolved = _resolve_qq_account(account_id)
+    if add_to_qq_allowlist(str(get_navi_home()), resolved, user_id):
+        console.print(f"[green]已授权[/green] {user_id}  →  {resolved}")
+    else:
+        console.print(f"[yellow]{user_id} 已在白名单中。[/yellow]")
+
+
+@qq_app.command("deny")
+def qq_deny(
+    user_id: Annotated[str, typer.Argument(help="要移出白名单的 QQ 用户 openid")],
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """将某个 QQ 用户移出访问白名单。"""
+    from ..gateway.qqbot import remove_from_qq_allowlist
+
+    resolved = _resolve_qq_account(account_id)
+    if remove_from_qq_allowlist(str(get_navi_home()), resolved, user_id):
+        console.print(f"[green]已移除[/green] {user_id}")
+    else:
+        console.print(f"[yellow]{user_id} 不在白名单中。[/yellow]")
+
+
+@qq_app.command("allowlist")
+def qq_allowlist(
+    account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+):
+    """列出某账号当前的访问白名单。"""
+    from ..gateway.qqbot import load_qq_allowlist
+
+    resolved = _resolve_qq_account(account_id)
+    users = load_qq_allowlist(str(get_navi_home()), resolved)
     if not users:
         console.print(f"[yellow]{resolved} 的白名单为空（所有消息都会被拒绝）。[/yellow]")
         return

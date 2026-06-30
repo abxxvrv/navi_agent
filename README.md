@@ -257,6 +257,27 @@ navi weixin allowlist --account <account_id>
 
 微信网关支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。较长任务执行期间，网关会使用 iLink typing ticket 周期性发送“正在输入中”状态。
 
+## QQ 网关
+
+Navi 也可以通过 QQ 官方机器人开放平台接入 QQ，体验与配置和微信网关一致，区别仅在于接入方式（WebSocket 网关 + REST API）：
+
+```powershell
+navi qq login
+navi qq start --account <account_id>
+```
+
+`navi qq login` 通过手机 QQ 扫码完成配置：扫码后服务端会把 AppID 与（本地解密的）AppSecret 保存到 `~/.navi/qq/accounts/`，扫码用户自动加入白名单。
+
+访问控制同样默认 fail-closed，用法与微信一致：
+
+```powershell
+navi qq allow <user_id> --account <account_id>
+navi qq deny <user_id> --account <account_id>
+navi qq allowlist --account <account_id>
+```
+
+QQ 网关处理私聊（C2C）消息，支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。
+
 ## MCP
 
 交互式 CLI 内置 `/mcp` 命令，用于管理 MCP server：
@@ -303,7 +324,9 @@ navi_agent/
 │   └── compressor.py        # 上下文压缩
 ├── gateway/
 │   ├── ilink.py             # iLink 协议 helper
-│   └── weixin.py            # 微信网关 adapter
+│   ├── weixin.py            # 微信网关 adapter
+│   ├── qqbot.py             # QQ 协议 helper
+│   └── qq.py                # QQ 网关 adapter
 ├── integrations/
 │   ├── mcp_client.py
 │   └── mcp_commands.py
