@@ -14,7 +14,7 @@
 当用户询问会话历史、之前的对话内容时，按以下两步操作（不要直接读写 {{ NAVI_HOME }}/history.sqlite3 数据库文件）：
 
 1. 用 `search_session` 定位会话：传 `query` 关键词做全文检索，返回命中的消息及其上下文；不传 `query` 则浏览最近会话列表。
-2. 拿到目标会话的 `session_id` 后，用 `read_session` 读取该会话的消息全文；内容较多时翻页继续读——把上一次返回的 `last_message_id` 作为下一次的 `start_message_id`。
+2. 拿到目标会话的 `session_id` 后，用 `read_session` 读取该会话的消息（已排除系统提示词；assistant 的工具调用以 `tool_calls` 体现，所以只调工具、无文本的回合也能看出做了什么）。内容较多时翻页继续读——把上一次返回的 `last_message_id` 作为下一次的 `start_message_id`。`max_chars_per_message` 是单段文本上限，**同时作用于消息正文、`tool_calls` 的参数和工具结果**；想看某条（如某次完整命令输出、文件内容、工具参数）的全文，就把游标对准它前一条、`limit=1` 并调大 `max_chars_per_message`。
 
 工具调用结果会以工具消息的形式返回给你。你必须根据工具调用结果决定下一步行动，可能包括以下几种情况：1. 继续完成任务；2. 告知用户任务已完成或失败；3. 向用户询问更多信息。
 

@@ -1724,6 +1724,8 @@ class ReadSessionTool:
     """读取指定会话的消息内容，类似 read_file 之于文件。
 
     用于查看历史会话的详细内容——search_session 定位到目标会话后，用本工具读取消息全文。
+    排除 system；assistant 的工具调用从 raw_json 提取为 tool_calls（丢弃 reasoning_content）。
+    content / args / tool 结果各自按 max_chars_per_message 截断。
     游标式翻页：传上次的 last_message_id 作为下次的 start_message_id。
     """
 
@@ -1731,8 +1733,12 @@ class ReadSessionTool:
     description = (
         "读取某个历史会话的消息原文（相当于对会话用 read_file）。"
         "先用 search_session 定位目标会话、拿到它的 session_id，再用本工具读取内容。"
+        "返回 user/assistant/tool 消息（系统提示词已排除）；assistant 的工具调用以 "
+        "tool_calls=[{name,args}] 体现，所以只调工具、无文本的回合也能看出做了什么。"
         "session_id 必填；不传 start_message_id 时从第一条开始读，内容多时翻页——"
         "把返回的 last_message_id 作为下次的 start_message_id 继续往后读，直到 has_more 为 false。"
+        "想看某条消息（如某次完整命令输出、文件内容、工具参数）的全文：把游标对准它前一条、"
+        "limit=1、并调大 max_chars_per_message。"
     )
     parameters = {
         "type": "object",
@@ -1761,7 +1767,8 @@ class ReadSessionTool:
             },
             "max_chars_per_message": {
                 "type": "integer",
-                "description": "单条消息字符上限，超过则截断并在该条 truncated=true。默认 2000，范围 100-10000。",
+                "description": "单段文本字符上限，超过则截断并在该条 truncated=true。同时作用于消息 content、"
+                               "每个 tool_call 的 args、以及 tool 结果——它们各自不超过此上限。默认 2000，范围 100-10000。",
                 "default": 2000,
                 "minimum": 100,
                 "maximum": 10000,
@@ -1808,22 +1815,22 @@ class ReadSessionTool:
                 if a_root and c_root and a_root == c_root:
                     return {"ok": False, "error": "该会话在当前 lineage 内，内容已在上下文中。"}
 
-            # 查询消息：多取 1 条用于判断 has_more
+            # 查询消息：排除 system，多取 1 条用于判断 has_more
             with store._connect() as conn:
                 if start_message_id is not None:
                     rows = conn.execute(
-                        """SELECT id, role, content_text
+                        """SELECT id, role, content_text, raw_json
                            FROM messages
-                           WHERE session_id = ? AND id > ?
+                           WHERE session_id = ? AND id > ? AND role != 'system'
                            ORDER BY id ASC
                            LIMIT ?""",
                         (session_id, start_message_id, limit + 1),
                     ).fetchall()
                 else:
                     rows = conn.execute(
-                        """SELECT id, role, content_text
+                        """SELECT id, role, content_text, raw_json
                            FROM messages
-                           WHERE session_id = ?
+                           WHERE session_id = ? AND role != 'system'
                            ORDER BY id ASC
                            LIMIT ?""",
                         (session_id, limit + 1),
@@ -1841,34 +1848,48 @@ class ReadSessionTool:
             has_more = len(rows) > limit
             rows = rows[:limit]
 
-            # 双层字符截断：单条上限 + 总字符上限
+            def _truncate(text: str) -> tuple[str, bool]:
+                """单段文本按 max_chars_per_message 截断。"""
+                if len(text) > max_chars_per_message:
+                    return text[:max_chars_per_message] + f"\n...[truncated, 原文 {len(text)} 字符]", True
+                return text, False
+
+            def _shape(r) -> tuple[dict, int]:
+                """整形一条消息，返回 (entry, 计入总预算的字符数)。
+
+                content、每个 tool_call 的 args、tool 结果各自按 max_chars_per_message
+                截断；assistant 的工具调用从 raw_json 提取，丢弃 reasoning_content。
+                """
+                content, truncated = _truncate(r["content_text"] or "")
+                entry: dict[str, Any] = {"id": r["id"], "role": r["role"], "content": content}
+                size = len(content)
+                if r["role"] == "assistant" and r["raw_json"]:
+                    try:
+                        tcs = (json.loads(r["raw_json"]).get("tool_calls")) or []
+                    except Exception:
+                        tcs = []
+                    calls = []
+                    for tc in tcs:
+                        fn = tc.get("function") or {}
+                        args, t = _truncate(fn.get("arguments") or "")
+                        truncated = truncated or t
+                        calls.append({"name": fn.get("name"), "args": args})
+                        size += len(args)
+                    if calls:
+                        entry["tool_calls"] = calls
+                entry["truncated"] = truncated
+                return entry, size
+
+            # 逐条整形 + 总字符截断：超预算且本页已有内容则留到下一页（不半截追加）。
             current_chars = 0
             messages: list[dict[str, Any]] = []
             for r in rows:
-                content = r["content_text"] or ""
-                single_truncated = False
-
-                # 第 1 层：单条截断
-                if len(content) > max_chars_per_message:
-                    original_len = len(content)
-                    content = content[:max_chars_per_message] + f"\n...[truncated, 原文 {original_len} 字符]"
-                    single_truncated = True
-
-                # 第 2 层：总字符截断。超预算且本页已有内容 → 不追加这条，
-                # 留到下一页完整重读（游标停在上一条，不会丢内容）。
-                # 若它是本页第一条，则照常追加（已被第 1 层限制在 max_chars_per_message
-                # 内），保证超长消息不会因预算太小而永远读不到。
-                if current_chars + len(content) > max_chars and messages:
+                entry, size = _shape(r)
+                if current_chars + size > max_chars and messages:
                     has_more = True
                     break
-
-                messages.append({
-                    "id": r["id"],
-                    "role": r["role"],
-                    "content": content,
-                    "truncated": single_truncated,
-                })
-                current_chars += len(content)
+                messages.append(entry)
+                current_chars += size
 
             result: dict[str, Any] = {
                 "ok": True,
