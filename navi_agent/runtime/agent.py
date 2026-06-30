@@ -41,6 +41,7 @@ from ..tools.builtin import (
     VisionAnalyzeTool,
     WriteFileTool,
     SearchSessionTool,
+    ReadSessionTool,
     resolve_path,
 )
 from ..tools.registry import ToolRegistry
@@ -1790,9 +1791,24 @@ class AgentRuntime:
         # search_session
         self.tool_registry.register(
             name="search_session",
-            description="搜索历史会话消息。支持关键词、短语、布尔查询（AND/OR/NOT）。返回匹配消息的摘要和上下文。",
+            description=(
+                "搜索或浏览历史会话。传 query 关键词 → 全文检索匹配消息（DISCOVERY，返回命中片段和上下文）；"
+                "不传 query → 列出最近会话（BROWSE，带每会话最近 3 条消息摘要）。"
+                "查看具体会话的消息全文请用 read_session 工具。"
+            ),
             parameters=SearchSessionTool.parameters,
             function=SearchSessionTool(
+                navi_home=self.navi_home,
+                current_session_id=self.session_store.session_id,
+            ),
+        )
+
+        # read_session
+        self.tool_registry.register(
+            name="read_session",
+            description=ReadSessionTool.description,
+            parameters=ReadSessionTool.parameters,
+            function=ReadSessionTool(
                 navi_home=self.navi_home,
                 current_session_id=self.session_store.session_id,
             ),

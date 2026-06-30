@@ -64,9 +64,9 @@ class BackgroundReviewer:
         try:
             # 选工具
             if review_type == "memory":
-                tool_names = ["memory", "read_file", "search_session"]
+                tool_names = ["memory", "read_file", "search_session", "read_session"]
             else:
-                tool_names = ["skill_manage", "read_file", "search_session"]
+                tool_names = ["skill_manage", "read_file", "search_session", "read_session"]
 
             agent = prepare_agent(
                 router=self.router,

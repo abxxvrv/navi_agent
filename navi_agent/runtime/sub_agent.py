@@ -26,6 +26,7 @@ EXPLORE_TOOLS = (
     "web_extract",
     "vision_analyze",
     "search_session",
+    "read_session",
 )
 
 

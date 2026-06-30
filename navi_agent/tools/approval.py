@@ -114,6 +114,7 @@ class ApprovalManager:
         "vision_analyze",
         "attach_file",
         "search_session",
+        "read_session",
         "agent",
     }
 

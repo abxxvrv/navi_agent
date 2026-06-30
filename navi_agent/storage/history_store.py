@@ -961,7 +961,7 @@ class HistoryStore:
         # 格式化 bookend 消息
         def _fmt_bookend(row: dict) -> dict:
             content = row.get("content_text") or ""
-            return {"id": row["id"], "role": row["role"], "content": content[:200]}
+            return {"id": row["id"], "role": row["role"], "content": content[:500]}
 
         return {
             "window": window_rows,
@@ -970,29 +970,3 @@ class HistoryStore:
             "bookend_start": [_fmt_bookend(r) for r in bookend_start_rows],
             "bookend_end": [_fmt_bookend(r) for r in bookend_end_rows],
         }
-
-    def list_sessions_rich(
-        self,
-        limit: int = 20,
-        order_by_last_active: bool = True,
-    ) -> list[dict[str, Any]]:
-        """列出最近会话，带 preview（第一条 user 消息的前 60 字符）。
-
-        排除有 parent_session_id 的子会话（压缩产生的子会话）。
-        """
-        order_col = "s.updated_at" if order_by_last_active else "s.created_at"
-        with self._connect() as conn:
-            rows = conn.execute(
-                f"""SELECT s.session_id, s.title, s.created_at, s.updated_at,
-                           s.message_count, s.model, s.parent_session_id,
-                           (SELECT substr(m.content_text, 1, 60)
-                            FROM messages m
-                            WHERE m.session_id = s.session_id AND m.role = 'user'
-                            ORDER BY m.seq ASC LIMIT 1) AS preview
-                    FROM sessions s
-                    WHERE s.parent_session_id IS NULL
-                    ORDER BY {order_col} DESC
-                    LIMIT ?""",
-                (limit,),
-            ).fetchall()
-            return [dict(r) for r in rows]

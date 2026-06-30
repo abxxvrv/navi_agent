@@ -1493,37 +1493,26 @@ class VisionAnalyzeTool:
 
 
 class SearchSessionTool:
-    """会话搜索工具，三种模式（和 Hermes 一致）。
+    """会话搜索工具，两种模式（和 Hermes 三模式一致，但 SCROLL 由 read_session 工具接管）。
 
     1. DISCOVERY: query → FTS5 搜索 + lineage 去重 + bookends
-    2. SCROLL: session_id + around_message_id → 纯消息窗口
-    3. BROWSE: 无参数 → 最近会话列表
+    2. BROWSE: 无参数 → 最近会话列表（带 recent_messages 摘要）
+
+    查看具体会话内容请用 read_session 工具（类似 read_file）。
     """
 
     name = "search_session"
     description = (
-        "搜索历史会话消息。支持关键词、短语、布尔查询（AND/OR/NOT）。"
-        "返回匹配消息的摘要和上下文。"
+        "搜索或浏览历史会话。传 query 关键词 → 全文检索匹配消息（DISCOVERY）；"
+        "不传 query → 列出最近会话（BROWSE）。"
+        "查看具体会话的消息全文请用 read_session 工具。"
     )
     parameters = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "搜索关键词。支持 FTS5 语法：简单关键词、短语（用引号）、布尔（AND/OR/NOT）、前缀（*）。"
-            },
-            "session_id": {
-                "type": "string",
-                "description": "会话 ID，配合 around_message_id 使用，进入 SCROLL 模式。"
-            },
-            "around_message_id": {
-                "type": "integer",
-                "description": "锚定消息 ID，配合 session_id 使用。"
-            },
-            "window": {
-                "type": "integer",
-                "description": "消息窗口大小（默认 5）",
-                "default": 5
+                "description": "搜索关键词。支持 FTS5 语法：简单关键词、短语（用引号）、布尔（AND/OR/NOT）、前缀（*）。不传则进入 BROWSE 模式。"
             },
             "limit": {
                 "type": "integer",
@@ -1545,9 +1534,6 @@ class SearchSessionTool:
     def __call__(
         self,
         query: str = "",
-        session_id: str = None,
-        around_message_id: int = None,
-        window: int = 5,
         limit: int = 3,
         sort: str = None,
     ) -> dict[str, Any]:
@@ -1559,10 +1545,6 @@ class SearchSessionTool:
                 return {"ok": True, "count": 0, "results": [], "message": "没有历史会话。"}
 
             store = HistoryStore.for_querying(db_path)
-
-            # SCROLL 模式：session_id + around_message_id
-            if session_id and around_message_id is not None:
-                return self._scroll(store, session_id, int(around_message_id), window)
 
             # DISCOVERY 模式：query
             if query and query.strip():
@@ -1589,40 +1571,6 @@ class SearchSessionTool:
             cur = parent
         return cur
 
-    def _scroll(self, store, session_id: str, around_message_id: int, window: int) -> dict:
-        """SCROLL 模式：返回锚定消息 ± window 条上下文。"""
-        window = max(1, min(window, 20))
-
-        # 拒绝在当前活跃 session lineage 内滚动
-        if self.current_session_id:
-            a_root = self._resolve_to_root(store, session_id)
-            c_root = self._resolve_to_root(store, self.current_session_id)
-            if a_root and c_root and a_root == c_root:
-                return {"ok": False, "error": "锚点在当前会话 lineage 内，已在上下文中。"}
-
-        view = store.get_messages_around(session_id, around_message_id, window=window)
-        messages = view.get("window") or []
-
-        if not messages:
-            return {"ok": False, "error": f"消息 {around_message_id} 不在会话 {session_id} 中。"}
-
-        session_meta = store.get_session(session_id) or {}
-
-        return {
-            "ok": True,
-            "mode": "scroll",
-            "session_id": session_id,
-            "around_message_id": around_message_id,
-            "session_meta": {
-                "title": session_meta.get("title"),
-                "model": session_meta.get("model"),
-                "created_at": session_meta.get("created_at"),
-            },
-            "messages": [_shape_msg(m, anchor_id=around_message_id) for m in messages],
-            "messages_before": view.get("messages_before", 0),
-            "messages_after": view.get("messages_after", 0),
-        }
-
     def _discover(self, store, query: str, limit: int, sort: str) -> dict:
         """DISCOVERY 模式：FTS5 搜索 + lineage 去重 + bookends。"""
         limit = max(1, min(limit, 10))
@@ -1634,7 +1582,7 @@ class SearchSessionTool:
         )
 
         if not raw_results:
-            return {"ok": True, "mode": "discover", "query": query, "results": [], "count": 0}
+            return {"ok": True, "query": query, "results": [], "count": 0}
 
         current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
 
@@ -1668,18 +1616,12 @@ class SearchSessionTool:
             except Exception:
                 continue
 
-            session_meta = store.get_session(lineage_root) or {}
-
             entry = {
                 "session_id": hit_sid,
-                "title": session_meta.get("title"),
-                "model": session_meta.get("model") or "unknown",
-                "created_at": session_meta.get("created_at"),
                 "matched_role": match_info.get("role"),
                 "match_message_id": msg_id,
-                "snippet": match_info.get("snippet") or "",
                 "bookend_start": view.get("bookend_start") or [],
-                "messages": [_shape_msg(m, anchor_id=msg_id) for m in (view.get("window") or [])],
+                "messages": [_shape_msg(m) for m in (view.get("window") or [])],
                 "bookend_end": view.get("bookend_end") or [],
                 "messages_before": view.get("messages_before", 0),
                 "messages_after": view.get("messages_after", 0),
@@ -1690,55 +1632,278 @@ class SearchSessionTool:
 
         return {
             "ok": True,
-            "mode": "discover",
             "query": query,
             "results": results,
             "count": len(results),
         }
 
     def _browse(self, store, limit: int) -> dict:
-        """BROWSE 模式：返回最近会话列表。"""
+        """BROWSE 模式：返回最近会话列表（按 updated_at 倒序，排除当前会话 lineage）。
+
+        每个会话带 recent_messages：最新 3 条 user/assistant 消息（每条前 300 字符，旧→新）。
+        """
         limit = max(1, min(limit, 20))
 
         current_root = self._resolve_to_root(store, self.current_session_id) if self.current_session_id else None
 
-        sessions = store.list_sessions_rich(limit=limit + 5, order_by_last_active=True)
+        # 多取 5 条作为过滤当前会话 lineage 的缓冲：当前会话的 root 可能落在结果前部，
+        # 过滤后需要补位。+5 是保守值（实际最多过滤 1 条，因为 list 已排除子会话）。
+        fetch_n = limit + 5
+
+        with store._connect() as conn:
+            rows = conn.execute(
+                """SELECT session_id, created_at, updated_at, message_count
+                   FROM sessions
+                   WHERE parent_session_id IS NULL
+                   ORDER BY updated_at DESC
+                   LIMIT ?""",
+                (fetch_n,),
+            ).fetchall()
+
+            sessions = [dict(r) for r in rows]
+            if not sessions:
+                return {"ok": True, "results": []}
+
+            # 批量取这些 session 的最新 3 条 user/assistant 消息（2 次查询，避免 N+1）
+            sids = [s["session_id"] for s in sessions]
+            placeholders = ",".join("?" * len(sids))
+            msg_rows = conn.execute(
+                f"""SELECT session_id, id, seq, role, content_text
+                    FROM messages
+                    WHERE session_id IN ({placeholders})
+                      AND role IN ('user', 'assistant')
+                    ORDER BY session_id, seq DESC""",
+                sids,
+            ).fetchall()
+
+        # 按 session_id 分组，每组取最新 3 条（seq DESC 取前 3），再反转成旧→新
+        by_session: dict[str, list[dict]] = {}
+        for r in msg_rows:
+            sid = r["session_id"]
+            if sid not in by_session:
+                by_session[sid] = []
+            by_session[sid].append({
+                "id": r["id"],
+                "role": r["role"],
+                "content": (r["content_text"] or "")[:300],
+            })
 
         results = []
         for s in sessions:
             sid = s.get("session_id", "")
-            # 跳过当前 session
+            # 跳过当前 session lineage
             if current_root and sid == current_root:
                 continue
             if self.current_session_id and sid == self.current_session_id:
                 continue
+            recent = by_session.get(sid, [])[:3]
+            recent.reverse()  # 旧→新
             results.append({
                 "session_id": sid,
-                "title": s.get("title"),
-                "model": s.get("model"),
                 "created_at": s.get("created_at"),
                 "updated_at": s.get("updated_at"),
                 "message_count": s.get("message_count", 0),
-                "preview": s.get("preview") or "",
+                "recent_messages": recent,
             })
             if len(results) >= limit:
                 break
 
         return {
             "ok": True,
-            "mode": "browse",
             "results": results,
-            "count": len(results),
         }
 
 
-def _shape_msg(m: dict, anchor_id: int = None) -> dict:
+class ReadSessionTool:
+    """读取指定会话的消息内容，类似 read_file 之于文件。
+
+    用于查看历史会话的详细内容——BROWSE/DISCOVERY 给出 session_id 和 message id 后，
+    用本工具读取消息全文。游标式翻页：传上次的 last_message_id 作为下次的 start_message_id。
+    """
+
+    name = "read_session"
+    description = (
+        "读取指定会话的消息内容。类似 read_file 之于文件，但作用于会话历史。"
+        "用于查看历史会话的详细对话内容。BROWSE/DISCOVERY 给出 session_id 和 message id 后，"
+        "用本工具读取消息全文。支持翻页：把返回的 last_message_id 作为下次调用的 start_message_id 即可继续往后读。"
+    )
+    parameters = {
+        "type": "object",
+        "properties": {
+            "session_id": {
+                "type": "string",
+                "description": "目标会话 ID。",
+            },
+            "start_message_id": {
+                "type": "integer",
+                "description": "游标：从该消息 ID 之后开始读取（不含该条本身）。不传或 None = 从会话第一条消息开始读。",
+            },
+            "limit": {
+                "type": "integer",
+                "description": "读取的消息条数（不含 start_message_id 本身）。默认 10，范围 1-50。",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 50,
+            },
+            "max_chars": {
+                "type": "integer",
+                "description": "返回内容的总字符上限。默认 20000，范围 1000-100000。",
+                "default": 20000,
+                "minimum": 1000,
+                "maximum": 100000,
+            },
+            "max_chars_per_message": {
+                "type": "integer",
+                "description": "单条消息字符上限，超过则截断并在该条 truncated=true。默认 2000，范围 100-10000。",
+                "default": 2000,
+                "minimum": 100,
+                "maximum": 10000,
+            },
+        },
+        "required": ["session_id"],
+    }
+
+    def __init__(self, navi_home: Path, current_session_id: str = None):
+        self.navi_home = navi_home
+        self.current_session_id = current_session_id
+
+    def _resolve_to_root(self, store, session_id: str) -> str:
+        """沿 parent_session_id 链找到根 session。"""
+        visited = set()
+        cur = session_id
+        while cur and cur not in visited:
+            visited.add(cur)
+            meta = store.get_session(cur)
+            if not meta:
+                break
+            parent = meta.get("parent_session_id")
+            if not parent:
+                break
+            cur = parent
+        return cur
+
+    def __call__(
+        self,
+        session_id: str,
+        start_message_id: int = None,
+        limit: int = 10,
+        max_chars: int = 20000,
+        max_chars_per_message: int = 2000,
+    ) -> dict[str, Any]:
+        try:
+            from ..storage.history_store import HistoryStore
+
+            db_path = self.navi_home / "history.sqlite3"
+            if not db_path.is_file():
+                return {"ok": False, "error": "没有历史会话数据库。"}
+
+            # 参数 clamp
+            limit = max(1, min(limit, 50))
+            max_chars = max(1000, min(max_chars, 100000))
+            max_chars_per_message = max(100, min(max_chars_per_message, 10000))
+
+            store = HistoryStore.for_querying(db_path)
+
+            # 校验 session 存在
+            session_meta = store.get_session(session_id)
+            if not session_meta:
+                return {"ok": False, "error": f"会话 {session_id} 不存在。"}
+
+            # 拒绝在当前活跃 session lineage 内读取（内容已在上下文中）
+            if self.current_session_id:
+                a_root = self._resolve_to_root(store, session_id)
+                c_root = self._resolve_to_root(store, self.current_session_id)
+                if a_root and c_root and a_root == c_root:
+                    return {"ok": False, "error": "该会话在当前 lineage 内，内容已在上下文中。"}
+
+            # 查询消息：多取 1 条用于判断 has_more
+            with store._connect() as conn:
+                if start_message_id is not None:
+                    rows = conn.execute(
+                        """SELECT id, role, content_text
+                           FROM messages
+                           WHERE session_id = ? AND id > ?
+                           ORDER BY id ASC
+                           LIMIT ?""",
+                        (session_id, start_message_id, limit + 1),
+                    ).fetchall()
+                else:
+                    rows = conn.execute(
+                        """SELECT id, role, content_text
+                           FROM messages
+                           WHERE session_id = ?
+                           ORDER BY id ASC
+                           LIMIT ?""",
+                        (session_id, limit + 1),
+                    ).fetchall()
+
+            if not rows:
+                return {
+                    "ok": True,
+                    "session_id": session_id,
+                    "has_more": False,
+                    "messages": [],
+                }
+
+            # has_more 判断：多取的那条说明还有后续
+            has_more = len(rows) > limit
+            rows = rows[:limit]
+
+            # 双层字符截断：单条上限 + 总字符上限
+            current_chars = 0
+            messages: list[dict[str, Any]] = []
+            for r in rows:
+                content = r["content_text"] or ""
+                single_truncated = False
+
+                # 第 1 层：单条截断
+                if len(content) > max_chars_per_message:
+                    original_len = len(content)
+                    content = content[:max_chars_per_message] + f"\n...[truncated, 原文 {original_len} 字符]"
+                    single_truncated = True
+
+                # 第 2 层：总字符截断
+                if current_chars + len(content) > max_chars:
+                    remaining = max_chars - current_chars
+                    if remaining > 0:
+                        content = content[:remaining] + "\n...[truncated by max_chars]"
+                        single_truncated = True
+                        messages.append({
+                            "id": r["id"],
+                            "role": r["role"],
+                            "content": content,
+                            "truncated": True,
+                        })
+                    has_more = True
+                    break
+
+                messages.append({
+                    "id": r["id"],
+                    "role": r["role"],
+                    "content": content,
+                    "truncated": single_truncated,
+                })
+                current_chars += len(content)
+
+            result: dict[str, Any] = {
+                "ok": True,
+                "session_id": session_id,
+                "has_more": has_more,
+                "messages": messages,
+            }
+            if messages and has_more:
+                result["last_message_id"] = messages[-1]["id"]
+
+            return result
+
+        except Exception as e:
+            return {"ok": False, "error": f"读取失败: {str(e)}"}
+
+
+def _shape_msg(m: dict) -> dict:
     """精简消息用于返回。"""
-    entry = {
+    return {
         "id": m.get("id"),
         "role": m.get("role"),
         "content": (m.get("content") or "")[:500],
     }
-    if anchor_id is not None and m.get("id") == anchor_id:
-        entry["anchor"] = True
-    return entry
