@@ -38,3 +38,4 @@ tests/test_output/
 
 # Claude 配置
 .claude/
+.workbuddy/
