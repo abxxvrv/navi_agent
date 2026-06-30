@@ -1509,7 +1509,7 @@ def _resolve_to_root(store, session_id: str) -> str:
 
 
 class SearchSessionTool:
-    """会话搜索工具，两种模式（和 Hermes 三模式一致，但 SCROLL 由 read_session 工具接管）。
+    """会话搜索工具，两种模式：
 
     1. DISCOVERY: query → FTS5 搜索 + lineage 去重 + bookends
     2. BROWSE: 无参数 → 最近会话列表（带 recent_messages 摘要）
@@ -1519,20 +1519,21 @@ class SearchSessionTool:
 
     name = "search_session"
     description = (
-        "搜索或浏览历史会话。传 query 关键词 → 全文检索匹配消息（DISCOVERY）；"
-        "不传 query → 列出最近会话（BROWSE）。"
-        "查看具体会话的消息全文请用 read_session 工具。"
+        "在历史会话中查找或浏览。传 query 时，在所有历史会话中全文检索并返回命中消息及"
+        "上下文片段（query 支持 FTS5 语法：关键词、引号短语、AND/OR/NOT、前缀 *）；"
+        "不传 query 时，列出最近会话，每个会话附最近 3 条消息摘要供浏览。"
+        "找到目标会话后，用 read_session 读取其完整消息内容。"
     )
     parameters = {
         "type": "object",
         "properties": {
             "query": {
                 "type": "string",
-                "description": "搜索关键词。支持 FTS5 语法：简单关键词、短语（用引号）、布尔（AND/OR/NOT）、前缀（*）。不传则进入 BROWSE 模式。"
+                "description": "搜索关键词。支持 FTS5 语法：简单关键词、短语（用引号）、布尔（AND/OR/NOT）、前缀（*）。不传则改为浏览最近会话。"
             },
             "limit": {
                 "type": "integer",
-                "description": "返回结果数（默认 3）",
+                "description": "返回结果数，默认 3，最多 10。",
                 "default": 3
             },
             "sort": {
@@ -1560,6 +1561,7 @@ class SearchSessionTool:
             if not db_path.is_file():
                 return {"ok": True, "count": 0, "results": [], "message": "没有历史会话。"}
 
+            limit = max(1, min(limit, 10))
             store = HistoryStore.for_querying(db_path)
 
             # DISCOVERY 模式：query
@@ -1574,8 +1576,6 @@ class SearchSessionTool:
 
     def _discover(self, store, query: str, limit: int, sort: str) -> dict:
         """DISCOVERY 模式：FTS5 搜索 + lineage 去重 + bookends。"""
-        limit = max(1, min(limit, 10))
-
         raw_results = store.search_messages(
             query=query,
             limit=50,
@@ -1643,8 +1643,6 @@ class SearchSessionTool:
 
         每个会话带 recent_messages：最新 3 条 user/assistant 消息（每条前 300 字符，旧→新）。
         """
-        limit = max(1, min(limit, 20))
-
         current_root = _resolve_to_root(store, self.current_session_id) if self.current_session_id else None
 
         # 多取 5 条作为过滤当前会话 lineage 的缓冲：当前会话的 root 可能落在结果前部，
@@ -1725,15 +1723,16 @@ class SearchSessionTool:
 class ReadSessionTool:
     """读取指定会话的消息内容，类似 read_file 之于文件。
 
-    用于查看历史会话的详细内容——BROWSE/DISCOVERY 给出 session_id 和 message id 后，
-    用本工具读取消息全文。游标式翻页：传上次的 last_message_id 作为下次的 start_message_id。
+    用于查看历史会话的详细内容——search_session 定位到目标会话后，用本工具读取消息全文。
+    游标式翻页：传上次的 last_message_id 作为下次的 start_message_id。
     """
 
     name = "read_session"
     description = (
-        "读取指定会话的消息内容。类似 read_file 之于文件，但作用于会话历史。"
-        "用于查看历史会话的详细对话内容。BROWSE/DISCOVERY 给出 session_id 和 message id 后，"
-        "用本工具读取消息全文。支持翻页：把返回的 last_message_id 作为下次调用的 start_message_id 即可继续往后读。"
+        "读取某个历史会话的消息原文（相当于对会话用 read_file）。"
+        "先用 search_session 定位目标会话、拿到它的 session_id，再用本工具读取内容。"
+        "session_id 必填；不传 start_message_id 时从第一条开始读，内容多时翻页——"
+        "把返回的 last_message_id 作为下次的 start_message_id 继续往后读，直到 has_more 为 false。"
     )
     parameters = {
         "type": "object",

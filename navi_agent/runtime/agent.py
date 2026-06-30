@@ -1791,11 +1791,7 @@ class AgentRuntime:
         # search_session
         self.tool_registry.register(
             name="search_session",
-            description=(
-                "搜索或浏览历史会话。传 query 关键词 → 全文检索匹配消息（DISCOVERY，返回命中片段和上下文）；"
-                "不传 query → 列出最近会话（BROWSE，带每会话最近 3 条消息摘要）。"
-                "查看具体会话的消息全文请用 read_session 工具。"
-            ),
+            description=SearchSessionTool.description,
             parameters=SearchSessionTool.parameters,
             function=SearchSessionTool(
                 navi_home=self.navi_home,
