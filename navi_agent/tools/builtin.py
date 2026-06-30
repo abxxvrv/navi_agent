@@ -1668,8 +1668,8 @@ class SearchSessionTool:
             sids = [s["session_id"] for s in sessions]
             placeholders = ",".join("?" * len(sids))
             msg_rows = conn.execute(
-                f"""SELECT session_id, id, role, content_text FROM (
-                        SELECT session_id, id, seq, role, content_text,
+                f"""SELECT session_id, id, role, content_text, raw_json FROM (
+                        SELECT session_id, id, seq, role, content_text, raw_json,
                                ROW_NUMBER() OVER (
                                    PARTITION BY session_id ORDER BY seq DESC
                                ) AS rn
@@ -1682,17 +1682,32 @@ class SearchSessionTool:
                 sids,
             ).fetchall()
 
-        # 按 session_id 分组，每组取最新 3 条（seq DESC 取前 3），再反转成旧→新
+        # 按 session_id 分组，每组取最新 3 条（seq DESC 取前 3），再反转成旧→新。
+        # assistant 的工具调用从 raw_json 提取成 tool_calls，使只调工具、无文本的回合
+        # 也能看出做了什么；content 与每个 args 各硬切到 300（概览，不加截断标记）。
         by_session: dict[str, list[dict]] = {}
         for r in msg_rows:
             sid = r["session_id"]
             if sid not in by_session:
                 by_session[sid] = []
-            by_session[sid].append({
+            entry = {
                 "id": r["id"],
                 "role": r["role"],
                 "content": (r["content_text"] or "")[:300],
-            })
+            }
+            if r["role"] == "assistant" and r["raw_json"]:
+                try:
+                    tcs = (json.loads(r["raw_json"]).get("tool_calls")) or []
+                except Exception:
+                    tcs = []
+                calls = [
+                    {"name": (tc.get("function") or {}).get("name"),
+                     "args": ((tc.get("function") or {}).get("arguments") or "")[:300]}
+                    for tc in tcs
+                ]
+                if calls:
+                    entry["tool_calls"] = calls
+            by_session[sid].append(entry)
 
         results = []
         for s in sessions:
