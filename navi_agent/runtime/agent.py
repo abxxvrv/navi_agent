@@ -530,6 +530,8 @@ class AgentRuntime:
                 raise
             # 6. graph 异常处理
             except Exception as exc:
+                if keep_history:
+                    self.conversation_history = self._valid_messages(self.session_store.messages)
                 return {
                     "ok": False,
                     "error": str(exc),
