@@ -356,7 +356,8 @@ class QqAdapter:
         return d
 
     def _safe_filename(self, name: str) -> str:
-        name = name.replace("/", "_").replace("\\", "_").replace("\x00", "")
+        # 去掉路径分隔符、Windows 非法字符和控制字符，保留中文等正常字符。
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
         name = re.sub(r"\.{2,}", ".", name)
         return name[:200] or "file"
 

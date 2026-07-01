@@ -273,8 +273,17 @@ async def _api_request(
         raw = await response.text()
         data = json.loads(raw) if raw else {}
         if response.status >= 400:
-            message = data.get("message", raw[:200]) if isinstance(data, dict) else raw[:200]
-            raise RuntimeError(f"QQ API {method} {path} HTTP {response.status}: {message}")
+            if isinstance(data, dict):
+                code = data.get("code")
+                message = data.get("message", raw[:200])
+            else:
+                code = None
+                message = raw[:200]
+            # 带上业务 code，供 chunked_upload 判断配额/可重试错误。
+            code_part = f"code={code} " if code is not None else ""
+            raise RuntimeError(
+                f"QQ API {method} {path} HTTP {response.status}: {code_part}{message}"
+            )
         return data if isinstance(data, dict) else {}
 
 
@@ -544,9 +553,11 @@ async def download_inbound_media(
         if hostname in {"metadata.google.internal", "metadata.goog"}:
             raise ValueError(f"Blocked metadata hostname: {hostname}")
 
-        # DNS 解析并检查所有返回的 IP
+        # DNS 解析并检查所有返回的 IP（异步解析，避免阻塞事件循环）
         try:
-            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+            addr_info = await asyncio.get_running_loop().getaddrinfo(
+                hostname, None, family=socket.AF_UNSPEC, type=socket.SOCK_STREAM
+            )
         except socket.gaierror:
             raise ValueError(f"DNS resolution failed: {hostname}")
 
