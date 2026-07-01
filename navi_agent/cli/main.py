@@ -1634,7 +1634,8 @@ def qq_start(
         console.print(
             "[yellow]⚠️ 访问白名单为空：所有用户消息都会被拒绝（fail-closed）。[/yellow]\n"
             "[dim]让目标用户给 bot 发一条消息以获取其 ID，再执行 "
-            f"`navi qq allow <user_id> --account {resolved_account}` 授权。[/dim]"
+            f"`navi qq allow <user_id> --account {resolved_account}` 授权。\n"
+            f"群聊需单独授权群：`navi qq allow <group_openid> --group --account {resolved_account}`。[/dim]"
         )
 
     try:
@@ -1645,29 +1646,33 @@ def qq_start(
 
 @qq_app.command("allow")
 def qq_allow(
-    user_id: Annotated[str, typer.Argument(help="要授权的 QQ 用户 openid")],
+    user_id: Annotated[str, typer.Argument(help="要授权的 QQ 用户 openid（--group 时为群 openid）")],
     account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+    group: Annotated[bool, typer.Option("--group", help="群维度授权（对群 openid 生效）")] = False,
 ):
-    """将某个 QQ 用户加入访问白名单。"""
+    """将某个 QQ 用户或群加入访问白名单。"""
     from ..gateway.qqbot import add_to_qq_allowlist
 
+    kind = "group" if group else "user"
     resolved = _resolve_qq_account(account_id)
-    if add_to_qq_allowlist(str(get_navi_home()), resolved, user_id):
-        console.print(f"[green]已授权[/green] {user_id}  →  {resolved}")
+    if add_to_qq_allowlist(str(get_navi_home()), resolved, user_id, kind):
+        console.print(f"[green]已授权[/green]{'（群）' if group else ''} {user_id}  →  {resolved}")
     else:
         console.print(f"[yellow]{user_id} 已在白名单中。[/yellow]")
 
 
 @qq_app.command("deny")
 def qq_deny(
-    user_id: Annotated[str, typer.Argument(help="要移出白名单的 QQ 用户 openid")],
+    user_id: Annotated[str, typer.Argument(help="要移出白名单的 QQ 用户 openid（--group 时为群 openid）")],
     account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+    group: Annotated[bool, typer.Option("--group", help="群维度授权（对群 openid 生效）")] = False,
 ):
-    """将某个 QQ 用户移出访问白名单。"""
+    """将某个 QQ 用户或群移出访问白名单。"""
     from ..gateway.qqbot import remove_from_qq_allowlist
 
+    kind = "group" if group else "user"
     resolved = _resolve_qq_account(account_id)
-    if remove_from_qq_allowlist(str(get_navi_home()), resolved, user_id):
+    if remove_from_qq_allowlist(str(get_navi_home()), resolved, user_id, kind):
         console.print(f"[green]已移除[/green] {user_id}")
     else:
         console.print(f"[yellow]{user_id} 不在白名单中。[/yellow]")
@@ -1676,16 +1681,19 @@ def qq_deny(
 @qq_app.command("allowlist")
 def qq_allowlist(
     account_id: Annotated[str, typer.Option("--account", "-a", help="账号 id，默认唯一账号")] = "",
+    group: Annotated[bool, typer.Option("--group", help="查看群白名单")] = False,
 ):
-    """列出某账号当前的访问白名单。"""
+    """列出某账号当前的访问白名单（用户或群）。"""
     from ..gateway.qqbot import load_qq_allowlist
 
+    kind = "group" if group else "user"
     resolved = _resolve_qq_account(account_id)
-    users = load_qq_allowlist(str(get_navi_home()), resolved)
+    users = load_qq_allowlist(str(get_navi_home()), resolved, kind)
+    label = "群白名单" if group else "白名单"
     if not users:
-        console.print(f"[yellow]{resolved} 的白名单为空（所有消息都会被拒绝）。[/yellow]")
+        console.print(f"[yellow]{resolved} 的{label}为空（所有消息都会被拒绝）。[/yellow]")
         return
-    console.print(f"[bold]{resolved} 白名单[/bold]")
+    console.print(f"[bold]{resolved} {label}[/bold]")
     for u in users:
         console.print(f"- {u}")
 

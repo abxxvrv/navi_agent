@@ -276,7 +276,17 @@ navi qq deny <user_id> --account <account_id>
 navi qq allowlist --account <account_id>
 ```
 
-QQ 网关处理私聊（C2C）消息，支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。
+QQ 网关同时处理私聊（C2C）和群聊（@机器人）消息，支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。
+
+群聊按群维度单独授权（同样 fail-closed，未授权的群会被静默忽略），加 `--group` 即可：
+
+```powershell
+navi qq allow <group_openid> --group --account <account_id>
+navi qq deny <group_openid> --group --account <account_id>
+navi qq allowlist --group --account <account_id>
+```
+
+其中 `<group_openid>` 是群里 @机器人后，网关日志中打印的 `chat=` 值（每个群一个独立会话）。
 
 ## MCP
 
