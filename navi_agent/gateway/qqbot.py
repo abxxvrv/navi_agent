@@ -332,42 +332,148 @@ async def send_c2c_typing(
     )
 
 
+# Threshold for chunked upload: files at or above this size bypass base64
+# and go through the three-step prepare / PUT / complete flow.
+_CHUNKED_UPLOAD_THRESHOLD = 10 * 1024 * 1024  # 10 MB
+
+
+def _is_url(source: str) -> bool:
+    """Return True if *source* looks like an HTTP(S) URL."""
+    parsed = urlparse(source)
+    return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+
+async def _cos_put(
+    session: "aiohttp.ClientSession",
+    url: str,
+    *,
+    data: bytes,
+    headers: Dict[str, str],
+) -> int:
+    """PUT *data* to a pre-signed COS URL and return the HTTP status code."""
+    async with session.put(url, data=data, headers=headers) as resp:
+        return resp.status
+
+
 async def send_media_file(
     session: "aiohttp.ClientSession",
     *,
     token: str,
     chat_type: str,
     target_id: str,
-    path: Path,
+    media_source: str,
     msg_id: Optional[str],
     msg_seq: int,
+    file_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Upload a local file and send it as a rich-media message (C2C or group).
+    """Upload a file (local path or URL) and send it as a rich-media message.
 
-    The media type is inferred from the file suffix; everything that is not an
-    image / video / audio is sent as a generic file.
+    Upload strategy:
+
+    - **HTTP(S) URLs** → single ``POST /files`` with ``url=...``.  The QQ
+      platform fetches the URL directly; zero bandwidth / memory on our side.
+    - **Local files < 10 MB** → inline base64 (the original behaviour).
+    - **Local files ≥ 10 MB** → three-step chunked upload
+      (``upload_prepare`` → PUT parts to COS → ``complete_upload``).
     """
+    # Import here to avoid a circular import at module load time.
+    from .chunked_upload import ChunkedUploader
+
     base = _target_base(chat_type, target_id)
-    file_type = _media_type_for(path)
-    upload_body: Dict[str, Any] = {
-        "file_type": file_type,
-        "file_data": base64.b64encode(path.read_bytes()).decode("ascii"),
-        "srv_send_msg": False,
-    }
-    if file_type == MEDIA_TYPE_FILE:
-        upload_body["file_name"] = path.name
-    upload = await _api_request(
-        session,
-        method="POST",
-        token=token,
-        path=f"{base}/files",
-        body=upload_body,
-        timeout_seconds=UPLOAD_TIMEOUT_SECONDS,
-    )
-    file_info = upload.get("file_info")
+
+    # ── Resolve file_type & name ────────────────────────────────────────
+    if _is_url(media_source):
+        # Infer file type from URL path suffix.
+        url_path = urlparse(media_source).path
+        file_type = _media_type_for(Path(url_path))
+        resolved_name = file_name or Path(url_path).name or "media"
+    else:
+        path = Path(media_source)
+        file_type = _media_type_for(path)
+        resolved_name = file_name or path.name
+
+    # ── Upload ──────────────────────────────────────────────────────────
+    if _is_url(media_source):
+        # URL passthrough — let QQ's server fetch it.
+        upload_body: Dict[str, Any] = {
+            "file_type": file_type,
+            "url": media_source,
+            "srv_send_msg": False,
+        }
+        if file_type == MEDIA_TYPE_FILE:
+            upload_body["file_name"] = resolved_name
+        upload = await _api_request(
+            session,
+            method="POST",
+            token=token,
+            path=f"{base}/files",
+            body=upload_body,
+            timeout_seconds=UPLOAD_TIMEOUT_SECONDS,
+        )
+    elif Path(media_source).stat().st_size >= _CHUNKED_UPLOAD_THRESHOLD:
+        # Large local file — chunked upload.
+        file_size = Path(media_source).stat().st_size
+
+        async def _adapter_api_request(method, path, *, body=None, timeout=None):
+            """Adapt Navi's _api_request to ChunkedUploader's expected signature."""
+            return await _api_request(
+                session,
+                method=method,
+                token=token,
+                path=path,
+                body=body,
+                timeout_seconds=timeout or UPLOAD_TIMEOUT_SECONDS,
+            )
+
+        async def _adapter_http_put(url, *, data=None, headers=None):
+            """Wrap aiohttp PUT for COS part uploads."""
+            status = await _cos_put(
+                session, url, data=data, headers=headers or {},
+            )
+            # Return a lightweight object with .status_code for compatibility.
+            class _Resp:
+                status_code = status
+                text = ""
+            return _Resp()
+
+        uploader = ChunkedUploader(
+            api_request=_adapter_api_request,
+            http_put=_adapter_http_put,
+            log_tag="Navi",
+        )
+        upload = await uploader.upload(
+            chat_type="c2c" if chat_type != "group" else "group",
+            target_id=target_id,
+            file_path=str(Path(media_source).resolve()),
+            file_type=file_type,
+            file_name=resolved_name,
+        )
+    else:
+        # Small local file — inline base64 (original path).
+        path = Path(media_source)
+        upload_body = {
+            "file_type": file_type,
+            "file_data": base64.b64encode(path.read_bytes()).decode("ascii"),
+            "srv_send_msg": False,
+        }
+        if file_type == MEDIA_TYPE_FILE:
+            upload_body["file_name"] = resolved_name
+        upload = await _api_request(
+            session,
+            method="POST",
+            token=token,
+            path=f"{base}/files",
+            body=upload_body,
+            timeout_seconds=UPLOAD_TIMEOUT_SECONDS,
+        )
+
+    file_info = upload.get("file_info") or (
+        upload.get("data", {}) or {}
+    ).get("file_info")
     if not file_info:
         raise RuntimeError(f"QQ file upload returned no file_info: {upload}")
 
+    # ── Send media message ──────────────────────────────────────────────
     body: Dict[str, Any] = {
         "msg_type": MSG_TYPE_MEDIA,
         "media": {"file_info": file_info},

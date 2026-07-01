@@ -574,7 +574,7 @@ class QqAdapter:
                 token=token,
                 chat_type=self._chat_type.get(chat_id, "c2c"),
                 target_id=chat_id,
-                path=path,
+                media_source=str(path),
                 msg_id=msg_id,
                 msg_seq=self._next_seq(chat_id),
             )
