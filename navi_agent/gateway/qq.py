@@ -72,6 +72,23 @@ except ImportError:  # pragma: no cover - dependency gate
 CANCEL_KEYWORD = "!cancel"
 
 
+def _looks_like_image(data: bytes) -> bool:
+    """Return True if data starts with a known image magic-byte sequence."""
+    if len(data) < 4:
+        return False
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:6] in {b"GIF87a", b"GIF89a"}:
+        return True
+    if data[:2] == b"BM":
+        return True
+    if data[:4] == b"RIFF" and len(data) >= 12 and data[8:12] == b"WEBP":
+        return True
+    return False
+
+
 class QqCloseError(Exception):
     """Raised when the gateway WebSocket is closed by the server."""
 
@@ -339,7 +356,7 @@ class QqAdapter:
         return d
 
     def _safe_filename(self, name: str) -> str:
-        name = re.sub(r"[^\w.\-]", "_", name)
+        name = name.replace("/", "_").replace("\\", "_").replace("\x00", "")
         name = re.sub(r"\.{2,}", ".", name)
         return name[:200] or "file"
 
@@ -353,6 +370,7 @@ class QqAdapter:
         """
         image_paths: List[Path] = []
         notes: List[str] = []
+        token = await self._ensure_token()
         for att in attachments:
             if not isinstance(att, dict):
                 continue
@@ -361,8 +379,20 @@ class QqAdapter:
                 continue
             content_type = str(att.get("content_type") or "").lower()
             raw_name = self._safe_filename(str(att.get("filename") or ""))
+
+            # 语音优先：如果平台已提供 asr_refer_text，直接使用，跳过下载
+            if content_type.startswith("audio") or content_type.startswith("voice") or raw_name.lower().endswith(
+                (".silk", ".amr", ".mp3", ".wav", ".ogg", ".m4a", ".aac", ".speex", ".flac")
+            ):
+                asr_text = str(att.get("asr_refer_text") or "").strip()
+                if asr_text:
+                    notes.append(f"[Voice] {asr_text}")
+                    continue
+
             try:
-                data = await download_inbound_media(self._session, url=url, timeout_seconds=60.0)
+                data = await download_inbound_media(
+                    self._session, url=url, timeout_seconds=60.0, token=token
+                )
             except Exception as exc:
                 logger.warning("qq: attachment download failed: %s", exc)
                 continue
@@ -370,6 +400,10 @@ class QqAdapter:
             if content_type.startswith("image") or raw_name.lower().endswith(
                 (".jpg", ".jpeg", ".png", ".gif", ".webp")
             ):
+                # 校验 magic bytes，拒绝非图片数据
+                if not _looks_like_image(data):
+                    logger.warning("qq: rejecting non-image attachment from %s", url[:80])
+                    continue
                 path = self._inbound_dir() / f"{uuid.uuid4().hex}.jpg"
                 path.write_bytes(data)
                 image_paths.append(path)

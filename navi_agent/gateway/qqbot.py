@@ -521,7 +521,11 @@ def _assert_qq_media_url(url: str) -> None:
 
 
 async def download_inbound_media(
-    session: "aiohttp.ClientSession", *, url: str, timeout_seconds: float = 60.0
+    session: "aiohttp.ClientSession",
+    *,
+    url: str,
+    timeout_seconds: float = 60.0,
+    token: Optional[str] = None,
 ) -> bytes:
     """Download an inbound attachment URL after validating its host."""
     if url.startswith("//"):
@@ -531,7 +535,8 @@ async def download_inbound_media(
     _assert_qq_media_url(url)
 
     async def _do() -> bytes:
-        async with session.get(url) as response:
+        headers = {"Authorization": f"QQBot {token}"} if token else {}
+        async with session.get(url, headers=headers) as response:
             response.raise_for_status()
             return await response.read()
 
