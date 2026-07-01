@@ -286,7 +286,7 @@ navi qq deny <group_openid> --group --account <account_id>
 navi qq allowlist --group --account <account_id>
 ```
 
-其中 `<group_openid>` 是群里 @机器人后，网关日志中打印的 `chat=` 值（每个群一个独立会话）。
+注意：QQ 的 `group_openid` **不是群号**，而是平台针对「每个机器人 + 每个群」生成的加密 id，无法从群号推导，只能从收到的群消息里获取。获取流程：先在群里 @一次机器人，未授权时网关**不会在群里回复**，但会在 `navi qq start` 的终端打印该群的 `group_openid`（含可直接复制的授权命令）；复制执行 `allow ... --group` 后，之后该群的消息即生效。私聊同理——未授权时机器人会私信告知用户自己的 openid。
 
 ## MCP
 

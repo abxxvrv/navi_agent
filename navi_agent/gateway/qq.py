@@ -407,9 +407,18 @@ class QqAdapter:
             sender_id = str(author.get("member_openid") or "").strip()
             if not chat_id:
                 return
-            # Group allowlist keys on the group openid; unauthorized groups are
-            # silently ignored (never post a rejection notice into a group).
+            # Group allowlist keys on the group openid. QQ openids are encrypted
+            # per-bot and can't be derived from a group number — the only way to
+            # learn a group's openid is to observe its message. So instead of a
+            # silent drop, log the openid (throttled) so it can be authorized;
+            # we never post a rejection notice into the group itself.
             if chat_id not in load_qq_allowlist(self._navi_home, self._account_id, "group"):
+                if not self._dedup.is_duplicate(f"unauth-group:{chat_id}"):
+                    logger.warning(
+                        "qq: 收到未授权群消息，group_openid=%s。如需启用，请执行 "
+                        "`navi qq allow %s --group --account %s`",
+                        chat_id, chat_id, self._account_id,
+                    )
                 return
         else:
             chat_id = str(author.get("user_openid") or "").strip()
