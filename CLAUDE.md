@@ -37,7 +37,7 @@ cli.py  →  runtime.py  →  context_manager.py  (system prompt, AGENTS.md, ski
 | Path | Content |
 |------|---------|
 | `~/.navi/skills/` | Skills (`<name>/SKILL.md`) |
-| `~/.navi/sessions/` | Session metadata (`meta.json`, `index.jsonl`) |
+| `~/.navi/history.sqlite3` | Session history (SQLite + FTS5): `sessions` and `messages` tables, keyed by `session_id` |
 | `~/.navi/chat_history.txt` | prompt_toolkit input history |
 | `<workspace>/AGENTS.md` | LLM behavioral guidelines |
 
