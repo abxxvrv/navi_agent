@@ -57,9 +57,9 @@ from .qqbot import (
     download_inbound_media,
     load_qq_account,
     load_qq_allowlist,
-    send_c2c_file,
-    send_c2c_text,
     send_c2c_typing,
+    send_media_file,
+    send_message_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,6 +119,7 @@ class QqAdapter:
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
         self._runtimes: Dict[str, AgentRuntime] = {}
         self._chat_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._chat_type: Dict[str, str] = {}  # chat_id → "c2c" | "group"
 
         # Passive-reply context per chat (set inside the per-chat lock before a turn).
         self._reply_msg_id: Dict[str, str] = {}
@@ -279,7 +280,9 @@ class QqAdapter:
             elif event_type == "RESUMED":
                 logger.info("qq: session resumed")
             elif event_type == "C2C_MESSAGE_CREATE":
-                asyncio.create_task(self._handle_message_safe(d))
+                asyncio.create_task(self._handle_message_safe(d, "c2c"))
+            elif event_type == "GROUP_AT_MESSAGE_CREATE":
+                asyncio.create_task(self._handle_message_safe(d, "group"))
             else:
                 logger.debug("qq: unhandled dispatch %s", event_type)
             return
@@ -384,30 +387,50 @@ class QqAdapter:
 
     # ── Inbound handling ──────────────────────────────────────────────────────
 
-    async def _handle_message_safe(self, message: Any) -> None:
+    async def _handle_message_safe(self, message: Any, chat_type: str) -> None:
         try:
-            await self._handle_message(message)
+            await self._handle_message(message, chat_type)
         except Exception as exc:
             logger.error("qq: unhandled inbound error: %s", exc, exc_info=True)
 
-    async def _handle_message(self, message: Any) -> None:
+    async def _handle_message(self, message: Any, chat_type: str) -> None:
         if not isinstance(message, dict):
             return
         author = message.get("author") if isinstance(message.get("author"), dict) else {}
-        sender_id = str(author.get("user_openid") or "").strip()
-        if not sender_id:
-            return
-
-        # Access allowlist: re-read on every message so `allow` takes effect live.
-        if sender_id not in load_qq_allowlist(self._navi_home, self._account_id):
-            await self._reject_unauthorized(sender_id, message.get("id"))
-            return
-
         message_id = str(message.get("id") or "").strip()
+
+        # Resolve chat_id (the reply target) and sender by scene, then apply the
+        # matching fail-closed allowlist. Re-read on every message so `allow`
+        # takes effect live.
+        if chat_type == "group":
+            chat_id = str(message.get("group_openid") or "").strip()
+            sender_id = str(author.get("member_openid") or "").strip()
+            if not chat_id:
+                return
+            # Group allowlist keys on the group openid; unauthorized groups are
+            # silently ignored (never post a rejection notice into a group).
+            if chat_id not in load_qq_allowlist(self._navi_home, self._account_id, "group"):
+                return
+        else:
+            chat_id = str(author.get("user_openid") or "").strip()
+            sender_id = chat_id
+            if not chat_id:
+                return
+            if chat_id not in load_qq_allowlist(self._navi_home, self._account_id):
+                await self._reject_unauthorized(chat_id, message_id)
+                return
+
+        # Remember the scene so outbound helpers pick the right REST path. Set
+        # before the lock so a !cancel reply also routes correctly.
+        self._chat_type[chat_id] = chat_type
+
         if message_id and self._dedup.is_duplicate(message_id):
             return
 
         text = str(message.get("content") or "").strip()
+        if chat_type == "group":
+            # Strip a leading @bot mention (e.g. "<@!123> foo") the platform keeps.
+            text = re.sub(r"^<@!?\d+>\s*", "", text).strip()
         image_paths, notes = await self._collect_media(message.get("attachments") or [])
         if not text and not image_paths and not notes:
             return
@@ -418,7 +441,6 @@ class QqAdapter:
                 return
 
         message_text = "\n".join(notes + ([text] if text else []))
-        chat_id = sender_id  # C2C / DM only
 
         # Cancellation before taking the lock — it is held by the in-flight turn.
         if text == CANCEL_KEYWORD:
@@ -437,10 +459,13 @@ class QqAdapter:
 
             runtime = self.get_or_create_runtime(chat_id)
             logger.info(
-                "qq: inbound from=%s text_len=%d images=%d notes=%d",
-                _safe_id(sender_id), len(message_text), len(image_paths), len(notes),
+                "qq: inbound type=%s from=%s chat=%s text_len=%d images=%d notes=%d",
+                chat_type, _safe_id(sender_id), _safe_id(chat_id),
+                len(message_text), len(image_paths), len(notes),
             )
-            await self._send_typing(chat_id, message_id)
+            # Typing (input_notify) is only supported for C2C.
+            if chat_type == "c2c":
+                await self._send_typing(chat_id, message_id)
             try:
                 result = await asyncio.to_thread(runtime.run_turn, message_text, image_paths)
             except Exception as exc:
@@ -509,13 +534,15 @@ class QqAdapter:
             for c in _split_text_for_weixin_delivery(format_message(content), MAX_MESSAGE_LENGTH)
             if c.strip()
         ]
+        chat_type = self._chat_type.get(chat_id, "c2c")
         for index, chunk in enumerate(chunks):
             try:
                 token = await self._ensure_token()
-                await send_c2c_text(
+                await send_message_text(
                     self._session,
                     token=token,
-                    openid=chat_id,
+                    chat_type=chat_type,
+                    target_id=chat_id,
                     text=chunk,
                     msg_id=msg_id,
                     msg_seq=self._next_seq(chat_id),
@@ -533,10 +560,11 @@ class QqAdapter:
             return
         try:
             token = await self._ensure_token()
-            await send_c2c_file(
+            await send_media_file(
                 self._session,
                 token=token,
-                openid=chat_id,
+                chat_type=self._chat_type.get(chat_id, "c2c"),
+                target_id=chat_id,
                 path=path,
                 msg_id=msg_id,
                 msg_seq=self._next_seq(chat_id),

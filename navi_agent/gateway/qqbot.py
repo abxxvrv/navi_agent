@@ -152,7 +152,7 @@ def list_qq_accounts(navi_home: str) -> List[str]:
     accounts: List[str] = []
     for path in sorted(directory.glob("*.json")):
         name = path.name[: -len(".json")]
-        if name.endswith(".allow"):
+        if name.endswith((".allow", ".group-allow")):
             continue
         accounts.append(name)
     return accounts
@@ -161,13 +161,15 @@ def list_qq_accounts(navi_home: str) -> List[str]:
 # ── Allowlist ─────────────────────────────────────────────────────────────────
 
 
-def _allow_file(navi_home: str, account_id: str) -> Path:
-    return _account_dir(navi_home) / f"{account_id}.allow.json"
+def _allow_file(navi_home: str, account_id: str, kind: str = "user") -> Path:
+    # kind="group" 用独立文件保存群维度白名单（群 openid），与个人白名单区分开。
+    suffix = "group-allow" if kind == "group" else "allow"
+    return _account_dir(navi_home) / f"{account_id}.{suffix}.json"
 
 
-def load_qq_allowlist(navi_home: str, account_id: str) -> List[str]:
-    """Return the user openids permitted to drive this account's bot."""
-    path = _allow_file(navi_home, account_id)
+def load_qq_allowlist(navi_home: str, account_id: str, kind: str = "user") -> List[str]:
+    """Return the openids permitted to drive this account's bot (user or group)."""
+    path = _allow_file(navi_home, account_id, kind)
     if not path.exists():
         return []
     try:
@@ -180,27 +182,27 @@ def load_qq_allowlist(navi_home: str, account_id: str) -> List[str]:
     return [str(u).strip() for u in allowed if str(u).strip()]
 
 
-def add_to_qq_allowlist(navi_home: str, account_id: str, user_id: str) -> bool:
+def add_to_qq_allowlist(navi_home: str, account_id: str, user_id: str, kind: str = "user") -> bool:
     """Add *user_id* to the allowlist. Returns True if newly added."""
     user_id = str(user_id).strip()
     if not user_id:
         raise ValueError("user_id 不能为空")
-    current = load_qq_allowlist(navi_home, account_id)
+    current = load_qq_allowlist(navi_home, account_id, kind)
     if user_id in current:
         return False
     current.append(user_id)
-    _atomic_json_write(_allow_file(navi_home, account_id), {"allowed": current})
+    _atomic_json_write(_allow_file(navi_home, account_id, kind), {"allowed": current})
     return True
 
 
-def remove_from_qq_allowlist(navi_home: str, account_id: str, user_id: str) -> bool:
+def remove_from_qq_allowlist(navi_home: str, account_id: str, user_id: str, kind: str = "user") -> bool:
     """Remove *user_id* from the allowlist. Returns True if it was present."""
     user_id = str(user_id).strip()
-    current = load_qq_allowlist(navi_home, account_id)
+    current = load_qq_allowlist(navi_home, account_id, kind)
     if user_id not in current:
         return False
     _atomic_json_write(
-        _allow_file(navi_home, account_id),
+        _allow_file(navi_home, account_id, kind),
         {"allowed": [u for u in current if u != user_id]},
     )
     return True
@@ -274,16 +276,25 @@ async def _api_request(
         return data if isinstance(data, dict) else {}
 
 
-async def send_c2c_text(
+def _target_base(chat_type: str, target_id: str) -> str:
+    """REST path prefix for a send target: group vs. C2C (private)."""
+    return f"/v2/groups/{target_id}" if chat_type == "group" else f"/v2/users/{target_id}"
+
+
+async def send_message_text(
     session: "aiohttp.ClientSession",
     *,
     token: str,
-    openid: str,
+    chat_type: str,
+    target_id: str,
     text: str,
     msg_id: Optional[str],
     msg_seq: int,
 ) -> Dict[str, Any]:
-    """Send a plain-text C2C message. Pass *msg_id* for a (free) passive reply."""
+    """Send a plain-text message to a C2C user or group.
+
+    Pass *msg_id* (the triggering inbound message id) for a free passive reply.
+    """
     body: Dict[str, Any] = {
         "content": text[:MAX_MESSAGE_LENGTH],
         "msg_type": MSG_TYPE_TEXT,
@@ -292,7 +303,11 @@ async def send_c2c_text(
     if msg_id:
         body["msg_id"] = msg_id
     return await _api_request(
-        session, method="POST", token=token, path=f"/v2/users/{openid}/messages", body=body
+        session,
+        method="POST",
+        token=token,
+        path=f"{_target_base(chat_type, target_id)}/messages",
+        body=body,
     )
 
 
@@ -317,20 +332,22 @@ async def send_c2c_typing(
     )
 
 
-async def send_c2c_file(
+async def send_media_file(
     session: "aiohttp.ClientSession",
     *,
     token: str,
-    openid: str,
+    chat_type: str,
+    target_id: str,
     path: Path,
     msg_id: Optional[str],
     msg_seq: int,
 ) -> Dict[str, Any]:
-    """Upload a local file and send it as a C2C rich-media message.
+    """Upload a local file and send it as a rich-media message (C2C or group).
 
     The media type is inferred from the file suffix; everything that is not an
     image / video / audio is sent as a generic file.
     """
+    base = _target_base(chat_type, target_id)
     file_type = _media_type_for(path)
     upload_body: Dict[str, Any] = {
         "file_type": file_type,
@@ -343,7 +360,7 @@ async def send_c2c_file(
         session,
         method="POST",
         token=token,
-        path=f"/v2/users/{openid}/files",
+        path=f"{base}/files",
         body=upload_body,
         timeout_seconds=UPLOAD_TIMEOUT_SECONDS,
     )
@@ -359,7 +376,7 @@ async def send_c2c_file(
     if msg_id:
         body["msg_id"] = msg_id
     return await _api_request(
-        session, method="POST", token=token, path=f"/v2/users/{openid}/messages", body=body
+        session, method="POST", token=token, path=f"{base}/messages", body=body
     )
 
 
