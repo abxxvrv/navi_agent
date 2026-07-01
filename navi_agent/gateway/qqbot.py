@@ -18,10 +18,12 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import ipaddress
 import json
 import logging
 import os
 import platform
+import socket
 import sys
 import time
 from pathlib import Path
@@ -533,6 +535,48 @@ async def download_inbound_media(
     elif not url.startswith(("http://", "https://")):
         url = "https://" + url
     _assert_qq_media_url(url)
+
+    # ── SSRF 防护：禁止内网/云元数据 IP ─────────────────
+    parsed = urlparse(url)
+    hostname = (parsed.hostname or "").strip().lower()
+    if hostname:
+        # 永久黑名单 hostname
+        if hostname in {"metadata.google.internal", "metadata.goog"}:
+            raise ValueError(f"Blocked metadata hostname: {hostname}")
+
+        # DNS 解析并检查所有返回的 IP
+        try:
+            addr_info = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC, socket.SOCK_STREAM)
+        except socket.gaierror:
+            raise ValueError(f"DNS resolution failed: {hostname}")
+
+        for _, _, _, _, sockaddr in addr_info:
+            ip_str = sockaddr[0]
+            try:
+                ip = ipaddress.ip_address(ip_str)
+            except ValueError:
+                continue
+
+            # IPv4-mapped IPv6 → 按 IPv4 检查
+            if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+                ip = ip.ipv4_mapped
+
+            # 永久禁止的 IP / 网段（云元数据、链路本地、CGNAT）
+            if ip in {
+                ipaddress.ip_address("169.254.169.254"),
+                ipaddress.ip_address("169.254.170.2"),
+                ipaddress.ip_address("169.254.169.253"),
+                ipaddress.ip_address("100.100.100.200"),
+            } or ip in ipaddress.ip_network("169.254.0.0/16") or ip in ipaddress.ip_network("100.64.0.0/10"):
+                raise ValueError(f"Blocked internal IP: {ip}")
+
+            # 私有/回环/链路本地/保留/多播/未指定
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or
+                ip.is_reserved or ip.is_multicast or ip.is_unspecified):
+                # 白名单：QQ CDN 允许解析到私有 IP
+                if hostname == "multimedia.nt.qq.com.cn" and parsed.scheme == "https":
+                    continue
+                raise ValueError(f"Blocked private/internal IP: {ip}")
 
     async def _do() -> bytes:
         headers = {"Authorization": f"QQBot {token}"} if token else {}
