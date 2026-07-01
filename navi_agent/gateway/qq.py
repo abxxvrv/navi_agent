@@ -28,6 +28,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
@@ -132,6 +133,10 @@ class QqAdapter:
 
         self._workspace = str(workspace)
         self._approval_mode = approval_mode
+
+        # QQ 原生 markdown 渲染，默认开；若账号无 markdown 权限，首条被拒后
+        # 自动降级为纯文本，之后本实例都走纯文本。
+        self._markdown_enabled = True
 
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
         self._runtimes: Dict[str, AgentRuntime] = {}
@@ -381,6 +386,12 @@ class QqAdapter:
             content_type = str(att.get("content_type") or "").lower()
             raw_name = self._safe_filename(str(att.get("filename") or ""))
 
+            # 诊断日志：入站附件是否到达、来自哪个主机、什么类型（排查文件收不到）。
+            logger.info(
+                "qq: inbound attachment content_type=%r host=%s name=%r",
+                content_type, urlparse(url).hostname or "?", raw_name,
+            )
+
             # 语音优先：如果平台已提供 asr_refer_text，直接使用，跳过下载
             if content_type.startswith("audio") or content_type.startswith("voice") or raw_name.lower().endswith(
                 (".silk", ".amr", ".mp3", ".wav", ".ogg", ".m4a", ".aac", ".speex", ".flac")
@@ -573,29 +584,53 @@ class QqAdapter:
     async def send_text(self, chat_id: str, content: str, msg_id: Optional[str]) -> None:
         if not content or not content.strip():
             return
-        chunks = [
-            c
-            for c in _split_text_for_weixin_delivery(format_message(content), MAX_MESSAGE_LENGTH)
-            if c.strip()
-        ]
         chat_type = self._chat_type.get(chat_id, "c2c")
-        for index, chunk in enumerate(chunks):
-            try:
-                token = await self._ensure_token()
-                await send_message_text(
-                    self._session,
-                    token=token,
-                    chat_type=chat_type,
-                    target_id=chat_id,
-                    text=chunk,
-                    msg_id=msg_id,
-                    msg_seq=self._next_seq(chat_id),
-                )
-            except Exception as exc:
-                logger.warning("qq: send_text failed for %s: %s", _safe_id(chat_id), exc)
+        # 默认发 QQ 原生 markdown（客户端渲染）。首条被拒（多为无 markdown 权限）
+        # 时全局降级并把整条消息改用纯文本重发一次。
+        markdown = self._markdown_enabled
+        while True:
+            if markdown:
+                # markdown 只按块切分，不套 format_message（其折行会破坏 markdown 结构）。
+                source = content
+            else:
+                source = format_message(content)
+            chunks = [
+                c
+                for c in _split_text_for_weixin_delivery(source, MAX_MESSAGE_LENGTH)
+                if c.strip()
+            ]
+            fell_back = False
+            for index, chunk in enumerate(chunks):
+                try:
+                    token = await self._ensure_token()
+                    await send_message_text(
+                        self._session,
+                        token=token,
+                        chat_type=chat_type,
+                        target_id=chat_id,
+                        text=chunk,
+                        msg_id=msg_id,
+                        msg_seq=self._next_seq(chat_id),
+                        markdown=markdown,
+                    )
+                except Exception as exc:
+                    # 只有 API 明确返回错误（RuntimeError，来自 _api_request 的 HTTP 4xx，
+                    # 即账号无 markdown 权限）才降级；连接/网络错误不能误关渲染，
+                    # 否则一次网络抖动就让整个实例永久退回纯文本。
+                    if markdown and index == 0 and isinstance(exc, RuntimeError):
+                        logger.warning(
+                            "qq: markdown 被 API 拒绝，本实例回退纯文本（后续不再尝试）: %s", exc
+                        )
+                        self._markdown_enabled = False
+                        markdown = False
+                        fell_back = True
+                        break
+                    logger.warning("qq: send_text failed for %s: %s", _safe_id(chat_id), exc)
+                    return
+                if index < len(chunks) - 1:
+                    await asyncio.sleep(self.SEND_CHUNK_DELAY_SECONDS)
+            if not fell_back:
                 return
-            if index < len(chunks) - 1:
-                await asyncio.sleep(self.SEND_CHUNK_DELAY_SECONDS)
 
     async def _send_attachment(self, chat_id: str, attach_path: str, msg_id: Optional[str]) -> None:
         path = Path(attach_path)

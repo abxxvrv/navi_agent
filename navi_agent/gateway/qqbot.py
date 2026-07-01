@@ -91,6 +91,7 @@ INTENT_GROUP_AND_C2C = 1 << 25
 # ── Message / media types ─────────────────────────────────────────────────────
 
 MSG_TYPE_TEXT = 0
+MSG_TYPE_MARKDOWN = 2
 MSG_TYPE_MEDIA = 7
 MSG_TYPE_INPUT_NOTIFY = 6
 
@@ -301,16 +302,29 @@ async def send_message_text(
     text: str,
     msg_id: Optional[str],
     msg_seq: int,
+    markdown: bool = False,
 ) -> Dict[str, Any]:
-    """Send a plain-text message to a C2C user or group.
+    """Send a text or markdown message to a C2C user or group.
+
+    When *markdown* is True, send QQ native markdown (``msg_type`` 2) which the
+    QQ client renders; otherwise send plain text. Native markdown requires the
+    bot to be approved for it on the QQ Open Platform, so callers should be
+    ready to fall back to plain text on rejection.
 
     Pass *msg_id* (the triggering inbound message id) for a free passive reply.
     """
-    body: Dict[str, Any] = {
-        "content": text[:MAX_MESSAGE_LENGTH],
-        "msg_type": MSG_TYPE_TEXT,
-        "msg_seq": msg_seq,
-    }
+    if markdown:
+        body: Dict[str, Any] = {
+            "markdown": {"content": text[:MAX_MESSAGE_LENGTH]},
+            "msg_type": MSG_TYPE_MARKDOWN,
+            "msg_seq": msg_seq,
+        }
+    else:
+        body = {
+            "content": text[:MAX_MESSAGE_LENGTH],
+            "msg_type": MSG_TYPE_TEXT,
+            "msg_seq": msg_seq,
+        }
     if msg_id:
         body["msg_id"] = msg_id
     return await _api_request(
@@ -545,7 +559,7 @@ async def download_inbound_media(
         url = "https://" + url
     _assert_qq_media_url(url)
 
-    # ── SSRF 防护：禁止内网/云元数据 IP ─────────────────
+    # ── SSRF 防护：拦截云元数据等高危 IP（边界由主机白名单守住）─────────────────
     parsed = urlparse(url)
     hostname = (parsed.hostname or "").strip().lower()
     if hostname:
@@ -572,7 +586,9 @@ async def download_inbound_media(
             if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
                 ip = ip.ipv4_mapped
 
-            # 永久禁止的 IP / 网段（云元数据、链路本地、CGNAT）
+            # 只拦真正高危目标：云元数据、链路本地、CGNAT。主机白名单
+            # （_assert_qq_media_url）已把住 SSRF 边界，故不做笼统的私网拦截——
+            # 否则代理 fake-ip（如 198.18.0.0/15）会误伤合法的 QQ CDN。
             if ip in {
                 ipaddress.ip_address("169.254.169.254"),
                 ipaddress.ip_address("169.254.170.2"),
@@ -580,14 +596,6 @@ async def download_inbound_media(
                 ipaddress.ip_address("100.100.100.200"),
             } or ip in ipaddress.ip_network("169.254.0.0/16") or ip in ipaddress.ip_network("100.64.0.0/10"):
                 raise ValueError(f"Blocked internal IP: {ip}")
-
-            # 私有/回环/链路本地/保留/多播/未指定
-            if (ip.is_private or ip.is_loopback or ip.is_link_local or
-                ip.is_reserved or ip.is_multicast or ip.is_unspecified):
-                # 白名单：QQ CDN 允许解析到私有 IP
-                if hostname == "multimedia.nt.qq.com.cn" and parsed.scheme == "https":
-                    continue
-                raise ValueError(f"Blocked private/internal IP: {ip}")
 
     async def _do() -> bytes:
         headers = {"Authorization": f"QQBot {token}"} if token else {}
