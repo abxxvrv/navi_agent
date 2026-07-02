@@ -1878,7 +1878,7 @@ class AgentRuntime:
 
             self.tool_registry.register(
                 name="attach_file",
-                description="登记本地文件，在本轮回复发出后作为附件发给用户。仅在微信网关场景下生效。",
+                description="登记本地文件，在本轮回复发出后作为附件发给用户。仅在通过消息网关（如 QQ / 微信）对话时可用。",
                 parameters={
                     "type": "object",
                     "properties": {
