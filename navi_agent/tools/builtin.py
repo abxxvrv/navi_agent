@@ -1470,10 +1470,12 @@ class VisionAnalyzeTool:
     def __call__(
         self,
         image_path: str,
-        prompt: str = "请描述这张图片的内容",
+        prompt: str | None = None,
     ) -> dict[str, Any]:
         if not image_path or not image_path.strip():
             return {"ok": False, "error": "image_path 不能为空。"}
+
+        effective_prompt = prompt or (self.config_path.parent / "vision_prompt.txt").read_text(encoding="utf-8").strip()
 
         image_data_url, err = self._load_image(image_path.strip())
         if err:
@@ -1483,13 +1485,13 @@ class VisionAnalyzeTool:
         if self._main_supports_vision():
             return {
                 "ok": True,
-                "content": prompt,
+                "content": effective_prompt,
                 "_multimodal": True,
                 "_image_data_url": image_data_url,
             }
 
         # 路径 2：调用辅助视觉模型
-        return self._call_auxiliary_vision(image_data_url, prompt)
+        return self._call_auxiliary_vision(image_data_url, effective_prompt)
 
 
 def _resolve_to_root(store, session_id: str) -> str:

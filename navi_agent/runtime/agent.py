@@ -421,7 +421,6 @@ class AgentRuntime:
                 content.append({"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{b64}"}})
             return {"role": "user", "content": content}
 
-        prompt = user_input or "请描述这张图片的内容"
         parts = ["用户发送了图片："]
         for path in image_paths:
             mime_type = VisionAnalyzeTool.MIME_MAP.get(path.suffix.lower(), "application/octet-stream")
@@ -429,7 +428,9 @@ class AgentRuntime:
         parts.extend(["", "图片内容："])
         vision_tool = self._vision_tool()
         for index, path in enumerate(image_paths, start=1):
-            result = vision_tool(image_path=str(path), prompt=prompt)
+            # 不传 prompt：视觉模型走内置默认提示词（~/.navi/vision_prompt.txt），
+            # 用户文本留给主模型，不污染视觉模型的客观描述。
+            result = vision_tool(image_path=str(path))
             if result.get("ok"):
                 parts.append(f"[Image #{index}]")
                 parts.append(str(result.get("content", "")))
@@ -1777,8 +1778,7 @@ class AgentRuntime:
                     },
                     "prompt": {
                         "type": "string",
-                        "description": "对图片的提问或指令。",
-                        "default": "Fully describe and explain everything about this image, then answer the following question",
+                        "description": "对图片的提问或指令。可选；不传时使用内置默认提示词。",
                     },
                 },
                 "required": ["image_path"],

@@ -92,11 +92,11 @@ def test_non_multimodal_image_becomes_description_text(tmp_path):
     image.write_bytes(b"image-bytes")
     runtime = _runtime(tmp_path, multimodal=False)
     runtime._vision_tool = lambda: SimpleNamespace(
-        __call__=lambda image_path, prompt: {"ok": True, "content": f"description for {image_path}"}
+        __call__=lambda image_path, prompt=None: {"ok": True, "content": f"description for {image_path}"}
     )
 
     class FakeVision:
-        def __call__(self, image_path, prompt):
+        def __call__(self, image_path, prompt=None):
             return {"ok": True, "content": f"description for {image_path}"}
 
     runtime._vision_tool = lambda: FakeVision()
@@ -120,7 +120,7 @@ def test_non_multimodal_image_failure_is_text(tmp_path):
     runtime = _runtime(tmp_path, multimodal=False)
 
     class FakeVision:
-        def __call__(self, image_path, prompt):
+        def __call__(self, image_path, prompt=None):
             return {"ok": False, "error": "vision missing"}
 
     runtime._vision_tool = lambda: FakeVision()
