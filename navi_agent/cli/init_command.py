@@ -34,6 +34,14 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "deepseek-v4-pro": {"context_window": 1048576},
         },
     },
+    "stepfun": {
+        "base_url": "https://api.stepfun.com/v1",
+        "models": {
+            "step-3.7-flash": {"context_window": 262144},
+            "step-3.5-flash": {"context_window": 262144},
+            "step-3.5-flash-2603": {"context_window": 262144},
+        },
+    },
     "lmstudio": {
         "base_url": "http://localhost:1234/v1",
         "models": {},

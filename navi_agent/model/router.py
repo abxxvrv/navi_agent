@@ -81,10 +81,27 @@ class QwenProvider(BaseProvider):
         )
 
 
+class StepfunProvider(BaseProvider):
+    """阶跃星辰 StepFun（OpenAI 兼容）。
+
+    reasoning_format=deepseek-style 让流式 chunk 返回 reasoning_content 字段，
+    与 agent.py 现有的 reasoning 解析逻辑对齐，无需额外适配。
+    """
+
+    def chat_stream_with_client(self, client, messages, tools, **kwargs):
+        return client.chat.completions.create(
+            model=self.model_name, messages=messages, tools=tools,
+            stream=True, stream_options={"include_usage": True},
+            reasoning_effort="high",
+            extra_body={"reasoning_format": "deepseek-style"},
+        )
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
     "qwen": QwenProvider,
+    "stepfun": StepfunProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
 }
