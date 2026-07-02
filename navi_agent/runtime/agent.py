@@ -153,7 +153,7 @@ class AgentRuntime:
             self.conversation_history = []
 
         self.tool_registry = ToolRegistry()
-        self.memory_store = MemoryStore(project_path=self.workspace)
+        self.memory_store = MemoryStore()
         self.context_manager = ContextManager(
             workspace=str(self.workspace),
             skills_path=str(self.navi_home / "skills"),
@@ -1703,7 +1703,7 @@ class AgentRuntime:
 
         # memory
         def memory_tool(action: str, target: str, content: str = None, old_text: str = None) -> dict:
-            if target not in {"memory", "user", "project"}:
+            if target not in {"memory", "user"}:
                 return {"success": False, "error": f"未知记忆目标 '{target}'"}
             if action == "add":
                 if not content:
@@ -1723,10 +1723,10 @@ class AgentRuntime:
         self.tool_registry.register(
             name="memory",
             description="""
-- 管理持久化记忆，跨会话保留。
+- 管理全局持久化记忆，跨会话保留。
 - 存储目标 memory：你的全局笔记（跨项目环境事实、工具特性、通用经验教训）。
 - 存储目标 user：用户画像（用户偏好、沟通风格、工作习惯、技术栈）。
-- 存储目标 project：当前工作区项目记忆（项目约定、运行方式、架构边界），保存到工作区 .navi/memories/PROJECT.txt。
+- 当前项目的项目记忆不用本工具：按 memory-creator 技能的规范直接读写 .navi/memories/ 下的文件。
 - action="add"：添加一条新记忆。
 - action="replace"：更新已有记忆（用 old_text 定位，用 content 替换）。
 - action="remove"：删除已有记忆（用 old_text 定位）。
@@ -1743,8 +1743,8 @@ class AgentRuntime:
                     },
                     "target": {
                         "type": "string",
-                        "enum": ["memory", "user", "project"],
-                        "description": "存储目标。memory=你的笔记，user=用户画像，project=当前工作区项目记忆。",
+                        "enum": ["memory", "user"],
+                        "description": "存储目标。memory=你的笔记，user=用户画像。",
                     },
                     "content": {
                         "type": "string",

@@ -1,4 +1,4 @@
-"""记忆存储 - 管理全局 MEMORY/USER 和项目记忆"""
+"""记忆存储 - 管理全局 MEMORY/USER 记忆"""
 
 import os
 from pathlib import Path
@@ -22,24 +22,13 @@ class MemoryStore:
         self,
         memory_limit: int = 2000,
         user_limit: int = 1000,
-        project_limit: int = 2200,
-        project_path: str | Path | None = None,
     ):
         self.memory_limit = memory_limit
         self.user_limit = user_limit
-        self.project_limit = project_limit
-        self.project_memory_path = (
-            Path(project_path).resolve() / ".navi" / "memories" / "PROJECT.txt"
-            if project_path is not None
-            else None
-        )
         self.memory_entries = self._load("MEMORY.md")
         self.user_entries = self._load("USER.md")
-        self.project_entries = self._load("PROJECT.txt") if self.project_memory_path else []
 
     def _target_info(self, target: str) -> tuple[str, int]:
-        if target == "project":
-            return "PROJECT.txt", self.project_limit
         if target == "user":
             return "USER.md", self.user_limit
         if target == "memory":
@@ -47,8 +36,6 @@ class MemoryStore:
         raise ValueError(f"未知记忆目标: {target}")
 
     def _path_for(self, filename: str) -> Path:
-        if filename == "PROJECT.txt":
-            return self.project_memory_path
         return get_memory_dir() / filename
 
     def _load(self, filename: str) -> list[str]:
@@ -59,9 +46,7 @@ class MemoryStore:
         return [e.strip() for e in content.split(ENTRY_DELIMITER) if e.strip()]
 
     def _cache_entries(self, target: str, entries: list[str]) -> None:
-        if target == "project":
-            self.project_entries = entries
-        elif target == "user":
+        if target == "user":
             self.user_entries = entries
         else:
             self.memory_entries = entries
@@ -74,11 +59,7 @@ class MemoryStore:
         self._cache_entries(target, entries)
 
     def _save(self, target: str):
-        entries = (
-            self.project_entries
-            if target == "project"
-            else self.user_entries if target == "user" else self.memory_entries
-        )
+        entries = self.user_entries if target == "user" else self.memory_entries
         filename, _ = self._target_info(target)
         path = self._path_for(filename)
         with file_lock(path):

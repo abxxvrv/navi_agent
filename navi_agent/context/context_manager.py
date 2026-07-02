@@ -1,8 +1,14 @@
 import platform
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment
+
+from ..storage.safe_file import atomic_write_text
+
+PROJECT_MEMORY_INDEX = "PROJECT_memory.md"
+PROJECT_MEMORY_LEGACY = "PROJECT.txt"
 
 
 class ContextManager:
@@ -91,6 +97,53 @@ class ContextManager:
 
         return "\n".join(lines)
 
+    def build_project_memory_prompt(self) -> str:
+        """扫描 <工作目录>/.navi/memories/ 下的记忆文件，生成索引。
+
+        - 只收 frontmatter 含 name 和 description 的 .md，索引文件自身排除；
+        - 旧版 PROJECT.txt 存在且未迁移时，一次性并入 legacy-conventions.md；
+        - 索引同步落盘为 PROJECT_memory.md 供人浏览，注入值为索引行文本。
+        """
+        memories_dir = self.workspace / ".navi" / "memories"
+        if not memories_dir.is_dir():
+            return ""
+
+        # 一次性迁移旧版项目记忆
+        legacy_source = memories_dir / PROJECT_MEMORY_LEGACY
+        legacy_target = memories_dir / "legacy-conventions.md"
+        if legacy_source.is_file() and not legacy_target.exists():
+            entries = self._read_text_file(legacy_source, None).split("\n§\n")
+            body = "\n\n".join(e.strip() for e in entries if e.strip())
+            atomic_write_text(
+                legacy_target,
+                "---\n"
+                "name: legacy-conventions\n"
+                "description: 迁移自旧版项目记忆 PROJECT.txt，待拆分为独立记忆文件\n"
+                f"updated: {date.today().isoformat()}\n"
+                "---\n\n" + body,
+                encoding="utf-8",
+            )
+
+        lines = []
+        for item in sorted(memories_dir.glob("*.md"), key=lambda path: path.name):
+            if item.name == PROJECT_MEMORY_INDEX:
+                continue
+            metadata = self._parse_skill_frontmatter(self._read_text_file(item, None))
+            if not metadata.get("name") or not metadata.get("description"):
+                continue
+            lines.append(f"- [{metadata['name']}]({item.name}) — {metadata['description']}")
+
+        if not lines:
+            return ""
+
+        index_text = "\n".join(lines)
+        atomic_write_text(
+            memories_dir / PROJECT_MEMORY_INDEX,
+            "# 项目记忆索引（自动生成，勿手改）\n\n" + index_text,
+            encoding="utf-8",
+        )
+        return index_text
+
     # 构造运行时候信息，llm code 先走到这
     def build_runtime_messages(
         self,
@@ -152,7 +205,7 @@ class ContextManager:
             NAVI_SKILLS=skills_prompt,
             NAVI_MEMORY=self.memory_store.get_text("memory") if self.memory_store else "",
             NAVI_USER=self.memory_store.get_text("user") if self.memory_store else "",
-            NAVI_PROJECT_MEMORY=self.memory_store.get_text("project") if self.memory_store else "",
+            NAVI_PROJECT_MEMORY=self.build_project_memory_prompt(),
         )
 
     def _parse_skill_frontmatter(self, content: str) -> dict[str, str]:

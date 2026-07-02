@@ -140,48 +140,9 @@ class TestMemoryStore:
             assert "持久化测试" in store2.memory_entries
             assert "用户叫李四" in store2.user_entries
 
-    def test_project_memory_creates_project_navi_file(self, tmp_path):
-        """项目记忆写入当前项目 .navi，文件在首次 add 时才创建。"""
-        with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "global"):
-            store = MemoryStore(project_path=tmp_path)
-
-            assert store.project_memory_path == tmp_path / ".navi" / "memories" / "PROJECT.txt"
-            assert not store.project_memory_path.exists()
-
-            result = store.add("project", "本项目使用 pytest")
-
-            assert result["success"] is True
-            assert store.project_memory_path.is_file()
-            assert "本项目使用 pytest" in store.get_text("project")
-            assert store.project_memory_path.read_text(encoding="utf-8") == "本项目使用 pytest"
-
-    def test_project_memory_limit_is_2200_by_default(self, tmp_path):
-        """项目记忆默认上限 2200 字符。"""
-        with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "global"):
-            store = MemoryStore(project_path=tmp_path)
-
-            ok = store.add("project", "x" * 2200)
-            assert ok["success"] is True
-
-            store.remove("project", "x" * 2200)
-            result = store.add("project", "x" * 2201)
-
-            assert result["success"] is False
-            assert "超出限制" in result["error"]
-
-    def test_project_memory_limit_counts_delimiter(self, tmp_path):
-        """项目记忆限制按真实分隔符长度计算。"""
-        with patch("navi_agent.storage.memory_store.get_memory_dir", return_value=tmp_path / "global"):
-            store = MemoryStore(project_path=tmp_path, project_limit=10)
-
-            assert store.add("project", "a" * 4)["success"] is True
-            assert store.add("project", "b" * 3)["success"] is True
-            result = store.add("project", "c")
-
-            assert result["success"] is False
-            assert "超出限制" in result["error"]
-
     def test_invalid_target_is_rejected(self, memory_store):
-        """未知记忆目标不能落到全局 MEMORY.md。"""
+        """未知记忆目标（含已移除的 project）不能落到全局 MEMORY.md。"""
         with pytest.raises(ValueError, match="未知记忆目标"):
             memory_store.add("PROJECT", "不要写错目标")
+        with pytest.raises(ValueError, match="未知记忆目标"):
+            memory_store.add("project", "project 目标已移除")
