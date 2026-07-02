@@ -1599,6 +1599,18 @@ def qq_start(
     Start the QQ gateway. Each chat gets its own agent runtime.
     """
     load_navi_dotenv()
+
+    # 默认 logging 只输出 WARNING+，会吞掉所有 INFO 级观测日志（qq: inbound、
+    # 附件诊断、中途事件等）。网关跑在后台，需要这些日志观测行为，故开到 INFO，
+    # 并压掉 HTTP 等库的噪音。
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    for _noisy in ("httpx", "httpcore", "mcp", "anyio", "asyncio"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
     from ..gateway.qqbot import load_qq_allowlist
     from ..gateway.qq import QqAdapter
 

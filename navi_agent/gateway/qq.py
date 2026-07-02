@@ -366,6 +366,45 @@ class QqAdapter:
         name = re.sub(r"\.{2,}", ".", name)
         return name[:200] or "file"
 
+    def _extract_atme_media(self, message: Dict[str, Any]) -> List[Dict[str, str]]:
+        """从群 @ 事件的 msg_elements 里，抽取【@ 发起者本人】发的图片/文件，
+        转成 _collect_media 认识的附件 dict（动图/表情、他人发的媒体一律跳过）。
+
+        群消息没有 attachments 字段，QQ 把"最近N条"渲染成文本放进 msg_elements，
+        形如：
+            === 消息 1 ===
+            [发送者] 名字
+            [附件1] 类型:图片 文件名:X 尺寸:.. 大小:.. URL:https://...
+        """
+        elements = message.get("msg_elements")
+        if not isinstance(elements, list):
+            return []
+        author = message.get("author") if isinstance(message.get("author"), dict) else {}
+        sender_name = str(author.get("username") or "").strip()
+        if not sender_name:
+            return []
+        text = "\n".join(
+            str(el.get("content") or "") for el in elements if isinstance(el, dict)
+        )
+        out: List[Dict[str, str]] = []
+        for block in re.split(r"===\s*消息\s*\d+\s*===", text):
+            m = re.search(r"\[发送者\]\s*(.+)", block)
+            if not m or m.group(1).strip() != sender_name:
+                continue  # 只处理 @ 发起者本人发的媒体
+            for line in block.splitlines():
+                am = re.match(
+                    r"\s*\[附件\d+\]\s*类型:(\S+)\s+文件名:(\S+).*?URL:(\S+)", line
+                )
+                if not am:
+                    continue
+                kind, fname, url = am.group(1), am.group(2), am.group(3).strip()
+                if kind == "图片":
+                    out.append({"url": url, "content_type": "image", "filename": fname})
+                elif kind == "文件":
+                    out.append({"url": url, "content_type": "", "filename": fname})
+                # 动图/表情等其它类型：跳过
+        return out
+
     async def _collect_media(
         self, attachments: List[Dict[str, Any]]
     ) -> Tuple[List[Path], List[str]]:
@@ -486,7 +525,11 @@ class QqAdapter:
         if chat_type == "group":
             # Strip a leading @bot mention (e.g. "<@!123> foo") the platform keeps.
             text = re.sub(r"^<@!?\d+>\s*", "", text).strip()
-        image_paths, notes = await self._collect_media(message.get("attachments") or [])
+        attachments = list(message.get("attachments") or [])
+        if chat_type == "group":
+            # 群消息的图片/文件在 msg_elements 里（仅取 @ 发起者本人发的）。
+            attachments += self._extract_atme_media(message)
+        image_paths, notes = await self._collect_media(attachments)
         if not text and not image_paths and not notes:
             return
 
