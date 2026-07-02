@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
-from ..paths import get_navi_home
+from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
 from .ilink import (
     MessageDeduplicator,
@@ -134,9 +134,18 @@ class QqAdapter:
         self._workspace = str(workspace)
         self._approval_mode = approval_mode
 
-        # QQ 原生 markdown 渲染，默认开；若账号无 markdown 权限，首条被拒后
-        # 自动降级为纯文本，之后本实例都走纯文本。
+        # QQ 原生 markdown 渲染开关（静态配置，发失败不自动降级）。默认开。
+        # 账号需在 QQ 开放平台开通 markdown 权限；无权限则在 config.json 里设
+        # {"qq": {"<account_id>": {"markdown": false}}}，否则所有消息都会发送失败。
         self._markdown_enabled = True
+        try:
+            _cfg = json.loads(Path(get_config_path()).read_text(encoding="utf-8"))
+            _qq = _cfg.get("qq") if isinstance(_cfg, dict) else None
+            _acct = _qq.get(self._account_id) if isinstance(_qq, dict) else None
+            if isinstance(_acct, dict) and "markdown" in _acct:
+                self._markdown_enabled = bool(_acct["markdown"])
+        except Exception:
+            pass
 
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
         self._runtimes: Dict[str, AgentRuntime] = {}
@@ -628,52 +637,33 @@ class QqAdapter:
         if not content or not content.strip():
             return
         chat_type = self._chat_type.get(chat_id, "c2c")
-        # 默认发 QQ 原生 markdown（客户端渲染）。首条被拒（多为无 markdown 权限）
-        # 时全局降级并把整条消息改用纯文本重发一次。
+        # markdown 由静态配置决定，发失败不降级（无权限请在 config.json 关掉）。
         markdown = self._markdown_enabled
-        while True:
-            if markdown:
-                # markdown 只按块切分，不套 format_message（其折行会破坏 markdown 结构）。
-                source = content
-            else:
-                source = format_message(content)
-            chunks = [
-                c
-                for c in _split_text_for_weixin_delivery(source, MAX_MESSAGE_LENGTH)
-                if c.strip()
-            ]
-            fell_back = False
-            for index, chunk in enumerate(chunks):
-                try:
-                    token = await self._ensure_token()
-                    await send_message_text(
-                        self._session,
-                        token=token,
-                        chat_type=chat_type,
-                        target_id=chat_id,
-                        text=chunk,
-                        msg_id=msg_id,
-                        msg_seq=self._next_seq(chat_id),
-                        markdown=markdown,
-                    )
-                except Exception as exc:
-                    # 只有 API 明确返回错误（RuntimeError，来自 _api_request 的 HTTP 4xx，
-                    # 即账号无 markdown 权限）才降级；连接/网络错误不能误关渲染，
-                    # 否则一次网络抖动就让整个实例永久退回纯文本。
-                    if markdown and index == 0 and isinstance(exc, RuntimeError):
-                        logger.warning(
-                            "qq: markdown 被 API 拒绝，本实例回退纯文本（后续不再尝试）: %s", exc
-                        )
-                        self._markdown_enabled = False
-                        markdown = False
-                        fell_back = True
-                        break
-                    logger.warning("qq: send_text failed for %s: %s", _safe_id(chat_id), exc)
-                    return
-                if index < len(chunks) - 1:
-                    await asyncio.sleep(self.SEND_CHUNK_DELAY_SECONDS)
-            if not fell_back:
+        # markdown 只按块切分，不套 format_message（其折行会破坏 markdown 结构）。
+        source = content if markdown else format_message(content)
+        chunks = [
+            c
+            for c in _split_text_for_weixin_delivery(source, MAX_MESSAGE_LENGTH)
+            if c.strip()
+        ]
+        for index, chunk in enumerate(chunks):
+            try:
+                token = await self._ensure_token()
+                await send_message_text(
+                    self._session,
+                    token=token,
+                    chat_type=chat_type,
+                    target_id=chat_id,
+                    text=chunk,
+                    msg_id=msg_id,
+                    msg_seq=self._next_seq(chat_id),
+                    markdown=markdown,
+                )
+            except Exception as exc:
+                logger.warning("qq: send_text failed for %s: %s", _safe_id(chat_id), exc)
                 return
+            if index < len(chunks) - 1:
+                await asyncio.sleep(self.SEND_CHUNK_DELAY_SECONDS)
 
     async def _send_attachment(self, chat_id: str, attach_path: str, msg_id: Optional[str]) -> None:
         path = Path(attach_path)
