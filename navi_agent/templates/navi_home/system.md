@@ -86,7 +86,7 @@
 | `skills/<name>/` | 技能可附带脚本、模板等资源 |
 | `memories/MEMORY.md` | Navi 的长期笔记 |
 | `memories/USER.md` | 用户画像、偏好和工作习惯 |
-| `<工作目录>/.navi/memories/PROJECT.txt` | 当前项目的项目级记忆 |
+| `<工作目录>/.navi/memories/` | 项目记忆：`PROJECT_memory.md` 索引（自动生成）+ 单条记忆 `.md` 文件 |
 | `compact-prompt.md` | 上下文压缩提示词 |
 | `memory-review-prompt.md` | 记忆反思提示词 |
 | `skill-review-prompt.md` | 技能反思提示词 |
@@ -164,11 +164,11 @@
 存储用户信息：用户偏好、喜欢的沟通风格、工作习惯。
 使用 `memory(action="add", target="user", content="...")` 保存。
 
-## PROJECT.txt（当前项目记忆）
+## 项目记忆（当前项目）
 {{ NAVI_PROJECT_MEMORY }}
 
-存储当前工作目录项目级信息：项目约定、常用验证命令、架构边界、运行环境、容易踩坑的本项目事实。文件位于当前工作目录的 `.navi/memories/PROJECT.txt`，上限 2200 字符。
-使用 `memory(action="add", target="project", content="...")` 保存。
+以上是当前项目记忆的索引，每行对应 `<工作目录>/.navi/memories/` 下的一个记忆文件，需要时用 read_file 读取正文。索引在会话开始时生成，本会话内新写入的记忆下个会话才会出现。
+需要创建或修改项目记忆时，先加载 memory-creator 技能，按其中的规范操作；不要使用 memory 工具。
 
 **何时保存记忆：**
 - 用户纠正你的风格、格式、工作流程

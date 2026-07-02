@@ -75,7 +75,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 支撑对外的 `bash` / `powershell` 命令工具，并需要能在中断时杀掉 subprocess；`SearchSessionTool` 支持 DISCOVERY/SCROLL/BROWSE 三种模式。
 - `navi_agent/tools/registry.py`: 工具注册表。
 - `navi_agent/storage/history_store.py`: SQLite 会话历史存储。FTS5 全文搜索（unicode61 + trigram 双表，触发器自动同步）。关键方法：`search_messages()`、`get_messages_around()`、`get_anchored_view()`（window + bookends）、`get_session()`、`list_sessions_rich()`。
-- `navi_agent/storage/memory_store.py`: 长期记忆存储，包含全局 MEMORY/USER 和当前工作区 `.navi/memories/PROJECT.txt` 项目记忆。
+- `navi_agent/storage/memory_store.py`: 长期记忆存储，管理全局 MEMORY/USER。项目记忆是工作区 `.navi/memories/` 下的单条 .md 文件（frontmatter 含 name/description），由 `context_manager.build_project_memory_prompt()` 扫描生成 `PROJECT_memory.md` 索引注入系统提示词，模型按 memory-creator 技能规范用 write/patch 直接读写。
 - `navi_agent/storage/agent_store.py`: 子 agent 实例存储。
 - `navi_agent/context/context_manager.py`: 运行上下文组装。
 - `navi_agent/context/compressor.py`: 上下文压缩。
