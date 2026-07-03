@@ -1865,8 +1865,8 @@ class AgentRuntime:
             function=self._run_subagent,
         )
 
-        # attach_file 仅在接入网关（如微信）时注册；CLI 模式下不暴露给模型。
-        if self._channel != "cli":
+        # attach_file 仅在具备附件回传能力的消息网关中注册。
+        if self._channel in {"qq", "weixin"}:
             def attach_file(path: str) -> dict:
                 p = Path(path)
                 if not p.is_absolute():

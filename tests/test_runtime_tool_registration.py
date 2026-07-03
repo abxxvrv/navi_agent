@@ -65,6 +65,23 @@ def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path
     assert "powershell" in windows_runtime.tool_registry._tools
 
 
+def test_attach_file_only_registered_for_message_gateways(monkeypatch, tmp_path):
+    monkeypatch.setattr("navi_agent.runtime.agent.RunCommandTool", _CommandTool)
+    monkeypatch.setattr("navi_agent.runtime.agent.platform.system", lambda: "Linux")
+
+    for channel in ("cli", "web"):
+        runtime = _runtime(tmp_path / channel)
+        runtime._channel = channel
+        runtime._register_tools()
+        assert "attach_file" not in runtime.tool_registry._tools
+
+    for channel in ("qq", "weixin"):
+        runtime = _runtime(tmp_path / channel)
+        runtime._channel = channel
+        runtime._register_tools()
+        assert "attach_file" in runtime.tool_registry._tools
+
+
 def test_memory_tool_rejects_invalid_target(monkeypatch, tmp_path):
     monkeypatch.setattr("navi_agent.runtime.agent.RunCommandTool", _CommandTool)
     monkeypatch.setattr("navi_agent.runtime.agent.platform.system", lambda: "Linux")
