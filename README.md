@@ -103,18 +103,18 @@ navi --yolo
 
 ```json
 {
-  "default_provider": "mimo",
-  "default_model": "mimo-v2.5-pro",
+  "default_provider": "stepfun",
+  "default_model": "step-3.7-flash",
   "compression": {
     "provider": "deepseek",
     "model": "deepseek-v4-flash"
   },
   "providers": {
-    "mimo": {
+    "stepfun": {
       "api_key": "...",
-      "base_url": "https://token-plan-cn.xiaomimimo.com/v1",
+      "base_url": "https://api.stepfun.com/v1",
       "models": {
-        "mimo-v2.5-pro": { "context_window": 1048576 }
+        "step-3.7-flash": { "context_window": 262144 }
       }
     }
   }
