@@ -336,6 +336,45 @@ def test_running_toolbar_shows_interrupt_requested():
         assert "waiting for current operation" in interrupted_text
 
 
+def test_running_toolbar_shows_tool_status():
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(pipe_input)
+        prompt.begin_running()
+
+        prompt.set_tool_status("grep", "query=needle, path=.")
+        text = fragment_list_to_text(prompt._render_toolbar())
+
+        assert "using grep" in text
+        assert "query=needle" in text
+        assert "enter: newline" not in text
+
+        prompt.clear_tool_status("read_file")
+        assert "using grep" in fragment_list_to_text(prompt._render_toolbar())
+
+        prompt.clear_tool_status("grep")
+        assert "enter: newline" in fragment_list_to_text(prompt._render_toolbar())
+
+
+def test_tool_result_prints_bounded_argument_summary():
+    lines = []
+    cli.print_agent_event(
+        {
+            "type": "tool_result",
+            "tool_name": "search_session",
+            "tool_args": {"query": "needle", "extra": "x" * 200},
+            "tool_result": {"ok": True},
+            "elapsed": 0.2,
+        },
+        printer=lines.append,
+    )
+
+    assert len(lines) == 1
+    assert "search_session" in lines[0]
+    assert "query=needle" in lines[0]
+    assert "..." in lines[0]
+    assert len(lines[0]) < 180
+
+
 def test_running_ctrl_c_requests_cancel_without_exiting_app():
     cancels = []
 
@@ -614,6 +653,43 @@ def test_prompt_render_approval_shows_history_and_active_approval():
         assert "Need second approval" in text
         assert "Command: git diff" in text
         assert text.count("[1] Allow once") == 2
+
+
+def test_prompt_approval_history_multiline_command_height_matches_rendered_lines():
+    command = 'python -c "\nprint(1)\nprint(2)\nprint(3)\nprint(4)\nprint(5)\nprint(6)\n"'
+    with create_pipe_input() as pipe_input:
+        prompt = _make_prompt(pipe_input, on_approval_response=lambda choice: None)
+        first = ApprovalDecision(
+            action=ApprovalAction.ASK,
+            risk=RiskLevel.RISKY,
+            reason="Need approval",
+            tool_name="bash",
+            tool_args={"command": command},
+            approval_key="run:multiline",
+            command=command,
+        )
+        second = ApprovalDecision(
+            action=ApprovalAction.ASK,
+            risk=RiskLevel.RISKY,
+            reason="Need second approval",
+            tool_name="bash",
+            tool_args={"command": "git diff"},
+            approval_key="run:git diff",
+            command="git diff",
+        )
+
+        prompt.show_approval(first)
+        prompt._submit_approval(0)
+        prompt.clear_approval()
+        prompt.show_approval(second)
+        lines = prompt._approval_lines()
+        text = fragment_list_to_text(prompt._render_approval())
+
+        assert all("\n" not in line for _style, line in lines)
+        assert prompt._approval_height() == text.count("\n")
+        assert "approval result" in text
+        assert "Need second approval" in text
+        assert "Command: git diff" in text
 
 
 def test_prompt_clear_approval_clear_history_removes_history_and_active_state():

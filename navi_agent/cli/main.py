@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -22,7 +23,7 @@ from ..storage.history_store import HistoryStore
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
 from .init_command import run_doctor, run_init
-from .ui import NaviStreamView, approval_panel, console, format_context_status
+from .ui import NaviStreamView, _format_args, approval_panel, console, format_context_status
 
 
 APP_NAME = "Navi"
@@ -151,10 +152,11 @@ def print_splash(
     console.print(renderable)
 
 
-def print_chat_help() -> None:
+def print_chat_help(printer: Callable[..., None] | None = None) -> None:
     """
     chat 模式里的帮助信息。
     """
+    _p = printer or console.print
     help_text = "\n".join(
         [
             "[bold]Commands[/bold]",
@@ -175,7 +177,7 @@ def print_chat_help() -> None:
         ]
     )
 
-    console.print(
+    _p(
         Panel(
             help_text,
             title="Navi",
@@ -334,7 +336,13 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
             name = tool_args.get("name", "")
             _p(f"[dim]┊ {tool_name}[/dim] [bold]{name}[/bold]")
         else:
-            _p(f"[dim]┊ {tool_name}[/dim]")
+            from rich.markup import escape
+
+            detail = _format_args(tool_args)
+            if detail:
+                _p(f"[dim]┊ {tool_name}[/dim] [bold]{escape(detail)}[/bold]")
+            else:
+                _p(f"[dim]┊ {tool_name}[/dim]")
 
     elif event_type == "tool_result":
         elapsed = event.get("elapsed")
@@ -374,7 +382,15 @@ def print_agent_event(event: dict[str, Any], printer=None, box=None) -> None:
             if tool_result.get("ok") is False:
                 _p(f"[red]┊ {tool_name} failed:[/red] {tool_result.get('error', 'Unknown error')}")
             else:
-                _p(f"[dim]┊ {tool_name}[/dim]{elapsed_str}")
+                from rich.markup import escape
+
+                detail = _format_args(tool_args)
+                if len(detail) > 100:
+                    detail = detail[:97] + "..."
+                if detail:
+                    _p(f"[dim]┊ {tool_name}[/dim] [bold]{escape(detail)}[/bold]{elapsed_str}")
+                else:
+                    _p(f"[dim]┊ {tool_name}[/dim]{elapsed_str}")
 
     elif event_type == "tool_error":
         _p(f"[red]┊ {tool_name} error:[/red] {event.get('error')}")
@@ -599,11 +615,16 @@ def list_sessions_from_navi_home(limit: int = 20) -> list[dict]:
     return HistoryStore.list_sessions(get_navi_home() / "history.sqlite3", limit=limit)
 
 
-def print_sessions_table(limit: int = 5, current_session_id: str | None = None) -> None:
+def print_sessions_table(
+    limit: int = 5,
+    current_session_id: str | None = None,
+    printer: Callable[..., None] | None = None,
+) -> None:
+    _p = printer or console.print
     sessions = list_sessions_from_navi_home(limit)
 
     if not sessions:
-        console.print("[yellow]No sessions found.[/yellow]")
+        _p("[yellow]No sessions found.[/yellow]")
         return
 
     # 把当前会话移到最前面并加标记
@@ -637,7 +658,7 @@ def print_sessions_table(limit: int = 5, current_session_id: str | None = None) 
             title = f"[bold green]{title} (current)[/bold green]"
         table.add_row(title, s["project_path"], created, s["session_id"])
 
-    console.print(table)
+    _p(table)
 
 
 def _interactive_select(options: list[str], selected: int = 0) -> int | None:
@@ -780,6 +801,7 @@ def handle_slash_command(
     command: str,
     runtime: AgentRuntime,
     workspace: Path,
+    printer: Callable[..., None] | None = None,
 ) -> bool:
     """
     处理 chat 模式里的内部命令。
@@ -790,6 +812,7 @@ def handle_slash_command(
     if not command.startswith("/"):
         return False
 
+    _p = printer or console.print
     parts = command.split(maxsplit=1)
     command_name = parts[0]
     command_args = parts[1] if len(parts) > 1 else ""
@@ -813,7 +836,7 @@ def handle_slash_command(
         raise EOFError
 
     if command_name == "/help":
-        print_chat_help()
+        print_chat_help(printer=_p)
         return True
 
     if command_name == "/clear":
@@ -824,12 +847,12 @@ def handle_slash_command(
         tools = list_runtime_tools(runtime)
 
         if not tools:
-            console.print("[yellow]No tools found.[/yellow]")
+            _p("[yellow]No tools found.[/yellow]")
             return True
 
-        console.print("[bold]Available tools[/bold]")
+        _p("[bold]Available tools[/bold]")
         for tool in tools:
-            console.print(f"- {tool}")
+            _p(f"- {tool}")
 
         return True
 
@@ -837,26 +860,26 @@ def handle_slash_command(
         skills = list_skills_from_navi_home()
 
         if not skills:
-            console.print("[yellow]No skills found.[/yellow]")
+            _p("[yellow]No skills found.[/yellow]")
             return True
 
-        console.print("[bold]Available skills[/bold]")
+        _p("[bold]Available skills[/bold]")
         for skill in skills:
-            console.print(f"- {skill}")
+            _p(f"- {skill}")
 
         return True
 
     if command_name == "/sessions":
         current_session_id = runtime.session_store.session_id if runtime else None
-        print_sessions_table(limit=5, current_session_id=current_session_id)
-        console.print("[dim]Press Ctrl+O to show more sessions.[/dim]")
+        print_sessions_table(limit=5, current_session_id=current_session_id, printer=_p)
+        _p("[dim]Press Ctrl+O to show more sessions.[/dim]")
         return True
 
     if command_name == "/search":
         query = command_args
         if not query:
-            console.print("[yellow]Usage: /search <query>[/yellow]")
-            console.print("[dim]支持关键词、短语（用引号）、布尔（AND/OR/NOT）[/dim]")
+            _p("[yellow]Usage: /search <query>[/yellow]")
+            _p("[dim]支持关键词、短语（用引号）、布尔（AND/OR/NOT）[/dim]")
             return True
 
         try:
@@ -865,7 +888,7 @@ def handle_slash_command(
 
             db_path = get_navi_home() / "history.sqlite3"
             if not db_path.is_file():
-                console.print("[yellow]没有历史会话。[/yellow]")
+                _p("[yellow]没有历史会话。[/yellow]")
                 return True
 
             store = HistoryStore.__new__(HistoryStore)
@@ -878,11 +901,11 @@ def handle_slash_command(
             results = store.search_messages(query, limit=10)
 
             if not results:
-                console.print(f"[yellow]没有找到包含 \"{query}\" 的消息。[/yellow]")
+                _p(f"[yellow]没有找到包含 \"{query}\" 的消息。[/yellow]")
                 return True
 
-            console.print(f"[bold]搜索结果[/bold] ({len(results)} 条)")
-            console.print()
+            _p(f"[bold]搜索结果[/bold] ({len(results)} 条)")
+            _p()
 
             for i, r in enumerate(results, 1):
                 session_id = r.get("session_id", "")
@@ -891,14 +914,14 @@ def handle_slash_command(
                 created_at = r.get("created_at", "")
 
                 # 标题行
-                console.print(f"[cyan]{i}.[/cyan] [bold]{title}[/bold]")
-                console.print(f"   [dim]{session_id} · {created_at}[/dim]")
+                _p(f"[cyan]{i}.[/cyan] [bold]{title}[/bold]")
+                _p(f"   [dim]{session_id} · {created_at}[/dim]")
 
                 # 片段（高亮匹配词）
                 if snippet:
                     # 移除 FTS5 snippet 标记，改用 Rich 高亮
                     clean_snippet = snippet.replace(">>>", "[bold]").replace("<<<", "[/bold]")
-                    console.print(f"   {clean_snippet}")
+                    _p(f"   {clean_snippet}")
 
                 # 上下文摘要
                 context = r.get("context", [])
@@ -910,24 +933,24 @@ def handle_slash_command(
                         if content:
                             ctx_parts.append(f"[dim]{role}:[/dim] {content}")
                     if ctx_parts:
-                        console.print(f"   [dim]├─ {' │ '.join(ctx_parts)}[/dim]")
+                        _p(f"   [dim]├─ {' │ '.join(ctx_parts)}[/dim]")
 
-                console.print()
+                _p()
 
             return True
         except Exception as e:
-            console.print(f"[red]搜索失败: {e}[/red]")
+            _p(f"[red]搜索失败: {e}[/red]")
             return True
 
     if command_name == "/mcp":
         try:
             from ..integrations.mcp_commands import handle_mcp_command
             result = handle_mcp_command(command_args, runtime.tool_registry)
-            console.print(result)
+            _p(result)
         except ImportError:
-            console.print("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
+            _p("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
         except Exception as e:
-            console.print(f"[red]MCP command error: {e}[/red]")
+            _p(f"[red]MCP command error: {e}[/red]")
         return True
 
     if command_name == "/model":
@@ -936,31 +959,31 @@ def handle_slash_command(
 
     if command_name == "/approval":
         mode = getattr(runtime.approval_manager, "mode", None)
-        console.print(f"[bold]Approval mode[/bold]: {mode.value if mode else 'unknown'}")
+        _p(f"[bold]Approval mode[/bold]: {mode.value if mode else 'unknown'}")
 
         allowlist = getattr(runtime.approval_manager, "session_allowlist", set())
         if allowlist:
-            console.print("[bold]Session approvals[/bold]")
+            _p("[bold]Session approvals[/bold]")
             for item in sorted(allowlist):
-                console.print(f"- {item}")
+                _p(f"- {item}")
         else:
-            console.print("[dim]No session approvals yet.[/dim]")
+            _p("[dim]No session approvals yet.[/dim]")
 
         return True
 
     if command_name == "/compress":
         result = runtime.compress_context_to_new_session()
         if not result.get("ok"):
-            console.print(f"[red]Compress failed:[/red] {result.get('error', 'unknown error')}")
+            _p(f"[red]Compress failed:[/red] {result.get('error', 'unknown error')}")
             return True
 
         if not result.get("compressed"):
-            console.print("[yellow]Nothing to compress yet.[/yellow]")
+            _p("[yellow]Nothing to compress yet.[/yellow]")
             return True
 
-        console.print("[green]Compressed context into a new session.[/green]")
-        console.print(f"[dim]Previous session: {result['old_session_id']}[/dim]")
-        console.print(f"[dim]Current session:  {result['new_session_id']}[/dim]")
+        _p("[green]Compressed context into a new session.[/green]")
+        _p(f"[dim]Previous session: {result['old_session_id']}[/dim]")
+        _p(f"[dim]Current session:  {result['new_session_id']}[/dim]")
         return True
 
     if command_name == "/fork":
@@ -980,9 +1003,9 @@ def handle_slash_command(
         new_store = current_store.fork_for_user(current_messages)
         new_session_id = new_store.session_id
 
-        console.print(f"[green]Forked session.[/green]")
-        console.print(f"[dim]Original session: {current_session_id}[/dim]")
-        console.print(f"[dim]New session:      {new_session_id}[/dim]")
+        _p(f"[green]Forked session.[/green]")
+        _p(f"[dim]Original session: {current_session_id}[/dim]")
+        _p(f"[dim]New session:      {new_session_id}[/dim]")
 
         # Open new terminal window
         try:
@@ -1021,10 +1044,10 @@ def handle_slash_command(
                     "-Command", ps_command,
                 ])
 
-            console.print("[dim]Opened new terminal window.[/dim]")
+            _p("[dim]Opened new terminal window.[/dim]")
         except Exception as e:
-            console.print(f"[yellow]Could not open new terminal: {e}[/yellow]")
-            console.print(f"[dim]Manual: navi --resume {new_session_id}[/dim]")
+            _p(f"[yellow]Could not open new terminal: {e}[/yellow]")
+            _p(f"[dim]Manual: navi --resume {new_session_id}[/dim]")
 
         return True
 

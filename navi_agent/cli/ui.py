@@ -310,11 +310,21 @@ class NaviStreamView:
 def _tool_detail(name: str, args: dict[str, Any]) -> str:
     if name in {"bash", "powershell"}:
         return str(args.get("command") or "")
-    if name in {"read_file", "write_file", "patch_file", "list_dir", "glob", "grep"}:
+    if name in {"read_file", "write_file", "patch_file", "list_dir"}:
         return str(args.get("path") or args.get("pattern") or ".")
     if name == "skill_view":
         return str(args.get("name") or "")
-    return ""
+    return _format_args(args)
+
+
+def _format_args(args: dict[str, Any]) -> str:
+    parts = []
+    for key, value in args.items():
+        text = str(value).replace("\n", " ")
+        if len(text) > 80:
+            text = text[:77] + "..."
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
 
 
 def _estimate_tokens(text: str) -> float:

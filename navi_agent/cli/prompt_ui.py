@@ -84,6 +84,7 @@ class NaviPromptSession:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._cancel_requested = False
         self._force_exit = False  # Double Ctrl+C → force exit
+        self._tool_status: dict[str, Any] | None = None
         self._last_interrupt_time: float = 0.0  # 上次中断键时间（用于 double-press 检测）
         self._last_buffer_text = ""
         self._paste_capture_active = False
@@ -496,6 +497,7 @@ class NaviPromptSession:
         self._running = True
         self._cancel_requested = False
         self._force_exit = False
+        self._tool_status = None
         self._app.invalidate()
 
     def end_running(self) -> None:
@@ -511,6 +513,7 @@ class NaviPromptSession:
             force_exit=self._force_exit,
         )
         self._running = False
+        self._tool_status = None
         self._reassert_console_input_mode()
         self._app.invalidate()
 
@@ -552,6 +555,20 @@ class NaviPromptSession:
         self._approval_state = None
         if clear_history:
             self._approval_history.clear()
+        self.invalidate()
+
+    def set_tool_status(self, name: str, detail: str = "") -> None:
+        self._tool_status = {
+            "name": name,
+            "detail": detail,
+            "started_at": time.monotonic(),
+        }
+        self.invalidate()
+
+    def clear_tool_status(self, name: str | None = None) -> None:
+        if name is not None and self._tool_status and self._tool_status.get("name") != name:
+            return
+        self._tool_status = None
         self.invalidate()
 
     @property
@@ -977,7 +994,29 @@ class NaviPromptSession:
                 ("", f"  Decision: [{index + 1}] {label}"),
             ])
             if command:
-                lines.append(("", f"  Command: {command}"))
+                display_command = command
+                if len(display_command) > 300:
+                    display_command = display_command[:300] + "..."
+                app = get_app_or_none()
+                columns = app.output.get_size().columns if app is not None else 80
+                wrap_width = max(40, min(120, columns - 12))
+                cmd_lines: list[str] = []
+                for source_line in display_command.split("\n"):
+                    wrapped = textwrap.wrap(
+                        source_line,
+                        width=wrap_width,
+                        break_long_words=True,
+                        break_on_hyphens=False,
+                        replace_whitespace=False,
+                        drop_whitespace=False,
+                    )
+                    cmd_lines.extend(wrapped or [""])
+                if len(cmd_lines) > 6:
+                    cmd_lines = cmd_lines[:6]
+                    cmd_lines.append("...")
+                lines.append(("", f"  Command: {cmd_lines[0] if cmd_lines else ''}"))
+                for extra in cmd_lines[1:]:
+                    lines.append(("", f"         {extra}"))
             lines.append(("class:running-prompt-separator", "╰" + "─" * 79))
         state = self._approval_state
         if not state:
@@ -1142,6 +1181,21 @@ class NaviPromptSession:
                 fragments.append(("class:bottom-toolbar", "approval: use ↑/↓ or 1/2/3, then Enter"))
             elif self._cancel_requested:
                 fragments.append(("class:bottom-toolbar", "interrupt requested  |  waiting for current operation"))
+            elif self._tool_status:
+                status = self._tool_status
+                name = str(status.get("name") or "tool")
+                detail = str(status.get("detail") or "")
+                elapsed = time.monotonic() - float(status.get("started_at") or time.monotonic())
+                line = f"using {name}"
+                if detail:
+                    line = f"{line}  {detail}"
+                line = f"{line}  {elapsed:.1f}s"
+                app = get_app_or_none()
+                columns = app.output.get_size().columns if app is not None else 80
+                max_width = max(20, columns - 1)
+                if len(line) > max_width:
+                    line = line[:max_width - 3] + "..."
+                fragments.append(("class:bottom-toolbar", line))
             else:
                 fragments.append(("class:bottom-toolbar", "enter: newline  |  ctrl+c/esc: interrupt"))
         return fragments

@@ -49,10 +49,11 @@ def test_handle_slash_command_does_not_print_for_unknown_slash(monkeypatch) -> N
 def test_handle_slash_command_handles_help(monkeypatch) -> None:
     calls: list[str] = []
 
-    monkeypatch.setattr(main, "print_chat_help", lambda: calls.append("help"))
+    monkeypatch.setattr(main, "print_chat_help", lambda **kwargs: calls.append(kwargs["printer"]))
 
-    assert main.handle_slash_command("/help", _runtime_stub(), Path(".")) is True
-    assert calls == ["help"]
+    printer = lambda *args, **kwargs: None
+    assert main.handle_slash_command("/help", _runtime_stub(), Path("."), printer=printer) is True
+    assert calls == [printer]
 
 
 def test_handle_slash_command_handles_search_with_tab_separator(monkeypatch, tmp_path) -> None:
@@ -85,3 +86,23 @@ def test_handle_slash_command_handles_mcp_with_tab_separator(monkeypatch) -> Non
     runtime = _runtime_stub()
     assert main.handle_slash_command("/mcp\tstatus", runtime, Path(".")) is True
     assert calls == [("status", runtime.tool_registry)]
+
+
+def test_handle_slash_command_uses_custom_printer(monkeypatch) -> None:
+    printed: list[object] = []
+
+    monkeypatch.setattr(main, "list_runtime_tools", lambda runtime: ["read_file"])
+    monkeypatch.setattr(
+        main.console,
+        "print",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("console.print used")),
+    )
+
+    assert main.handle_slash_command(
+        "/tools",
+        _runtime_stub(),
+        Path("."),
+        printer=lambda *args, **kwargs: printed.append((args, kwargs)),
+    ) is True
+
+    assert printed == [(("[bold]Available tools[/bold]",), {}), (("- read_file",), {})]

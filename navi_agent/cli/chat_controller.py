@@ -7,8 +7,6 @@ from typing import Any
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.key_binding import KeyBindings
-from rich.markdown import Markdown
-from rich.text import Text
 
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..tools.approval_broker import ApprovalBroker
@@ -19,7 +17,8 @@ from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
 from .paste_collapse import expand_paste_references
 from .paste_trace import summarize_text, trace_paste
 from .stream_box import StreamingBox
-from .ui import console
+from .terminal_output import TerminalOutput
+from .ui import _format_args, console
 
 
 class ChatController:
@@ -39,7 +38,7 @@ class ChatController:
         print_agent_event: Callable[..., None],
         render_bottom_toolbar: Callable[[AgentRuntime, Path, dict | None], Any],
         create_prompt_key_bindings: Callable[[AgentRuntime | None], KeyBindings],
-        handle_slash_command: Callable[[str, AgentRuntime, Path], bool],
+        handle_slash_command: Callable[..., bool],
         ask_approval_from_cli: Callable[[ApprovalDecision], UserApprovalChoice],
         result_is_ok: Callable[[Any], bool],
         result_error: Callable[[Any], str],
@@ -50,9 +49,8 @@ class ChatController:
         self.approval_mode = approval_mode
         self.resume_session_id = resume_session_id
         self.slash_commands = slash_commands
-        self.print_live = print_live
+        self.output = TerminalOutput(print_live, print_agent_event)
         self.print_splash = print_splash
-        self.print_agent_event = print_agent_event
         self.render_bottom_toolbar = render_bottom_toolbar
         self.create_prompt_key_bindings = create_prompt_key_bindings
         self.handle_slash_command = handle_slash_command
@@ -73,7 +71,7 @@ class ChatController:
         self.loop = asyncio.get_running_loop()
         self.workspace = self.workspace.resolve()
 
-        self.stream_box = StreamingBox(self.print_live)
+        self.stream_box = StreamingBox(self.output.raw)
 
         def approval_handler(decision: ApprovalDecision) -> UserApprovalChoice:
             if self.approval_broker is None:
@@ -86,20 +84,14 @@ class ChatController:
 
         approval_handler.cancel_current = cancel_approval  # type: ignore[attr-defined]
 
-        def handle_runtime_event(event: dict[str, Any]) -> None:
-            if event.get("type") == "approval_batch_done":
-                self._call_ui(lambda: self.prompt_session.clear_approval(clear_history=True))
-                return
-            self.print_agent_event(event, box=self.stream_box)
-
         self.runtime = AgentRuntime(
             workspace=self.workspace,
             max_steps=self.max_steps,
-            event_handler=handle_runtime_event,
+            event_handler=self.handle_runtime_event,
             approval_mode=self.approval_mode,
             approval_handler=approval_handler,
             resume_session_id=self.resume_session_id,
-            on_output=self.print_live,
+            on_output=self.output.raw,
         )
 
         navi_home = get_navi_home()
@@ -144,6 +136,34 @@ class ChatController:
         sid = self.runtime.session_store.session_id
         console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
 
+    def handle_runtime_event(self, event: dict[str, Any]) -> None:
+        event_type = event.get("type")
+        if event_type == "approval_batch_done":
+            prompt = self.prompt_session
+            if prompt is not None:
+                self._call_ui(lambda: prompt.clear_approval(clear_history=True))
+            return
+
+        if event_type == "tool_start":
+            if self.stream_box is not None and self.stream_box.has_output:
+                self.stream_box.close_all()
+            name = str(event.get("tool_name") or "tool")
+            detail = _format_args(event.get("tool_args") or {})
+            prompt = self.prompt_session
+            if prompt is not None:
+                self._call_ui(lambda: prompt.set_tool_status(name, detail))
+            return
+
+        if event_type in {"tool_result", "tool_error"}:
+            self.output.agent_event(event, box=self.stream_box)
+            name = str(event.get("tool_name") or "tool")
+            prompt = self.prompt_session
+            if prompt is not None:
+                self._call_ui(lambda: prompt.clear_tool_status(name))
+            return
+
+        self.output.agent_event(event, box=self.stream_box)
+
     async def process_message(self, text: str, image_paths: list[Path] | None = None) -> None:
         image_paths = image_paths or []
         trace_paste(
@@ -161,7 +181,7 @@ class ChatController:
         stripped = text.strip()
         if not image_paths and stripped == "/paste":
             if not prompt_session.attach_clipboard_image():
-                self.print_live("[yellow]No image found in clipboard.[/yellow]")
+                self.output.notice("[yellow]No image found in clipboard.[/yellow]")
             return
 
         if not image_paths and stripped.startswith("/image "):
@@ -170,13 +190,14 @@ class ChatController:
             if path_text and not image_path.is_absolute():
                 image_path = self.workspace / image_path
             if not path_text or not prompt_session.attach_image_path(image_path):
-                self.print_live(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
+                self.output.notice(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
             return
 
         if not image_paths and self.handle_slash_command(
             command=text,
             runtime=runtime,
             workspace=self.workspace,
+            printer=self.output.raw,
         ):
             return
 
@@ -188,16 +209,9 @@ class ChatController:
         if runtime.reviewer.pending_message:
             msg = runtime.reviewer.pending_message
             runtime.reviewer.pending_message = None
-            self.print_live(f"[dim]💾 {msg}[/dim]")
+            self.output.notice(f"[dim]💾 {msg}[/dim]")
 
-        self.print_live()
-        display_lines = [f"  [image] {path}" for path in image_paths]
-        if display_text:
-            display_lines.append(f"> {display_text}")
-        elif not display_lines:
-            display_lines.append(">")
-        self.print_live(Text("\n".join(display_lines), style="#87CEEB"))
-        self.print_live()
+        self.output.user_message(display_text, image_paths)
 
         import time as _time
 
@@ -263,15 +277,13 @@ class ChatController:
 
         if not stream_box.had_output:
             answer = result.get("final_answer") or result.get("content") or ""
-            if answer:
-                self.print_live()
-                self.print_live(Markdown(answer))
+            self.output.assistant(answer)
 
         if prompt_session.cancel_requested:
-            self.print_live("[yellow]Interrupted.[/yellow]")
+            self.output.notice("[yellow]Interrupted.[/yellow]")
 
         if not self.result_is_ok(result):
-            self.print_live(f"[red]{self.result_error(result)}[/red]")
+            self.output.error(self.result_error(result))
 
     def open_model_picker(self) -> None:
         runtime = self._runtime()
@@ -280,7 +292,7 @@ class ChatController:
         info = runtime.get_model_info()
         providers = info["providers"]
         if not providers:
-            self.print_live("[yellow]No providers configured. Edit ~/.navi/config.json[/yellow]")
+            self.output.notice("[yellow]No providers configured. Edit ~/.navi/config.json[/yellow]")
             return
 
         def on_provider_selected(provider: str) -> list[str]:
@@ -289,9 +301,9 @@ class ChatController:
 
         def on_model_selected(provider: str, model: str) -> None:
             if runtime.switch_model(provider, model):
-                self.print_live(f"[green]Switched to {provider} / {model}[/green]")
+                self.output.notice(f"[green]Switched to {provider} / {model}[/green]")
             else:
-                self.print_live(f"[red]Failed to switch to {provider} / {model}[/red]")
+                self.output.error(f"Failed to switch to {provider} / {model}")
 
         prompt_session.open_model_picker(
             providers=providers,
@@ -314,7 +326,7 @@ class ChatController:
             trace_interrupt("chat_runtime_interrupt_scheduled")
         if not self.cancel_notice_printed:
             self.cancel_notice_printed = True
-            self.print_live("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
+            self.output.notice("[yellow]Interrupt requested; waiting for current operation...[/yellow]")
 
     def handle_approval_response(self, choice: UserApprovalChoice) -> None:
         if self.approval_broker is not None:

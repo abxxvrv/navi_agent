@@ -1,4 +1,5 @@
 from navi_agent.cli.chat_controller import ChatController
+from navi_agent.cli.terminal_output import TerminalOutput
 
 
 def test_sigint_routes_to_prompt_when_running(monkeypatch, tmp_path):
@@ -43,3 +44,77 @@ def test_sigint_routes_to_prompt_when_running(monkeypatch, tmp_path):
     assert previous_calls == []
 
     restore()
+
+
+def test_runtime_tool_start_updates_prompt_without_scrollback():
+    controller = object.__new__(ChatController)
+    event_calls = []
+
+    class Prompt:
+        def __init__(self):
+            self.status = None
+
+        def set_tool_status(self, name, detail):
+            self.status = (name, detail)
+
+        def clear_tool_status(self, name=None):
+            self.status = None
+
+    class StreamBox:
+        has_output = True
+
+        def __init__(self):
+            self.closed = False
+
+        def close_all(self):
+            self.closed = True
+
+    prompt = Prompt()
+    stream_box = StreamBox()
+    controller.prompt_session = prompt
+    controller.stream_box = stream_box
+    controller.loop = None
+    controller.output = TerminalOutput(
+        lambda *args, **kwargs: None,
+        lambda event, **kwargs: event_calls.append((event, kwargs)),
+    )
+
+    controller.handle_runtime_event(
+        {"type": "tool_start", "tool_name": "grep", "tool_args": {"query": "needle"}}
+    )
+
+    assert stream_box.closed is True
+    assert prompt.status == ("grep", "query=needle")
+    assert event_calls == []
+
+
+def test_runtime_tool_result_prints_history_and_clears_prompt():
+    controller = object.__new__(ChatController)
+    event_calls = []
+
+    class Prompt:
+        def __init__(self):
+            self.cleared = []
+
+        def clear_tool_status(self, name=None):
+            self.cleared.append(name)
+
+    prompt = Prompt()
+    controller.prompt_session = prompt
+    controller.stream_box = object()
+    controller.loop = None
+    controller.output = TerminalOutput(
+        lambda *args, **kwargs: None,
+        lambda event, **kwargs: event_calls.append((event, kwargs)),
+    )
+    event = {
+        "type": "tool_result",
+        "tool_name": "grep",
+        "tool_args": {"query": "needle"},
+        "tool_result": {"ok": True},
+    }
+
+    controller.handle_runtime_event(event)
+
+    assert event_calls == [(event, {"box": controller.stream_box})]
+    assert prompt.cleared == ["grep"]

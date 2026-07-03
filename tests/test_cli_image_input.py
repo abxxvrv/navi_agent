@@ -8,6 +8,7 @@ from prompt_toolkit.output import DummyOutput
 
 from navi_agent.cli.chat_controller import ChatController
 from navi_agent.cli.prompt_ui import NaviPromptSession
+from navi_agent.cli.terminal_output import TerminalOutput
 
 
 def _make_prompt(pipe_input, tmp_path):
@@ -139,7 +140,6 @@ def test_paste_slash_command_attaches_clipboard_image(tmp_path):
     controller.prompt_session = prompt
     controller.stream_box = object()
     controller.workspace = tmp_path
-    controller.print_live = lambda *args, **kwargs: None
     controller.handle_slash_command = lambda **kwargs: False
 
     asyncio.run(controller.process_message("/paste"))
@@ -160,9 +160,60 @@ def test_image_slash_command_attaches_path(tmp_path):
     controller.prompt_session = prompt
     controller.stream_box = object()
     controller.workspace = tmp_path
-    controller.print_live = lambda *args, **kwargs: None
     controller.handle_slash_command = lambda **kwargs: False
 
     asyncio.run(controller.process_message(f"/image {image}"))
 
     assert attached == [image]
+
+
+def test_process_message_prints_submitted_preview_once(tmp_path):
+    controller = ChatController.__new__(ChatController)
+    calls = []
+
+    class Prompt:
+        cancel_requested = False
+        force_exit = False
+        is_running = False
+
+        def invalidate(self):
+            pass
+
+        def begin_running(self):
+            self.is_running = True
+
+        def end_running(self):
+            self.is_running = False
+
+    class StreamBox:
+        had_output = True
+
+        def reset(self):
+            pass
+
+        def close_all(self):
+            pass
+
+    class Runtime:
+        reviewer = SimpleNamespace(pending_message=None)
+
+        def run_turn(self, text, image_paths=None):
+            return {"ok": True, "final_answer": "", "content": ""}
+
+    controller.runtime = Runtime()
+    controller.prompt_session = Prompt()
+    controller.stream_box = StreamBox()
+    controller.workspace = tmp_path
+    controller.timer = {"start": None, "frozen": 0.0}
+    controller.cancel_notice_printed = False
+    controller.output = TerminalOutput(
+        lambda *args, **kwargs: calls.append(args),
+        lambda *args, **kwargs: None,
+    )
+    controller.handle_slash_command = lambda **kwargs: False
+    controller.result_is_ok = lambda result: True
+    controller.result_error = lambda result: "error"
+
+    asyncio.run(controller.process_message("hello"))
+
+    assert len(calls) == 1
