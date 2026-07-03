@@ -364,6 +364,8 @@ class FakeRuntime:
 
     def __init__(self):
         self.calls: list = []
+        self.last_usage = {"prompt_tokens": 44}
+        self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
 
     def run_turn(self, text: str, image_paths=None):
         self.calls.append({"text": text, "image_paths": image_paths or []})
@@ -437,10 +439,11 @@ async def test_handle_message_image_passes_image_paths(tmp_path):
         path.write_bytes(fake_image_bytes)
         return [path], []
 
+    send_text = AsyncMock()
     with (
         patch.object(adapter, "_collect_media", side_effect=_fake_collect),
         patch.object(adapter, "_fetch_typing_ticket", AsyncMock()),
-        patch.object(adapter, "send_text", AsyncMock()),
+        patch.object(adapter, "send_text", send_text),
         patch.object(adapter, "_keep_typing", AsyncMock()),
     ):
         await adapter._handle_message(message)
@@ -448,6 +451,16 @@ async def test_handle_message_image_passes_image_paths(tmp_path):
     assert len(fake_runtime.calls) == 1
     assert len(fake_runtime.calls[0]["image_paths"]) == 1
     assert fake_runtime.calls[0]["image_paths"][0].name == "img.jpg"
+    workspace = Path(adapter._workspace).expanduser().resolve()
+    home = Path.home().resolve()
+    if workspace == home:
+        workspace_text = "~"
+    elif workspace.is_relative_to(home):
+        workspace_text = "~/" + workspace.relative_to(home).as_posix()
+    else:
+        workspace_text = workspace.as_posix()
+    sent_answer = send_text.await_args.args[1]
+    assert sent_answer.endswith(f"step-3.7-flash · 44% · {workspace_text}")
 
 
 @pytest.mark.asyncio

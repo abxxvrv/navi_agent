@@ -581,6 +581,18 @@ class QqAdapter:
                 return
 
             answer = result.get("final_answer") or result.get("error") or "（本轮没有产生回复）"
+            usage = runtime.last_usage
+            window = runtime.router.context_window
+            pct = round((usage.get("prompt_tokens", 0) if usage else 0) / window * 100) if window else 0
+            workspace = Path(self._workspace).expanduser().resolve()
+            home = Path.home().resolve()
+            if workspace == home:
+                workspace_text = "~"
+            elif workspace.is_relative_to(home):
+                workspace_text = "~/" + workspace.relative_to(home).as_posix()
+            else:
+                workspace_text = workspace.as_posix()
+            answer = f"{answer.rstrip()}\n\n{runtime.router.model_name} · {pct}% · {workspace_text}"
             await self.send_text(chat_id, answer, message_id)
             for attach_path in result.get("pending_attachments") or []:
                 await self._send_attachment(chat_id, attach_path, message_id)
