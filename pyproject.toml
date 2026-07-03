@@ -40,4 +40,5 @@ navi_agent = [
     "templates/navi_home/*.md",
     "templates/navi_home/*.txt",
     "templates/skills/**/*",
+    "gateway/webui/*",
 ]

@@ -288,6 +288,17 @@ navi qq allowlist --group --account <account_id>
 
 注意：QQ 的 `group_openid` **不是群号**，而是平台针对「每个机器人 + 每个群」生成的加密 id，无法从群号推导，只能从收到的群消息里获取。获取流程：先在群里 @一次机器人，未授权时网关**不会在群里回复**，但会在 `navi qq start` 的终端打印该群的 `group_openid`（含可直接复制的授权命令）；复制执行 `allow ... --group` 后，之后该群的消息即生效。私聊同理——未授权时机器人会私信告知用户自己的 openid。
 
+## Web UI
+
+`navi web` 在本机启动一个网页控制台，聊天能力与 CLI 一致（流式输出、思考过程、工具卡片、审批、中断、会话恢复、模型切换），并可在页面上启动/停止 QQ 和微信网关（扫码登录仍需在终端完成）：
+
+```powershell
+navi web                       # 默认 127.0.0.1:8788，审批 normal
+navi web -p 8080 -w ./proj --approval strict
+```
+
+启动后终端会打印带一次性访问 token 的 URL，用浏览器打开即可。服务默认只绑定 127.0.0.1；`--host` 改绑其他地址前请先想清楚风险——网页里的 agent 拥有和本地 CLI 相同的文件与命令执行权限。
+
 ## MCP
 
 交互式 CLI 内置 `/mcp` 命令，用于管理 MCP server：

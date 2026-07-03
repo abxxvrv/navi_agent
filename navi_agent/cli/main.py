@@ -1582,6 +1582,71 @@ def _resolve_qq_account(account_id: str) -> str:
     return accounts[0]
 
 
+@app.command("web")
+def web_ui(
+    port: Annotated[
+        int,
+        typer.Option("--port", "-p", help="Port to serve the web UI on."),
+    ] = 8788,
+    host: Annotated[
+        str,
+        typer.Option("--host", help="Host to bind. Keep 127.0.0.1 unless you know the risk."),
+    ] = "127.0.0.1",
+    workspace: Annotated[
+        Path,
+        typer.Option("--workspace", "-w", help="Workspace directory for the agent."),
+    ] = None,
+    approval: Annotated[
+        str,
+        typer.Option("--approval", help="Approval mode: strict, normal, or open."),
+    ] = "normal",
+):
+    """
+    Start the local web UI: chat plus QQ/WeChat gateway control.
+    """
+    load_navi_dotenv()
+
+    import logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    for _noisy in ("httpx", "httpcore", "mcp", "anyio", "asyncio", "aiohttp.access"):
+        logging.getLogger(_noisy).setLevel(logging.WARNING)
+
+    from ..gateway.web import WebAdapter
+
+    approval_mode = resolve_approval_mode(approval, yolo=False)
+    ui_workspace = (workspace or Path.cwd()).resolve()
+
+    try:
+        adapter = WebAdapter(
+            workspace=ui_workspace,
+            host=host,
+            port=port,
+            approval_mode=approval_mode,
+        )
+    except Exception as exc:
+        print_error_message(str(exc))
+        raise typer.Exit(code=1)
+
+    console.print(
+        Panel(
+            f"[bold]URL[/bold]: {adapter.url}\n"
+            f"[bold]Workspace[/bold]: {ui_workspace}\n"
+            f"[bold]Approval[/bold]: {approval_mode}\n"
+            f"[dim]在浏览器打开上面的地址（含访问 token）。Ctrl+C 停止。[/dim]",
+            title="Navi web UI",
+            border_style="green",
+        )
+    )
+
+    try:
+        asyncio.run(adapter.run())
+    except KeyboardInterrupt:
+        console.print("\n[dim]web UI stopped.[/dim]")
+
+
 @qq_app.command("login")
 def qq_login(
     timeout: Annotated[
