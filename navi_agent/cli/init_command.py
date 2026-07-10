@@ -34,6 +34,12 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "deepseek-v4-pro": {"context_window": 1048576},
         },
     },
+    "longcat": {
+        "base_url": "https://api.longcat.chat/openai",
+        "models": {
+            "LongCat-2.0": {"context_window": 1048576},
+        },
+    },
     "lmstudio": {
         "base_url": "http://localhost:1234/v1",
         "models": {},
