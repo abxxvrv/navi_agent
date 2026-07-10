@@ -81,10 +81,23 @@ class QwenProvider(BaseProvider):
         )
 
 
+class LongCatProvider(BaseProvider):
+    """LongCat API（OpenAI Chat Completions 兼容）。"""
+
+    def chat_stream_with_client(self, client, messages, tools, **kwargs):
+        params: dict[str, Any] = dict(
+            model=self.model_name, messages=messages, stream=True,
+        )
+        if tools:
+            params["tools"] = tools
+        return client.chat.completions.create(**params)
+
+
 PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "deepseek": DeepSeekProvider,
     "mimo": MimoProvider,
     "qwen": QwenProvider,
+    "longcat": LongCatProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
 }
