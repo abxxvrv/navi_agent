@@ -92,7 +92,7 @@ def test_model_router_builds_and_switches_lmstudio_provider(tmp_path):
 
 
 
-def test_longcat_provider_uses_standard_openai_params_with_tools():
+def test_longcat_provider_uses_standard_openai_params_with_tools(monkeypatch):
     captured = {}
 
     class FakeCompletions:
@@ -105,6 +105,8 @@ def test_longcat_provider_uses_standard_openai_params_with_tools():
 
     class FakeClient:
         chat = FakeChat()
+
+    monkeypatch.setattr(LongCatProvider, "create_client", lambda self: None)
 
     provider = LongCatProvider(
         api_key="longcat-key",
@@ -122,7 +124,7 @@ def test_longcat_provider_uses_standard_openai_params_with_tools():
     }
 
 
-def test_model_router_builds_longcat_provider(tmp_path):
+def test_model_router_builds_longcat_provider(tmp_path, monkeypatch):
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -140,6 +142,8 @@ def test_model_router_builds_longcat_provider(tmp_path):
         ),
         encoding="utf-8",
     )
+
+    monkeypatch.setattr(LongCatProvider, "create_client", lambda self: None)
 
     router = ModelRouter(config_path, provider="longcat", model="LongCat-2.0")
 
