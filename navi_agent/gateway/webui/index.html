@@ -689,7 +689,8 @@ function dispatch(ev) {
       input.disabled = true;
       $("attach-btn").disabled = true;
       $("file-input").disabled = true;
-      $("model-select").disabled = true;
+      fillModelSelect(ev.model_options, ev.model_info);
+      $("model-select").disabled = !ev.can_switch_model;
       $("send-btn").disabled = true;
       $("composer").classList.add("read-only");
       break;
@@ -782,7 +783,7 @@ function dispatch(ev) {
       break;
     }
     case "model_switched": {
-      if (!ev.ok) addNotice("模型切换失败", true);
+      if (!ev.ok) addNotice(ev.error || "模型切换失败", true);
       const info = ev.model_info || {};
       $("model-select").value = info.current_provider + "/" + info.current_model;
       break;
@@ -850,6 +851,7 @@ function setBusy(value) {
   busy = value;
   $("send-btn").disabled = value || readOnly;
   $("stop-btn").hidden = !value || readOnly;
+  if (!readOnly) $("model-select").disabled = value;
 }
 
 function autoGrow() {

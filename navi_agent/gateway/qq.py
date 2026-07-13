@@ -899,7 +899,8 @@ class QqAdapter:
                 workspace_text = "~/" + workspace.relative_to(home).as_posix()
             else:
                 workspace_text = workspace.as_posix()
-            answer = f"{answer.rstrip()}\n\n{runtime.router.model_name} · {pct}% · {workspace_text}"
+            model_name = result.get("model_name") or runtime.router.model_name
+            answer = f"{answer.rstrip()}\n\n{model_name} · {pct}% · {workspace_text}"
             await self.send_text(chat_id, answer, message_id)
             for attach_path in result.get("pending_attachments") or []:
                 await self._send_attachment(chat_id, attach_path, message_id)

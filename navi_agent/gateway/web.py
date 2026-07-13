@@ -244,7 +244,7 @@ class WebAdapter:
         self.port = port
         self.approval_mode = approval_mode
         self.token = token or secrets.token_urlsafe(16)
-        # kind -> {"task": Task | None, "account": str | None, "error": str | None}
+        # kind -> {"task": Task | None, "adapter": gateway adapter, ...}
         self._gateways: dict[str, dict[str, Any]] = {}
         # session_id -> AgentRuntime。构建 runtime 昂贵（含 MCP 发现），浏览器
         # 刷新/自动重连时按会话复用，与 qq.py 的 per-chat runtime 缓存同一模式。
@@ -320,15 +320,24 @@ class WebAdapter:
                 elif project_path == (navi_home / "weixin" / "workspace").resolve():
                     channel = "weixin"
             if channel in {"qq", "weixin"}:
+                runtime = self._gateway_runtime_for_session(channel, resume_session_id)
+                read_only_payload = {
+                    "type": "read_only",
+                    "session_id": resume_session_id,
+                    "channel": channel,
+                    "workspace": store.meta.get("project_path", ""),
+                    "can_switch_model": runtime is not None,
+                }
+                if runtime is not None:
+                    router = runtime.router
+                    read_only_payload["model_info"] = runtime.get_model_info()
+                    read_only_payload["model_options"] = [
+                        {"provider": provider, "model": model}
+                        for provider in router.list_providers()
+                        for model in router.list_models(provider)
+                    ]
                 await ws.send_str(
-                    _json_dumps(
-                        {
-                            "type": "read_only",
-                            "session_id": resume_session_id,
-                            "channel": channel,
-                            "workspace": store.meta.get("project_path", ""),
-                        }
-                    )
+                    _json_dumps(read_only_payload)
                 )
                 updated_at = store.meta.get("updated_at")
                 message_count = len(store.messages)
@@ -369,6 +378,40 @@ class WebAdapter:
                     }:
                         break
                     if msg.type == aiohttp.WSMsgType.TEXT:
+                        try:
+                            data = json.loads(msg.data)
+                        except (json.JSONDecodeError, TypeError):
+                            data = {}
+                        if isinstance(data, dict) and data.get("type") == "switch_model":
+                            runtime = self._gateway_runtime_for_session(
+                                channel, resume_session_id
+                            )
+                            if runtime is None:
+                                await ws.send_str(
+                                    _json_dumps(
+                                        {
+                                            "type": "notice",
+                                            "text": "当前网关会话未运行，无法切换模型。",
+                                        }
+                                    )
+                                )
+                            else:
+                                busy = runtime.is_busy
+                                ok = False if busy else runtime.switch_model(
+                                    str(data.get("provider") or ""), str(data.get("model") or "")
+                                )
+                                await ws.send_str(
+                                    _json_dumps(
+                                        {
+                                            "type": "model_switched",
+                                            "ok": ok,
+                                            "model_info": runtime.get_model_info(),
+                                            "error": "当前正在生成，请等待回复结束后再切换模型。"
+                                            if busy else None,
+                                        }
+                                    )
+                                )
+                            continue
                         await ws.send_str(
                             _json_dumps(
                                 {"type": "notice", "text": "网关会话不可在 Web 中发送。"}
@@ -445,7 +488,8 @@ class WebAdapter:
         elif mtype == "interrupt":
             conn.runtime.interrupt("用户通过 Web 请求取消")
         elif mtype == "switch_model":
-            ok = conn.runtime.switch_model(
+            busy = conn.runtime.is_busy
+            ok = False if busy else conn.runtime.switch_model(
                 str(data.get("provider") or ""), str(data.get("model") or "")
             )
             await ws.send_str(
@@ -454,6 +498,8 @@ class WebAdapter:
                         "type": "model_switched",
                         "ok": ok,
                         "model_info": conn.runtime.get_model_info(),
+                        "error": "当前正在生成，请等待回复结束后再切换模型。"
+                        if busy else None,
                     }
                 )
             )
@@ -500,6 +546,17 @@ class WebAdapter:
             "account": entry.get("account") if running else None,
             "error": entry.get("error"),
         }
+
+    def _gateway_runtime_for_session(self, kind: str, session_id: str) -> AgentRuntime | None:
+        entry = self._gateways.get(kind) or {}
+        task = entry.get("task")
+        adapter = entry.get("adapter")
+        if task is None or task.done() or adapter is None:
+            return None
+        for runtime in getattr(adapter, "_runtimes", {}).values():
+            if runtime.session_store.session_id == session_id:
+                return runtime
+        return None
 
     def _on_gateway_done(self, kind: str, task) -> None:
         entry = self._gateways.get(kind)
@@ -553,7 +610,12 @@ class WebAdapter:
             return web.json_response({"error": str(exc)}, status=500)
         gateway_task = asyncio.create_task(adapter.run())
         gateway_task.add_done_callback(lambda t: self._on_gateway_done(kind, t))
-        self._gateways[kind] = {"task": gateway_task, "account": account, "error": None}
+        self._gateways[kind] = {
+            "task": gateway_task,
+            "adapter": adapter,
+            "account": account,
+            "error": None,
+        }
         logger.info("web: started %s gateway account=%s", kind, account)
         return web.json_response(self._gateway_status(kind), dumps=_json_dumps)
 

@@ -169,6 +169,7 @@ class AgentRuntime:
         self.cancel_event = threading.Event()
         self._pending_attachments: list[str] = []
         self._model_stream_runner = ModelStreamRunner(self.router, self.cancel_event)
+        self._turn_lock = threading.Lock()
         self._current_scope: TurnScope | None = None
         # 当前执行线程 ID（用于线程级中断传播）
         self._execution_thread_id: int | None = None
@@ -243,10 +244,15 @@ class AgentRuntime:
             pass
 
     def run_task(self, task: str) -> dict[str, Any]:
-        return self._invoke_agent(task, keep_history=False)
+        with self._turn_lock:
+            return self._invoke_agent(task, keep_history=False)
 
     def run_turn(self, user_input: str, image_paths: list[Path] | None = None) -> dict[str, Any]:
-        return self._invoke_agent(user_input, keep_history=True, image_paths=image_paths)
+        with self._turn_lock:
+            model_name = self.router.model_name
+            result = self._invoke_agent(user_input, keep_history=True, image_paths=image_paths)
+            result["model_name"] = model_name
+            return result
 
     def interrupt(self, message: str | None = None) -> None:
         """Request the agent to interrupt its current loop.
@@ -305,11 +311,20 @@ class AgentRuntime:
             "models": self.router.list_models(),
         }
 
+    @property
+    def is_busy(self) -> bool:
+        return self._turn_lock.locked()
+
     def switch_model(self, provider_name: str, model_name: str) -> bool:
-        ok = self.router.switch_model(provider_name, model_name)
-        if ok:
-            self.session_store.set_model(provider_name, model_name)
-        return ok
+        if not self._turn_lock.acquire(blocking=False):
+            return False
+        try:
+            ok = self.router.switch_model(provider_name, model_name)
+            if ok:
+                self.session_store.set_model(provider_name, model_name)
+            return ok
+        finally:
+            self._turn_lock.release()
 
     # 清洗历史会话。
     @staticmethod

@@ -1,6 +1,8 @@
 import json
+import threading
 
 from navi_agent.model.router import LMStudioProvider, LongCatProvider, ModelRouter
+from navi_agent.runtime.agent import AgentRuntime
 
 
 def test_lmstudio_provider_uses_openai_compatible_params_with_tools():
@@ -148,3 +150,50 @@ def test_model_router_builds_longcat_provider(tmp_path, monkeypatch):
 
     assert isinstance(router._provider, LongCatProvider)
     assert router.context_window == 1048576
+
+
+def test_runtime_rejects_model_switch_while_turn_is_running():
+    started = threading.Event()
+    release = threading.Event()
+    router_calls = []
+    stored_models = []
+
+    class FakeRouter:
+        model_name = "old-model"
+
+        def switch_model(self, provider, model):
+            router_calls.append((provider, model))
+            self.model_name = model
+            return True
+
+    class FakeStore:
+        def set_model(self, provider, model):
+            stored_models.append((provider, model))
+
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime._turn_lock = threading.Lock()
+    runtime.router = FakeRouter()
+    runtime.session_store = FakeStore()
+
+    def invoke_agent(user_input, keep_history, image_paths=None):
+        started.set()
+        assert release.wait(2)
+        return {"ok": True, "final_answer": "done"}
+
+    runtime._invoke_agent = invoke_agent
+    result = {}
+    thread = threading.Thread(target=lambda: result.update(runtime.run_turn("hello")))
+    thread.start()
+    assert started.wait(2)
+
+    assert runtime.is_busy is True
+    assert runtime.switch_model("new-provider", "new-model") is False
+    assert router_calls == []
+    assert stored_models == []
+
+    release.set()
+    thread.join(2)
+    assert result["model_name"] == "old-model"
+    assert runtime.switch_model("new-provider", "new-model") is True
+    assert router_calls == [("new-provider", "new-model")]
+    assert stored_models == [("new-provider", "new-model")]

@@ -57,6 +57,7 @@ class FakeRuntime:
         self.last_usage = {"prompt_tokens": 5000}
         self.conversation_history: list[dict] = []
         self.interrupted: str | None = None
+        self.is_busy = False
 
     def run_turn(self, text, image_paths=None):
         return self.script(self, text)
@@ -194,6 +195,8 @@ def test_session_list_refreshes_for_gateway_created_sessions():
     assert "setInterval(loadSessions, 10000);" in html
     assert 'case "read_only":' in html
     assert "网关会话不可发送" in html
+    assert '$("model-select").disabled = !ev.can_switch_model;' in html
+    assert 'if (!readOnly) $("model-select").disabled = value;' in html
 
 
 def test_event_stream_and_turn_end():
@@ -293,6 +296,7 @@ def test_gateway_session_is_read_only_and_tracks_history(monkeypatch, tmp_path):
                 "session_id": store.session_id,
                 "channel": "qq",
                 "workspace": str((tmp_path / "qq" / "workspace").resolve()),
+                "can_switch_model": False,
             }
 
             store.append_message({"role": "assistant", "content": "第二条"})
@@ -304,6 +308,90 @@ def test_gateway_session_is_read_only_and_tracks_history(monkeypatch, tmp_path):
             }
         finally:
             await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_live_gateway_session_can_switch_model(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAVI_HOME", str(tmp_path))
+    store = HistoryStore(
+        tmp_path / "history.sqlite3",
+        project_path=tmp_path / "qq" / "workspace",
+        provider="fake",
+        model="fake-model",
+        channel="qq",
+    )
+    adapter = make_adapter(lambda rt, text: {"ok": True, "final_answer": ""})
+
+    class LiveRuntime:
+        def __init__(self):
+            self.router = FakeRouter()
+            self.session_store = store
+            self.provider = "fake"
+            self.model = "fake-model"
+            self.is_busy = False
+
+        def get_model_info(self):
+            return {
+                "current_provider": self.provider,
+                "current_model": self.model,
+                "current_model_name": self.model,
+                "providers": ["fake"],
+                "models": {"fake-model": {}},
+            }
+
+        def switch_model(self, provider, model):
+            self.provider = provider
+            self.model = model
+            self.session_store.set_model(provider, model)
+            return True
+
+    class LiveGateway:
+        _runtimes = {"chat": LiveRuntime()}
+
+    async def scenario():
+        stop = asyncio.Event()
+        task = asyncio.create_task(stop.wait())
+        adapter._gateways["qq"] = {"task": task, "adapter": LiveGateway()}
+        client = TestClient(TestServer(adapter.build_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                f"/ws?token={TOKEN}&session={store.session_id}"
+            )
+            await asyncio.wait_for(ws.receive_json(), 2)
+            read_only = await asyncio.wait_for(ws.receive_json(), 2)
+            assert read_only["can_switch_model"] is True
+            assert read_only["model_options"] == [
+                {"provider": "fake", "model": "fake-model"}
+            ]
+
+            LiveGateway._runtimes["chat"].is_busy = True
+            await ws.send_json(
+                {"type": "switch_model", "provider": "fake", "model": "next-model"}
+            )
+            rejected = await asyncio.wait_for(ws.receive_json(), 2)
+            assert rejected == {
+                "type": "model_switched",
+                "ok": False,
+                "model_info": LiveGateway._runtimes["chat"].get_model_info(),
+                "error": "当前正在生成，请等待回复结束后再切换模型。",
+            }
+            assert store.meta["model"] == "fake-model"
+
+            LiveGateway._runtimes["chat"].is_busy = False
+            await ws.send_json(
+                {"type": "switch_model", "provider": "fake", "model": "next-model"}
+            )
+            switched = await asyncio.wait_for(ws.receive_json(), 2)
+            assert switched["type"] == "model_switched"
+            assert switched["ok"] is True
+            assert store.meta["provider"] == "fake"
+            assert store.meta["model"] == "next-model"
+        finally:
+            await client.close()
+            stop.set()
+            await task
 
     asyncio.run(scenario())
 
