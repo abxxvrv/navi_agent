@@ -57,3 +57,32 @@ def test_prompt_provider_config_marks_lmstudio_multimodal(monkeypatch):
         "context_window": 32768,
         "multimodal": True,
     }
+
+
+def test_prompt_provider_config_accepts_longcat_defaults(monkeypatch):
+    def prompt(text, default="", **kwargs):
+        if text == "Select provider":
+            return "longcat"
+        if text.startswith("API key"):
+            return "longcat-key"
+        if text == "Base URL":
+            return default
+        if text == "Select model":
+            return "1"
+        raise AssertionError(f"unexpected prompt: {text}")
+
+    monkeypatch.setattr(init_command.typer, "prompt", prompt)
+
+    provider, model, provider_config = init_command._prompt_provider_config("Main model", {})
+
+    assert provider == "longcat"
+    assert model == "LongCat-2.0"
+    assert provider_config == {
+        "api_key": "longcat-key",
+        "base_url": "https://api.longcat.chat/openai",
+        "models": {
+            "LongCat-2.0": {
+                "context_window": 1048576,
+            }
+        },
+    }

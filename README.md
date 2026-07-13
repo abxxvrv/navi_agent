@@ -161,6 +161,30 @@ Navi 中的 LM Studio 配置示例：
 
 `model` 使用 LM Studio 中显示的模型 identifier。工具调用依赖本地模型和服务返回 OpenAI `tool_calls`；如果模型只把工具意图写成普通文本，Navi 不会执行工具。本地模型的 `<think>...</think>` 内容也会按普通正文显示，除非 provider 返回独立的 `reasoning_content` 字段。
 
+### LongCat API
+
+LongCat 使用 OpenAI Chat Completions 兼容接口。通过 `navi init` 选择 `longcat` 并填写 API Key，或手动配置：
+
+```json
+{
+  "default_provider": "longcat",
+  "default_model": "LongCat-2.0",
+  "compression": {
+    "provider": "longcat",
+    "model": "LongCat-2.0"
+  },
+  "providers": {
+    "longcat": {
+      "api_key": "...",
+      "base_url": "https://api.longcat.chat/openai",
+      "models": {
+        "LongCat-2.0": { "context_window": 1048576 }
+      }
+    }
+  }
+}
+```
+
 ## 工具系统
 
 主要内置工具包括：

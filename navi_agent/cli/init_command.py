@@ -42,6 +42,12 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "step-3.5-flash-2603": {"context_window": 262144},
         },
     },
+    "longcat": {
+        "base_url": "https://api.longcat.chat/openai",
+        "models": {
+            "LongCat-2.0": {"context_window": 1048576},
+        },
+    },
     "lmstudio": {
         "base_url": "http://localhost:1234/v1",
         "models": {},
