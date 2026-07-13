@@ -84,9 +84,9 @@ OP_INVALID_SESSION = 9
 OP_HELLO = 10
 OP_HEARTBEAT_ACK = 11
 
-# Only the C2C / group at-message event group (公域消息). We handle C2C only,
-# mirroring the WeChat gateway's DM-only experience.
+# Group/C2C message events plus the QQ group-configuration interaction.
 INTENT_GROUP_AND_C2C = 1 << 25
+INTENT_INTERACTION = 1 << 26
 
 # ── Message / media types ─────────────────────────────────────────────────────
 
@@ -250,6 +250,23 @@ async def get_gateway_url(session: "aiohttp.ClientSession", *, token: str) -> st
     if not url:
         raise RuntimeError(f"QQ gateway response missing url: {data}")
     return str(url)
+
+
+async def acknowledge_interaction(
+    session: "aiohttp.ClientSession",
+    *,
+    token: str,
+    interaction_id: str,
+    data: Dict[str, Any],
+) -> None:
+    """Acknowledge a QQ gateway interaction event."""
+    await _api_request(
+        session,
+        method="PUT",
+        token=token,
+        path=f"/interactions/{quote(interaction_id, safe='')}",
+        body={"code": 0, "data": data},
+    )
 
 
 async def _api_request(
@@ -549,10 +566,11 @@ async def download_inbound_media(
     session: "aiohttp.ClientSession",
     *,
     url: str,
+    destination: Path,
     timeout_seconds: float = 60.0,
     token: Optional[str] = None,
-) -> bytes:
-    """Download an inbound attachment URL after validating its host."""
+) -> None:
+    """Stream an inbound attachment URL to *destination* after validation."""
     if url.startswith("//"):
         url = "https:" + url
     elif not url.startswith(("http://", "https://")):
@@ -597,13 +615,19 @@ async def download_inbound_media(
             } or ip in ipaddress.ip_network("169.254.0.0/16") or ip in ipaddress.ip_network("100.64.0.0/10"):
                 raise ValueError(f"Blocked internal IP: {ip}")
 
-    async def _do() -> bytes:
+    async def _do() -> None:
         headers = {"Authorization": f"QQBot {token}"} if token else {}
         async with session.get(url, headers=headers) as response:
             response.raise_for_status()
-            return await response.read()
+            with destination.open("wb") as file:
+                async for chunk in response.content.iter_chunked(64 * 1024):
+                    file.write(chunk)
 
-    return await asyncio.wait_for(_do(), timeout=timeout_seconds)
+    try:
+        await asyncio.wait_for(_do(), timeout=timeout_seconds)
+    except (Exception, asyncio.CancelledError):
+        destination.unlink(missing_ok=True)
+        raise
 
 
 # ── Scan-to-configure QR login ────────────────────────────────────────────────
