@@ -51,6 +51,7 @@ class GoalStore:
 
     def update(self, goal_id: str, **fields: Any) -> dict[str, Any]:
         allowed = {
+            "session_id",
             "status",
             "cycle_count",
             "last_summary",
