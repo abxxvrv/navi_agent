@@ -6,8 +6,9 @@ from navi_agent.tools.registry import ToolRegistry
 
 
 class FakeRuntime:
-    def __init__(self, responses):
+    def __init__(self, responses, session_ids=None):
         self.responses = list(responses)
+        self.session_ids = list(session_ids or [])
         self.prompts = []
         self.session_store = SimpleNamespace(session_id="session-1")
         self.tool_registry = ToolRegistry()
@@ -17,6 +18,8 @@ class FakeRuntime:
     def run_turn(self, prompt):
         self.prompts.append(prompt)
         response = self.responses.pop(0)
+        if self.session_ids:
+            self.session_store.session_id = self.session_ids.pop(0)
         if isinstance(response, dict):
             return response
         self.tool_registry.invoke(
@@ -46,14 +49,19 @@ def test_goal_store_persists_latest_goal(tmp_path):
 
 
 def test_goal_runner_requires_verification_before_completion(tmp_path):
-    runtime = FakeRuntime(["ready", "completed"])
-    runner = GoalRunner(runtime, GoalStore(tmp_path / "history.sqlite3"))
+    runtime = FakeRuntime(
+        ["ready", "completed"],
+        session_ids=["session-2", "session-2"],
+    )
+    store = GoalStore(tmp_path / "history.sqlite3")
+    runner = GoalRunner(runtime, store)
     goal = runner.create("finish and verify the task")
 
     result = runner.run(goal["goal_id"])
 
     assert result["goal_status"] == "completed"
     assert result["goal"]["cycle_count"] == 2
+    assert store.latest("session-2")["goal_id"] == goal["goal_id"]
     assert "Independently verify" in runtime.prompts[1]
     assert not runtime.tool_registry.has("goal_status")
     assert runtime._tools_for_api == [{"type": "function", "function": {"name": "read_file"}}]
