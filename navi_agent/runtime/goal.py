@@ -92,7 +92,12 @@ class GoalRunner:
         }
 
         try:
-            goal = self.store.update(goal_id, status="running", last_error=None)
+            goal = self.store.update(
+                goal_id,
+                session_id=self.runtime.session_store.session_id,
+                status="running",
+                last_error=None,
+            )
             while goal["cycle_count"] < goal["max_cycles"]:
                 verifying = goal["status"] == "verifying"
                 signal.clear()
@@ -104,16 +109,19 @@ class GoalRunner:
                 except KeyboardInterrupt:
                     self.store.update(
                         goal_id,
+                        session_id=self.runtime.session_store.session_id,
                         status="paused",
                         last_error="user interrupted",
                     )
                     raise
 
+                session_id = self.runtime.session_store.session_id
                 cycle_count = goal["cycle_count"] + 1
                 if not result.get("ok"):
                     error = str(result.get("error") or "unknown turn error")
                     goal = self.store.update(
                         goal_id,
+                        session_id=session_id,
                         status="paused",
                         cycle_count=cycle_count,
                         last_error=error,
@@ -134,6 +142,7 @@ class GoalRunner:
                 if reported == "blocked":
                     goal = self.store.update(
                         goal_id,
+                        session_id=session_id,
                         status="blocked",
                         cycle_count=cycle_count,
                         last_summary=summary[:4000],
@@ -148,6 +157,7 @@ class GoalRunner:
                 if reported == "completed" and verifying:
                     goal = self.store.update(
                         goal_id,
+                        session_id=session_id,
                         status="completed",
                         cycle_count=cycle_count,
                         last_summary=summary[:4000],
@@ -159,15 +169,12 @@ class GoalRunner:
                         "goal": goal,
                     }
 
-                if reported in {"ready", "completed"}:
-                    next_status = "verifying"
-                elif verifying:
-                    next_status = "running"
-                else:
-                    next_status = "running"
-
+                next_status = (
+                    "verifying" if reported in {"ready", "completed"} else "running"
+                )
                 goal = self.store.update(
                     goal_id,
+                    session_id=session_id,
                     status=next_status,
                     cycle_count=cycle_count,
                     last_summary=summary[:4000],
@@ -176,6 +183,7 @@ class GoalRunner:
 
             goal = self.store.update(
                 goal_id,
+                session_id=self.runtime.session_store.session_id,
                 status="paused",
                 last_error="maximum goal cycles reached",
             )
