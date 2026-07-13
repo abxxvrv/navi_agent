@@ -151,7 +151,8 @@ def test_quote_extracts_attachment_from_first_element_summary(tmp_path, caplog):
             "filename": "项目 资料.zip",
         }
     ]
-    assert "structured=0 summary_markers=1 summary_parsed=1 summary_rejected=0" in caplog.text
+    assert "structured=0 summary_markers=1 selected_markers=1" in caplog.text
+    assert "summary_parsed=1 summary_rejected=0" in caplog.text
 
 
 def test_quote_rejects_malformed_attachment_summary(tmp_path, caplog):
@@ -173,7 +174,88 @@ def test_quote_rejects_malformed_attachment_summary(tmp_path, caplog):
     )
 
     assert attachments == []
-    assert "summary_markers=1 summary_parsed=0 summary_rejected=1" in caplog.text
+    assert "summary_markers=1 selected_markers=1" in caplog.text
+    assert "summary_parsed=0 summary_rejected=1" in caplog.text
+
+
+def test_group_quote_selects_marked_block_and_preserves_multiline_text(tmp_path):
+    text, attachments = _adapter(tmp_path)._extract_quoted_message(
+        {
+            "message_type": 103,
+            "msg_elements": [
+                {
+                    "content": (
+                        "=== 消息 1 ===\n"
+                        "[消息内容] 第一行\n第二行\n"
+                        "[消息类型] 引用消息\n\n"
+                        "=== 消息 2 ===\n"
+                        "[消息内容] 第一行\n第二行"
+                    )
+                }
+            ],
+        },
+        chat_type="group",
+    )
+
+    assert text == "第一行\n第二行"
+    assert attachments == []
+
+
+def test_group_quote_only_uses_attachment_from_marked_block(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    text, attachments = _adapter(tmp_path)._extract_quoted_message(
+        {
+            "id": "quote-message",
+            "message_type": 103,
+            "msg_elements": [
+                {
+                    "content": (
+                        "=== 消息 1 ===\n"
+                        "[消息类型] 引用消息\n"
+                        "[附件1] 类型:文件 文件名:report.md 大小:1.3KB "
+                        "URL:https://njc-download.ftn.qq.com/quote\n\n"
+                        "=== 消息 2 ===\n"
+                        "[消息内容] **不属于引用的上下文。**\n\n"
+                        "=== 消息 3 ===\n"
+                        "[附件1] 类型:文件 文件名:report.md 大小:1.3KB "
+                        "URL:https://njc-download.ftn.qq.com/context"
+                    )
+                }
+            ],
+        },
+        chat_type="group",
+    )
+
+    assert text == ""
+    assert attachments == [
+        {
+            "url": "https://njc-download.ftn.qq.com/quote",
+            "content_type": "file",
+            "filename": "report.md",
+        }
+    ]
+    assert "blocks=3 marked=1 selected=1" in caplog.text
+    assert "summary_markers=2 selected_markers=1" in caplog.text
+
+
+def test_group_quote_does_not_guess_between_unmarked_blocks(tmp_path):
+    text, attachments = _adapter(tmp_path)._extract_quoted_message(
+        {
+            "message_type": 103,
+            "msg_elements": [
+                {
+                    "content": (
+                        "=== 消息 1 ===\n[消息内容] 第一条\n\n"
+                        "=== 消息 2 ===\n[消息内容] 第二条"
+                    )
+                }
+            ],
+        },
+        chat_type="group",
+    )
+
+    assert text == ""
+    assert attachments == []
 
 
 def test_non_quote_ignores_structured_recent_message_attachments(tmp_path):
@@ -228,6 +310,77 @@ async def test_collect_media_preserves_png_extension_and_bytes(tmp_path):
     assert len(image_paths) == 1
     assert image_paths[0].suffix == ".png"
     assert image_paths[0].read_bytes() == png
+
+
+@pytest.mark.asyncio
+async def test_collect_media_deduplicates_group_quoted_images_by_content(tmp_path, caplog):
+    a = _adapter(tmp_path)
+    a._session = object()
+    a._ensure_token = AsyncMock(return_value="TOKEN")
+    png = b"\x89PNG\r\n\x1a\n" + b"same-image"
+    caplog.set_level(logging.INFO)
+
+    async def download(*_args, destination, **_kwargs):
+        destination.write_bytes(png)
+
+    with patch(
+        "navi_agent.gateway.qq.download_inbound_media",
+        AsyncMock(side_effect=download),
+    ):
+        image_paths, notes = await a._collect_media(
+            [
+                {
+                    "url": "https://multimedia.nt.qq.com.cn/image-a",
+                    "content_type": "image/png",
+                    "filename": "a.png",
+                    "_source": "quoted",
+                },
+                {
+                    "url": "https://multimedia.nt.qq.com.cn/image-b",
+                    "content_type": "image/png",
+                    "filename": "b.png",
+                    "_source": "quoted",
+                },
+            ],
+            message_id="quote-message",
+            chat_type="group",
+        )
+
+    assert notes == []
+    assert len(image_paths) == 1
+    assert image_paths[0].read_bytes() == png
+    assert list(image_paths[0].parent.iterdir()) == image_paths
+    assert "source=quoted" in caplog.text
+    assert "result=duplicate" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_collect_media_keeps_private_quoted_image_note(tmp_path):
+    a = _adapter(tmp_path)
+    a._session = object()
+    a._ensure_token = AsyncMock(return_value="TOKEN")
+    png = b"\x89PNG\r\n\x1a\n" + b"private-image"
+
+    async def download(*_args, destination, **_kwargs):
+        destination.write_bytes(png)
+
+    with patch(
+        "navi_agent.gateway.qq.download_inbound_media",
+        AsyncMock(side_effect=download),
+    ):
+        image_paths, notes = await a._collect_media(
+            [
+                {
+                    "url": "https://multimedia.nt.qq.com.cn/private-image",
+                    "content_type": "image/png",
+                    "filename": "private.png",
+                    "_source": "quoted",
+                }
+            ],
+            chat_type="c2c",
+        )
+
+    assert notes == [f"[引用消息中的图片：{image_paths[0]}]"]
 
 
 @pytest.mark.asyncio
@@ -426,6 +579,7 @@ async def test_group_quote_uses_summary_attachment_without_sender(tmp_path, capl
             "_source": "quoted",
         }
     ]
+    assert collect.await_args.kwargs["chat_type"] == "group"
     assert fake.calls[0]["image_paths"] == [image]
     assert "[引用消息]" in fake.calls[0]["text"]
     assert "A 发的原图" in fake.calls[0]["text"]

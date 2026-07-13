@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -457,7 +458,7 @@ class QqAdapter:
         return name[:200] or "file"
 
     def _extract_quoted_message(
-        self, message: Dict[str, Any]
+        self, message: Dict[str, Any], *, chat_type: str = ""
     ) -> Tuple[str, List[Dict[str, Any]]]:
         """Return text and attachments from quoted msg_elements[0]."""
         if message.get("message_type") not in {103, "103"}:
@@ -466,19 +467,67 @@ class QqAdapter:
         if not isinstance(elements, list) or not elements or not isinstance(elements[0], dict):
             return "", []
         element = elements[0]
-        text = self._extract_atme_context({"msg_elements": [element]})
-        if not text:
-            text = str(element.get("content") or "").strip()
-        attachments = [
+        content = str(element.get("content") or "")
+        structured_attachments = [
             att for att in (element.get("attachments") or [])
             if isinstance(att, dict) and str(att.get("url") or "").strip()
         ]
-        content = str(element.get("content") or "")
+        selected_content = content
+        block_count = 0
+        marked_count = 0
+        selected_block = "-"
+        allow_structured = True
+
+        if chat_type == "group":
+            parts = re.split(r"===\s*消息\s*(\d+)\s*===", content)
+            blocks = [
+                (parts[index], parts[index + 1].strip())
+                for index in range(1, len(parts), 2)
+                if parts[index + 1].strip()
+            ]
+            if not blocks and content.strip():
+                blocks = [("1", content.strip())]
+            marked_blocks = [
+                block
+                for block in blocks
+                if re.search(r"(?m)^\[消息类型\]\s*引用消息\s*$", block[1])
+            ]
+            block_count = len(blocks)
+            marked_count = len(marked_blocks)
+            if len(marked_blocks) == 1:
+                selected_block, selected_content = marked_blocks[0]
+            elif not marked_blocks and len(blocks) == 1:
+                selected_block, selected_content = blocks[0]
+            else:
+                selected_content = ""
+                allow_structured = False
+
+            content_match = re.search(
+                r"(?ms)^\[消息内容\]\s*(.*?)"
+                r"(?=^\[(?:消息类型|附件\d+)\]|\Z)",
+                selected_content,
+            )
+            if content_match:
+                text = content_match.group(1).strip()
+            elif re.search(
+                r"(?m)^\[(?:消息类型|附件\d+)\]", selected_content
+            ):
+                text = ""
+            else:
+                text = selected_content.strip()
+            attachments: List[Dict[str, Any]] = []
+        else:
+            text = self._extract_atme_context({"msg_elements": [element]})
+            if not text:
+                text = content.strip()
+            attachments = list(structured_attachments)
+
         markers = len(re.findall(r"\[附件\d+\]", content))
+        selected_markers = len(re.findall(r"\[附件\d+\]", selected_content))
         parsed = 0
         rejected = 0
         if not attachments:
-            for line in content.splitlines():
+            for line in selected_content.splitlines():
                 if not re.search(r"\[附件\d+\]", line):
                     continue
                 match = re.fullmatch(
@@ -500,12 +549,19 @@ class QqAdapter:
                     }
                 )
                 parsed += 1
+        if not attachments and allow_structured:
+            attachments = structured_attachments
         logger.info(
-            "qq: quote_parse msg=%s structured=%d summary_markers=%d "
+            "qq: quote_parse msg=%s blocks=%d marked=%d selected=%s "
+            "structured=%d summary_markers=%d selected_markers=%d "
             "summary_parsed=%d summary_rejected=%d",
             _safe_id(str(message.get("id") or "")),
-            len(attachments) - parsed,
+            block_count,
+            marked_count,
+            selected_block,
+            len(structured_attachments),
             markers,
+            selected_markers,
             parsed,
             rejected,
         )
@@ -540,7 +596,11 @@ class QqAdapter:
         return "\n".join(lines)
 
     async def _collect_media(
-        self, attachments: List[Dict[str, Any]], *, message_id: str = ""
+        self,
+        attachments: List[Dict[str, Any]],
+        *,
+        message_id: str = "",
+        chat_type: str = "",
     ) -> Tuple[List[Path], List[str]]:
         """Download inbound attachments; return (image_paths, text_notes).
 
@@ -549,6 +609,7 @@ class QqAdapter:
         """
         image_paths: List[Path] = []
         notes: List[str] = []
+        quoted_image_hashes: set[bytes] = set()
         token = await self._ensure_token()
         for att in attachments:
             if not isinstance(att, dict):
@@ -629,10 +690,27 @@ class QqAdapter:
                     suffix = ".webp"
                 else:
                     suffix = ".jpg"
+                if chat_type == "group" and source == "quoted":
+                    with temp_path.open("rb") as file:
+                        digest = hashlib.file_digest(file, "sha256").digest()
+                    if digest in quoted_image_hashes:
+                        temp_path.unlink(missing_ok=True)
+                        logger.info(
+                            "qq: media_download msg=%s source=%s host=%s name=%r "
+                            "result=duplicate bytes=%d elapsed_ms=%d",
+                            _safe_id(message_id),
+                            source,
+                            host,
+                            raw_name,
+                            downloaded_size,
+                            round((time.monotonic() - started_at) * 1000),
+                        )
+                        continue
+                    quoted_image_hashes.add(digest)
                 path = self._inbound_dir() / f"{uuid.uuid4().hex}{suffix}"
                 temp_path.replace(path)
                 image_paths.append(path)
-                if source != "current":
+                if source != "current" and chat_type != "group":
                     notes.append(f"[{source_label}中的图片：{path}]")
             else:
                 filename = f"{uuid.uuid4().hex}_{raw_name}" if raw_name else f"{uuid.uuid4().hex}.bin"
@@ -717,7 +795,9 @@ class QqAdapter:
             if isinstance(att, dict) and str(att.get("url") or "").strip()
         ]
         current_attachment_count = len(attachments)
-        quoted_text, quoted_attachments = self._extract_quoted_message(message)
+        quoted_text, quoted_attachments = self._extract_quoted_message(
+            message, chat_type=chat_type
+        )
         attachments.extend(
             {**att, "_source": "quoted"} for att in quoted_attachments
         )
@@ -739,7 +819,7 @@ class QqAdapter:
         )
 
         image_paths, notes = await self._collect_media(
-            attachments, message_id=message_id
+            attachments, message_id=message_id, chat_type=chat_type
         )
         if not text and not quoted_text and not image_paths and not notes:
             return
