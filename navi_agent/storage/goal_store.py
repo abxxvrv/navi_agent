@@ -44,7 +44,7 @@ class GoalStore:
         query = "SELECT * FROM goals WHERE session_id = ?"
         if active_only:
             query += " AND status NOT IN ('completed', 'cancelled')"
-        query += " ORDER BY updated_at DESC LIMIT 1"
+        query += " ORDER BY updated_at DESC, rowid DESC LIMIT 1"
         with self._connect() as conn:
             row = conn.execute(query, (session_id,)).fetchone()
         return dict(row) if row is not None else None
