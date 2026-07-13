@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import threading
 from pathlib import Path
 from typing import Any, Callable
 
@@ -21,6 +22,7 @@ from navi_agent.gateway.web import (  # noqa: E402
     WebAdapter,
     WebConnection,
 )
+from navi_agent.storage.history_store import HistoryStore  # noqa: E402
 from navi_agent.tools.approval import (  # noqa: E402
     ApprovalAction,
     ApprovalDecision,
@@ -184,6 +186,16 @@ def test_token_required(monkeypatch, tmp_path):
     asyncio.run(scenario())
 
 
+def test_session_list_refreshes_for_gateway_created_sessions():
+    html = (
+        Path(__file__).parents[1] / "navi_agent" / "gateway" / "webui" / "index.html"
+    ).read_text(encoding="utf-8")
+
+    assert "setInterval(loadSessions, 10000);" in html
+    assert 'case "read_only":' in html
+    assert "网关会话不可发送" in html
+
+
 def test_event_stream_and_turn_end():
     def script(rt: FakeRuntime, text: str) -> dict:
         rt.event_handler({"type": "assistant_delta", "delta": "你好"})
@@ -208,6 +220,88 @@ def test_event_stream_and_turn_end():
             assert turn_end["ok"] is True
             assert turn_end["final_answer"] == "你好！"
             assert turn_end["context_pct"] == 5
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_history_arrives_before_runtime_initialization(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAVI_HOME", str(tmp_path))
+    store = HistoryStore(tmp_path / "history.sqlite3", project_path=tmp_path)
+    store.append_message({"role": "user", "content": "之前的问题"})
+    store.append_message({"role": "assistant", "content": "之前的回答"})
+
+    release_runtime = threading.Event()
+    adapter = make_adapter(lambda rt, text: {"ok": True, "final_answer": ""})
+    original_create_runtime = adapter.create_runtime
+
+    def create_runtime(resume_session_id, event_handler, approval_handler):
+        release_runtime.wait(timeout=5)
+        return original_create_runtime(resume_session_id, event_handler, approval_handler)
+
+    adapter.create_runtime = create_runtime  # type: ignore[method-assign]
+
+    async def scenario():
+        client = TestClient(TestServer(adapter.build_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                f"/ws?token={TOKEN}&session={store.session_id}"
+            )
+            history = await asyncio.wait_for(ws.receive_json(), 2)
+            assert history == {
+                "type": "history",
+                "session_id": store.session_id,
+                "history": [
+                    {"role": "user", "content": "之前的问题"},
+                    {"role": "assistant", "content": "之前的回答"},
+                ],
+            }
+        finally:
+            release_runtime.set()
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_gateway_session_is_read_only_and_tracks_history(monkeypatch, tmp_path):
+    monkeypatch.setenv("NAVI_HOME", str(tmp_path))
+    store = HistoryStore(
+        tmp_path / "history.sqlite3",
+        project_path=tmp_path / "qq" / "workspace",
+        channel="",
+    )
+    store.append_message({"role": "user", "content": "第一条"})
+    adapter = make_adapter(lambda rt, text: {"ok": True, "final_answer": ""})
+    adapter.create_runtime = lambda *args, **kwargs: pytest.fail(
+        "gateway session must not create a runtime"
+    )
+
+    async def scenario():
+        client = TestClient(TestServer(adapter.build_app()))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                f"/ws?token={TOKEN}&session={store.session_id}"
+            )
+            history = await asyncio.wait_for(ws.receive_json(), 2)
+            read_only = await asyncio.wait_for(ws.receive_json(), 2)
+            assert history["history"] == [{"role": "user", "content": "第一条"}]
+            assert read_only == {
+                "type": "read_only",
+                "session_id": store.session_id,
+                "channel": "qq",
+                "workspace": str((tmp_path / "qq" / "workspace").resolve()),
+            }
+
+            store.append_message({"role": "assistant", "content": "第二条"})
+            updated = await asyncio.wait_for(ws.receive_json(), 3)
+            assert updated["type"] == "history"
+            assert updated["history"][-1] == {
+                "role": "assistant",
+                "content": "第二条",
+            }
         finally:
             await client.close()
 

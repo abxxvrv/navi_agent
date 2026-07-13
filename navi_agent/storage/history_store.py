@@ -19,6 +19,7 @@ class HistoryStore:
         model: str = "",
         parent_session_id: str | None = None,
         defer_persist: bool = False,
+        channel: str = "cli",
     ):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -39,6 +40,7 @@ class HistoryStore:
             "model": model,
             "tool_names": [],
             "parent_session_id": parent_session_id,
+            "channel": channel,
         }
         self._persist_deferred = defer_persist
 
@@ -58,7 +60,7 @@ class HistoryStore:
                 """
                 SELECT session_id, title, created_at, updated_at, project_path,
                        provider, model, tool_names_json, last_prompt_tokens,
-                       last_completion_tokens, parent_session_id
+                       last_completion_tokens, parent_session_id, channel
                 FROM sessions
                 WHERE session_id = ?
                 """,
@@ -84,6 +86,7 @@ class HistoryStore:
                 "model": row["model"],
                 "tool_names": instance._decode_tool_names(row["tool_names_json"]),
                 "parent_session_id": row["parent_session_id"],
+                "channel": row["channel"],
             }
             if usage:
                 instance.meta["last_usage"] = usage
@@ -138,7 +141,7 @@ class HistoryStore:
             rows = conn.execute(
                 """
                 SELECT session_id, title, project_path, created_at, updated_at,
-                       parent_session_id
+                       parent_session_id, channel
                 FROM sessions
                 ORDER BY updated_at DESC, created_at DESC
                 LIMIT ?
@@ -154,6 +157,7 @@ class HistoryStore:
                 "created_at": row["created_at"],
                 "updated_at": row["updated_at"],
                 "parent_session_id": row["parent_session_id"],
+                "channel": row["channel"],
             }
             for row in rows
         ]
@@ -228,6 +232,7 @@ class HistoryStore:
             provider=self.meta.get("provider", ""),
             model=self.meta.get("model", ""),
             parent_session_id=self.session_id,
+            channel=self.meta.get("channel") or "cli",
         )
         child.meta["title"] = title or self.meta.get("title", "Untitled session")
         child.meta["tool_names"] = list(self.meta.get("tool_names", []))
@@ -254,6 +259,7 @@ class HistoryStore:
             provider=self.meta.get("provider", ""),
             model=self.meta.get("model", ""),
             parent_session_id=None,
+            channel=self.meta.get("channel") or "cli",
         )
         child.meta["title"] = title or f"Fork of {self.session_id[:12]}..."
         child.meta["tool_names"] = list(self.meta.get("tool_names", []))
@@ -304,6 +310,7 @@ class HistoryStore:
                         model TEXT NOT NULL DEFAULT '',
                         tool_names_json TEXT NOT NULL DEFAULT '[]',
                         parent_session_id TEXT,
+                        channel TEXT,
                         last_prompt_tokens INTEGER,
                         last_completion_tokens INTEGER,
                         message_count INTEGER NOT NULL DEFAULT 0,
@@ -335,6 +342,7 @@ class HistoryStore:
                     """
                 )
                 self._ensure_column(conn, "sessions", "parent_session_id", "TEXT")
+                self._ensure_column(conn, "sessions", "channel", "TEXT")
                 self._init_fts_tables(conn)
                 self._migrate_fts(conn)
 
@@ -425,6 +433,7 @@ class HistoryStore:
             self.meta.get("model", ""),
             json.dumps(self.meta.get("tool_names", []), ensure_ascii=False),
             self.meta.get("parent_session_id"),
+            self.meta.get("channel"),
             usage.get("prompt_tokens"),
             usage.get("completion_tokens"),
             len(self.messages),
@@ -433,10 +442,10 @@ class HistoryStore:
         sql = """
             INSERT INTO sessions (
                 session_id, title, created_at, updated_at, project_path,
-                provider, model, tool_names_json, parent_session_id,
+                provider, model, tool_names_json, parent_session_id, channel,
                 last_prompt_tokens, last_completion_tokens, message_count
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(session_id) DO UPDATE SET
                 title = excluded.title,
                 updated_at = excluded.updated_at,
@@ -445,6 +454,7 @@ class HistoryStore:
                 model = excluded.model,
                 tool_names_json = excluded.tool_names_json,
                 parent_session_id = excluded.parent_session_id,
+                channel = excluded.channel,
                 last_prompt_tokens = excluded.last_prompt_tokens,
                 last_completion_tokens = excluded.last_completion_tokens,
                 message_count = excluded.message_count

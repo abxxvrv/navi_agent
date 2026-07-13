@@ -149,6 +149,7 @@ class AgentRuntime:
                 provider=_provider,
                 model=_model,
                 defer_persist=True,
+                channel=channel,
             )
             self.conversation_history = []
 

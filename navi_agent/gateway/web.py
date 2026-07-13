@@ -177,13 +177,14 @@ class WebConnection:
             "approval_mode": self._adapter.approval_mode,
             "model_info": self.runtime.get_model_info(),
             "model_options": model_options,
-            "history": self._history_messages(),
+            "history": self._history_messages(self.runtime.conversation_history),
             **self._status(),
         }
 
-    def _history_messages(self) -> list[dict[str, str]]:
+    @staticmethod
+    def _history_messages(source: list[dict[str, Any]]) -> list[dict[str, str]]:
         messages: list[dict[str, str]] = []
-        for msg in self.runtime.conversation_history:
+        for msg in source:
             role = msg.get("role")
             if role not in ("user", "assistant"):
                 continue
@@ -286,9 +287,98 @@ class WebAdapter:
         ws = web.WebSocketResponse(heartbeat=30)
         await ws.prepare(request)
 
+        resume_session_id = request.query.get("session") or None
+        store = None
+        if resume_session_id:
+            # 历史读取很快，不应被后续 runtime/MCP 初始化阻塞。
+            try:
+                store = await asyncio.to_thread(
+                    HistoryStore.from_existing,
+                    get_navi_home() / "history.sqlite3",
+                    resume_session_id,
+                )
+            except FileNotFoundError:
+                pass
+            else:
+                await ws.send_str(
+                    _json_dumps(
+                        {
+                            "type": "history",
+                            "session_id": resume_session_id,
+                            "history": WebConnection._history_messages(store.messages),
+                        }
+                    )
+                )
+
+        if store is not None:
+            channel = str(store.meta.get("channel") or "").strip()
+            if not channel:
+                project_path = Path(store.meta.get("project_path") or "").resolve()
+                navi_home = get_navi_home().resolve()
+                if project_path == (navi_home / "qq" / "workspace").resolve():
+                    channel = "qq"
+                elif project_path == (navi_home / "weixin" / "workspace").resolve():
+                    channel = "weixin"
+            if channel in {"qq", "weixin"}:
+                await ws.send_str(
+                    _json_dumps(
+                        {
+                            "type": "read_only",
+                            "session_id": resume_session_id,
+                            "channel": channel,
+                            "workspace": store.meta.get("project_path", ""),
+                        }
+                    )
+                )
+                updated_at = store.meta.get("updated_at")
+                message_count = len(store.messages)
+                while not ws.closed:
+                    try:
+                        msg = await ws.receive(timeout=1.0)
+                    except asyncio.TimeoutError:
+                        try:
+                            refreshed = await asyncio.to_thread(
+                                HistoryStore.from_existing,
+                                get_navi_home() / "history.sqlite3",
+                                resume_session_id,
+                            )
+                        except FileNotFoundError:
+                            break
+                        if (
+                            refreshed.meta.get("updated_at") != updated_at
+                            or len(refreshed.messages) != message_count
+                        ):
+                            updated_at = refreshed.meta.get("updated_at")
+                            message_count = len(refreshed.messages)
+                            await ws.send_str(
+                                _json_dumps(
+                                    {
+                                        "type": "history",
+                                        "session_id": resume_session_id,
+                                        "history": WebConnection._history_messages(
+                                            refreshed.messages
+                                        ),
+                                    }
+                                )
+                            )
+                        continue
+                    if msg.type in {
+                        aiohttp.WSMsgType.CLOSE,
+                        aiohttp.WSMsgType.CLOSED,
+                        aiohttp.WSMsgType.ERROR,
+                    }:
+                        break
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        await ws.send_str(
+                            _json_dumps(
+                                {"type": "notice", "text": "网关会话不可在 Web 中发送。"}
+                            )
+                        )
+                return ws
+
         try:
             conn = await asyncio.to_thread(
-                WebConnection, self, request.query.get("session") or None,
+                WebConnection, self, resume_session_id,
                 asyncio.get_running_loop(),
             )
         except Exception as exc:

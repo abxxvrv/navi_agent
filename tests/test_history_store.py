@@ -52,6 +52,17 @@ def test_history_store_persists_tool_names_and_messages(tmp_path):
     assert fts_rows == [("stored in sqlite",)]
 
 
+def test_history_store_persists_session_channel(tmp_path):
+    db_path = tmp_path / "history.sqlite3"
+    store = HistoryStore(db_path=db_path, project_path=tmp_path, channel="qq")
+
+    loaded = HistoryStore.from_existing(db_path, store.session_id)
+    listed = HistoryStore.list_sessions(db_path)
+
+    assert loaded.meta["channel"] == "qq"
+    assert listed[0]["channel"] == "qq"
+
+
 def test_defer_persist_writes_session_on_first_append(tmp_path):
     db_path = tmp_path / "history.sqlite3"
     store = HistoryStore(

@@ -316,6 +316,8 @@ details.reasoning[open] summary::before { transform: rotate(45deg); }
   transition: border-color .15s, box-shadow .15s;
 }
 #composer:focus-within { border-color: var(--text-3); box-shadow: 0 1px 8px rgba(0,0,0,.04); }
+#composer.read-only { background: var(--surface-2); }
+#composer.read-only textarea { color: var(--text-3); cursor: default; }
 #input {
   display: block; width: 100%;
   border: 0; outline: 0; resize: none;
@@ -423,6 +425,7 @@ const input = $("input");
 
 let ws = null;
 let ready = false;               // 收到 init 前不允许发送
+let readOnly = false;            // QQ/微信网关会话只读，不创建 Web runtime
 let fatal = false;               // 服务端初始化失败，停止自动重连
 let busy = false;
 let streamed = false;            // 本轮是否已流式输出过正文
@@ -500,6 +503,15 @@ function addAssistant(text) {
   div.innerHTML = md(text);
   scrollDown();
   return div;
+}
+
+function renderHistory(messages) {
+  chat.innerHTML = "";
+  for (const msg of messages || []) {
+    if (msg.role === "user") addUser(msg.content, []);
+    else addAssistant(msg.content);
+  }
+  scrollDown(true);
 }
 
 function ensureCurrent() {
@@ -661,8 +673,35 @@ function addNotice(text, isError) {
 
 function dispatch(ev) {
   switch (ev.type) {
+    case "history":
+      if (ev.session_id === sessionId) renderHistory(ev.history);
+      break;
+    case "read_only":
+      readOnly = true;
+      ready = false;
+      sessionId = ev.session_id;
+      setBusy(false);
+      $("workspace").textContent = ev.workspace || "";
+      $("approval-pill").textContent = (ev.channel || "").toUpperCase() + " 网关 · 只读";
+      $("ctx-pct").textContent = "";
+      input.value = "";
+      input.placeholder = "网关会话不可发送";
+      input.disabled = true;
+      $("attach-btn").disabled = true;
+      $("file-input").disabled = true;
+      $("model-select").disabled = true;
+      $("send-btn").disabled = true;
+      $("composer").classList.add("read-only");
+      break;
     case "init": {
+      readOnly = false;
       ready = true;
+      input.disabled = false;
+      input.placeholder = "输入消息，Enter 发送，Shift+Enter 换行";
+      $("attach-btn").disabled = false;
+      $("file-input").disabled = false;
+      $("model-select").disabled = false;
+      $("composer").classList.remove("read-only");
       setBusy(false);
       if (ev.session_id && ev.session_id !== qs.get("session")) {
         qs.set("session", ev.session_id);
@@ -673,12 +712,7 @@ function dispatch(ev) {
       sessionId = ev.session_id;
       updateStatus(ev);
       fillModelSelect(ev.model_options, ev.model_info);
-      chat.innerHTML = "";
-      for (const msg of ev.history || []) {
-        if (msg.role === "user") addUser(msg.content, []);
-        else addAssistant(msg.content);
-      }
-      scrollDown(true);
+      renderHistory(ev.history);
       break;
     }
     case "reasoning_start": ensureReasoning(); break;
@@ -814,8 +848,8 @@ function connect() {
 
 function setBusy(value) {
   busy = value;
-  $("send-btn").disabled = value;
-  $("stop-btn").hidden = !value;
+  $("send-btn").disabled = value || readOnly;
+  $("stop-btn").hidden = !value || readOnly;
 }
 
 function autoGrow() {
@@ -825,7 +859,7 @@ function autoGrow() {
 
 function sendMessage() {
   const text = input.value.trim();
-  if (!ready || busy || (!text && !attachments.length)) return;
+  if (readOnly || !ready || busy || (!text && !attachments.length)) return;
   send({
     type: "user_message",
     text,
@@ -1034,6 +1068,7 @@ async function toggleGateway(kind, gw) {
 connect();
 loadSessions();
 loadGateways();
+setInterval(loadSessions, 10000);
 setInterval(loadGateways, 10000);
 autoGrow();
 input.focus();
