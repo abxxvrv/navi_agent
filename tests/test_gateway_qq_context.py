@@ -45,6 +45,8 @@ def _adapter(tmp_path, bot_name="Navi agent"):
     a._chat_type = {}
     a._reply_msg_id = {}
     a._reply_seq = {}
+    a._pending_group_attachments = {}
+    a._last_seq = None
     return a
 
 
@@ -91,6 +93,90 @@ def test_extract_context_empty_when_no_elements(tmp_path):
     a = _adapter(tmp_path)
     assert a._extract_atme_context({}) == ""
     assert a._extract_atme_context({"msg_elements": None}) == ""
+
+
+def test_dispatch_caches_plain_group_message_attachment(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
+
+    a._dispatch(
+        {
+            "op": 0,
+            "s": 1,
+            "t": "GROUP_MESSAGE_CREATE",
+            "d": {
+                "id": "file-message",
+                "group_openid": "GROUP1",
+                "author": {"member_openid": "MEMBER1"},
+                "attachments": [
+                    {
+                        "url": "https://example.com/source.zip",
+                        "content_type": "application/zip",
+                        "filename": "source.zip",
+                    }
+                ],
+            },
+        }
+    )
+
+    _, attachments = a._pending_group_attachments[("GROUP1", "MEMBER1")]
+    assert attachments == [
+        {
+            "url": "https://example.com/source.zip",
+            "content_type": "application/zip",
+            "filename": "source.zip",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_handle_group_at_uses_cached_attachment_from_same_sender(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
+    a._remember_group_attachments(
+        {
+            "id": "file-message",
+            "group_openid": "GROUP1",
+            "author": {"member_openid": "MEMBER1"},
+            "attachments": [
+                {
+                    "url": "https://example.com/source.zip",
+                    "content_type": "application/zip",
+                    "filename": "source.zip",
+                }
+            ],
+        }
+    )
+    fake = FakeRuntime()
+    a._runtimes["GROUP1"] = fake
+
+    with (
+        patch.object(
+            a,
+            "_collect_media",
+            AsyncMock(return_value=([], ["[file] /tmp/source.zip"])),
+        ) as collect,
+        patch.object(a, "send_text", AsyncMock()),
+    ):
+        await a._handle_message(
+            {
+                "id": "at-message",
+                "group_openid": "GROUP1",
+                "author": {"member_openid": "MEMBER1", "username": "alice"},
+                "content": "<@!123> 看一下这个文件",
+            },
+            "group",
+        )
+
+    assert collect.await_args.args[0] == [
+        {
+            "url": "https://example.com/source.zip",
+            "content_type": "application/zip",
+            "filename": "source.zip",
+        }
+    ]
+    assert "source.zip" in fake.calls[0]["text"]
+    assert ("GROUP1", "MEMBER1") not in a._pending_group_attachments
 
 
 @pytest.mark.asyncio

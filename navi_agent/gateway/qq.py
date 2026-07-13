@@ -152,6 +152,9 @@ class QqAdapter:
         self._chat_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._chat_type: Dict[str, str] = {}  # chat_id → "c2c" | "group"
         self._bot_name: str = ""  # bot 群显示名，从 READY 捕获，用于过滤 msg_elements 里 bot 自己的消息
+        self._pending_group_attachments: Dict[
+            Tuple[str, str], Tuple[float, List[Dict[str, Any]]]
+        ] = {}
 
         # Passive-reply context per chat (set inside the per-chat lock before a turn).
         self._reply_msg_id: Dict[str, str] = {}
@@ -317,6 +320,8 @@ class QqAdapter:
                 logger.info("qq: session resumed")
             elif event_type == "C2C_MESSAGE_CREATE":
                 asyncio.create_task(self._handle_message_safe(d, "c2c"))
+            elif event_type == "GROUP_MESSAGE_CREATE":
+                self._remember_group_attachments(d)
             elif event_type == "GROUP_AT_MESSAGE_CREATE":
                 asyncio.create_task(self._handle_message_safe(d, "group"))
             else:
@@ -379,6 +384,40 @@ class QqAdapter:
         name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name)
         name = re.sub(r"\.{2,}", ".", name)
         return name[:200] or "file"
+
+    def _remember_group_attachments(self, message: Any) -> None:
+        """暂存普通群消息附件，等同一发送者随后 @ bot 时再入站。"""
+        if not isinstance(message, dict):
+            return
+        group_id = str(message.get("group_openid") or "").strip()
+        author = message.get("author") if isinstance(message.get("author"), dict) else {}
+        sender_id = str(author.get("member_openid") or "").strip()
+        if not group_id or not sender_id:
+            return
+        if group_id not in load_qq_allowlist(self._navi_home, self._account_id, "group"):
+            return
+        message_id = str(message.get("id") or "").strip()
+        if message_id and self._dedup.is_duplicate(message_id):
+            return
+        attachments = [
+            att for att in (message.get("attachments") or [])
+            if isinstance(att, dict) and str(att.get("url") or "").strip()
+        ]
+        if not attachments:
+            return
+        key = (group_id, sender_id)
+        now = time.monotonic()
+        for pending_key, (created_at, _) in list(self._pending_group_attachments.items()):
+            if now - created_at > MESSAGE_DEDUP_TTL_SECONDS:
+                self._pending_group_attachments.pop(pending_key, None)
+        previous = self._pending_group_attachments.get(key)
+        if previous and now - previous[0] <= MESSAGE_DEDUP_TTL_SECONDS:
+            attachments = previous[1] + attachments
+        self._pending_group_attachments[key] = (now, attachments[-10:])
+        logger.info(
+            "qq: cached group attachments from=%s chat=%s count=%d",
+            _safe_id(sender_id), _safe_id(group_id), len(attachments[-10:]),
+        )
 
     def _extract_atme_media(self, message: Dict[str, Any]) -> List[Dict[str, str]]:
         """从群 @ 事件的 msg_elements 里，抽取【@ 发起者本人】发的图片/文件，
@@ -570,6 +609,16 @@ class QqAdapter:
         if chat_type == "group":
             # 群消息的图片/文件在 msg_elements 里（仅取 @ 发起者本人发的）。
             attachments += self._extract_atme_media(message)
+            pending = self._pending_group_attachments.pop((chat_id, sender_id), None)
+            if pending and time.monotonic() - pending[0] <= MESSAGE_DEDUP_TTL_SECONDS:
+                attachments += pending[1]
+            attachments = list(
+                {
+                    str(att.get("url") or "").strip(): att
+                    for att in attachments
+                    if isinstance(att, dict) and att.get("url")
+                }.values()
+            )
         image_paths, notes = await self._collect_media(attachments)
         if not text and not image_paths and not notes:
             return
