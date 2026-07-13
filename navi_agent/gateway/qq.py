@@ -27,6 +27,7 @@ import uuid
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlparse
 
 from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
@@ -103,7 +104,6 @@ class QqAdapter:
 
     SEND_CHUNK_DELAY_SECONDS = 1.0
     TYPING_INPUT_SECONDS = 30
-    PENDING_ATTACHMENT_TTL_SECONDS = 120
     # Fatal gateway close codes — stop reconnecting (bot misconfiguration / ban).
     FATAL_CLOSE_CODES = {4001, 4002, 4010, 4011, 4012, 4013, 4014, 4914, 4915}
 
@@ -152,9 +152,6 @@ class QqAdapter:
         self._chat_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._chat_type: Dict[str, str] = {}  # chat_id → "c2c" | "group"
         self._bot_name: str = ""  # bot 群显示名，从 READY 捕获，用于过滤 msg_elements 里 bot 自己的消息
-        self._pending_group_attachments: Dict[
-            Tuple[str, str], Tuple[float, List[Dict[str, Any]]]
-        ] = {}
 
         # Passive-reply context per chat (set inside the per-chat lock before a turn).
         self._reply_msg_id: Dict[str, str] = {}
@@ -309,6 +306,46 @@ class QqAdapter:
         if op == OP_DISPATCH:
             event_type = payload.get("t")
             d = payload.get("d")
+            if event_type in {
+                "C2C_MESSAGE_CREATE",
+                "GROUP_MESSAGE_CREATE",
+                "GROUP_AT_MESSAGE_CREATE",
+            } and isinstance(d, dict):
+                elements = d.get("msg_elements")
+                first_element = (
+                    elements[0]
+                    if isinstance(elements, list)
+                    and elements
+                    and isinstance(elements[0], dict)
+                    else {}
+                )
+                mentions = d.get("mentions")
+                mentioned = event_type == "GROUP_AT_MESSAGE_CREATE" or (
+                    isinstance(mentions, list)
+                    and any(
+                        isinstance(mention, dict) and mention.get("is_you")
+                        for mention in mentions
+                    )
+                )
+                first_content = str(first_element.get("content") or "")
+                logger.info(
+                    "qq: message_event event=%s seq=%s msg=%s message_type=%s "
+                    "mentioned=%s top_attachments=%d elements=%d "
+                    "first_element_attachments=%d attachment_markers=%d",
+                    event_type,
+                    seq,
+                    _safe_id(str(d.get("id") or "")),
+                    d.get("message_type"),
+                    mentioned,
+                    len(d.get("attachments"))
+                    if isinstance(d.get("attachments"), list)
+                    else 0,
+                    len(elements) if isinstance(elements, list) else 0,
+                    len(first_element.get("attachments"))
+                    if isinstance(first_element.get("attachments"), list)
+                    else 0,
+                    len(re.findall(r"\[附件\d+\]", first_content)),
+                )
             if event_type == "READY":
                 self._session_id = (d or {}).get("session_id")
                 self._bot_name = str(((d or {}).get("user") or {}).get("username") or "")
@@ -327,8 +364,6 @@ class QqAdapter:
                     for mention in mentions
                 ):
                     asyncio.create_task(self._handle_message_safe(d, "group"))
-                else:
-                    self._remember_group_attachments(d)
             elif event_type == "GROUP_AT_MESSAGE_CREATE":
                 asyncio.create_task(self._handle_message_safe(d, "group"))
             elif event_type == "INTERACTION_CREATE":
@@ -421,38 +456,10 @@ class QqAdapter:
         name = re.sub(r"\.{2,}", ".", name)
         return name[:200] or "file"
 
-    def _remember_group_attachments(self, message: Any) -> None:
-        """暂存普通群消息附件，仅供同一群、同一 member_openid 后续消费。"""
-        if not isinstance(message, dict):
-            return
-        group_id = str(message.get("group_openid") or "").strip()
-        author = message.get("author") if isinstance(message.get("author"), dict) else {}
-        sender_id = str(author.get("member_openid") or "").strip()
-        if not group_id or not sender_id:
-            return
-        if group_id not in load_qq_allowlist(self._navi_home, self._account_id, "group"):
-            return
-        attachments = [
-            att for att in (message.get("attachments") or [])
-            if isinstance(att, dict) and str(att.get("url") or "").strip()
-        ]
-        if not attachments:
-            return
-        key = (group_id, sender_id)
-        now = time.monotonic()
-        for pending_key, (created_at, _) in list(self._pending_group_attachments.items()):
-            if now - created_at > self.PENDING_ATTACHMENT_TTL_SECONDS:
-                self._pending_group_attachments.pop(pending_key, None)
-        self._pending_group_attachments[key] = (now, attachments)
-        logger.info(
-            "qq: cached group attachments from=%s chat=%s count=%d",
-            _safe_id(sender_id), _safe_id(group_id), len(attachments),
-        )
-
     def _extract_quoted_message(
         self, message: Dict[str, Any]
     ) -> Tuple[str, List[Dict[str, Any]]]:
-        """Return text and structured attachments from quoted msg_elements[0]."""
+        """Return text and attachments from quoted msg_elements[0]."""
         if message.get("message_type") not in {103, "103"}:
             return "", []
         elements = message.get("msg_elements")
@@ -466,6 +473,42 @@ class QqAdapter:
             att for att in (element.get("attachments") or [])
             if isinstance(att, dict) and str(att.get("url") or "").strip()
         ]
+        content = str(element.get("content") or "")
+        markers = len(re.findall(r"\[附件\d+\]", content))
+        parsed = 0
+        rejected = 0
+        if not attachments:
+            for line in content.splitlines():
+                if not re.search(r"\[附件\d+\]", line):
+                    continue
+                match = re.fullmatch(
+                    r"\s*\[附件\d+\]\s*类型:\s*(图片|文件)\s+"
+                    r"文件名:\s*(.+?)\s+"
+                    r"(?:(?:尺寸|大小):\S+\s+)*"
+                    r"URL:\s*(https?://\S+)\s*",
+                    line,
+                )
+                if not match:
+                    rejected += 1
+                    continue
+                kind, filename, url = match.groups()
+                attachments.append(
+                    {
+                        "url": url,
+                        "content_type": "image" if kind == "图片" else "file",
+                        "filename": filename.strip(),
+                    }
+                )
+                parsed += 1
+        logger.info(
+            "qq: quote_parse msg=%s structured=%d summary_markers=%d "
+            "summary_parsed=%d summary_rejected=%d",
+            _safe_id(str(message.get("id") or "")),
+            len(attachments) - parsed,
+            markers,
+            parsed,
+            rejected,
+        )
         return text, attachments
 
     def _extract_atme_context(self, message: Dict[str, Any]) -> str:
@@ -497,7 +540,7 @@ class QqAdapter:
         return "\n".join(lines)
 
     async def _collect_media(
-        self, attachments: List[Dict[str, Any]]
+        self, attachments: List[Dict[str, Any]], *, message_id: str = ""
     ) -> Tuple[List[Path], List[str]]:
         """Download inbound attachments; return (image_paths, text_notes).
 
@@ -516,9 +559,9 @@ class QqAdapter:
             content_type = str(att.get("content_type") or "").lower()
             raw_name = self._safe_filename(str(att.get("filename") or ""))
             source = str(att.get("_source") or "current")
+            host = urlparse(url).hostname or "?"
             source_label = {
                 "quoted": "引用消息",
-                "pending": "此前消息",
             }.get(source, "当前消息")
 
             # 语音优先：如果平台已提供 asr_refer_text，直接使用，跳过下载
@@ -531,6 +574,7 @@ class QqAdapter:
                     continue
 
             temp_path = self._inbound_dir() / f".{uuid.uuid4().hex}.part"
+            started_at = time.monotonic()
             try:
                 await download_inbound_media(
                     self._session,
@@ -541,10 +585,21 @@ class QqAdapter:
                 )
             except Exception as exc:
                 temp_path.unlink(missing_ok=True)
-                logger.warning("qq: attachment download failed: %s", exc)
+                logger.warning(
+                    "qq: media_download msg=%s source=%s host=%s name=%r "
+                    "result=failed error_type=%s error=%r elapsed_ms=%d",
+                    _safe_id(message_id),
+                    source,
+                    host,
+                    raw_name,
+                    type(exc).__name__,
+                    exc,
+                    round((time.monotonic() - started_at) * 1000),
+                )
                 notes.append(f"[{source_label}附件接收失败：{raw_name}]")
                 continue
 
+            downloaded_size = temp_path.stat().st_size
             if content_type.startswith("image") or raw_name.lower().endswith(
                 (".jpg", ".jpeg", ".png", ".gif", ".webp")
             ):
@@ -553,7 +608,15 @@ class QqAdapter:
                     header = file.read(12)
                 if not _looks_like_image(header):
                     temp_path.unlink(missing_ok=True)
-                    logger.warning("qq: rejecting non-image attachment from %s", url[:80])
+                    logger.warning(
+                        "qq: media_download msg=%s source=%s host=%s name=%r "
+                        "result=failed error_type=InvalidImageMagic elapsed_ms=%d",
+                        _safe_id(message_id),
+                        source,
+                        host,
+                        raw_name,
+                        round((time.monotonic() - started_at) * 1000),
+                    )
                     notes.append(f"[{source_label}附件接收失败：{raw_name}]")
                     continue
                 if header[:8] == b"\x89PNG\r\n\x1a\n":
@@ -581,6 +644,16 @@ class QqAdapter:
                     notes.append(f"[{source_label}中的语音文件：{path}]")
                 else:
                     notes.append(f"[{source_label}中的文件：{path}]")
+            logger.info(
+                "qq: media_download msg=%s source=%s host=%s name=%r "
+                "result=ok bytes=%d elapsed_ms=%d",
+                _safe_id(message_id),
+                source,
+                host,
+                raw_name,
+                downloaded_size,
+                round((time.monotonic() - started_at) * 1000),
+            )
         return image_paths, notes
 
     # ── Inbound handling ──────────────────────────────────────────────────────
@@ -643,21 +716,11 @@ class QqAdapter:
             for att in (message.get("attachments") or [])
             if isinstance(att, dict) and str(att.get("url") or "").strip()
         ]
+        current_attachment_count = len(attachments)
         quoted_text, quoted_attachments = self._extract_quoted_message(message)
         attachments.extend(
             {**att, "_source": "quoted"} for att in quoted_attachments
         )
-        if chat_type == "group":
-            key = (chat_id, sender_id)
-            if sender_id:
-                if attachments:
-                    self._pending_group_attachments.pop(key, None)
-                else:
-                    pending = self._pending_group_attachments.pop(key, None)
-                    if pending and time.monotonic() - pending[0] <= self.PENDING_ATTACHMENT_TTL_SECONDS:
-                        attachments.extend(
-                            {**att, "_source": "pending"} for att in pending[1]
-                        )
 
         unique_attachments: List[Dict[str, Any]] = []
         seen_urls = set()
@@ -667,8 +730,17 @@ class QqAdapter:
                 seen_urls.add(url)
                 unique_attachments.append(att)
         attachments = unique_attachments
+        logger.info(
+            "qq: media_select msg=%s current=%d quoted=%d total=%d",
+            _safe_id(message_id),
+            current_attachment_count,
+            len(quoted_attachments),
+            len(attachments),
+        )
 
-        image_paths, notes = await self._collect_media(attachments)
+        image_paths, notes = await self._collect_media(
+            attachments, message_id=message_id
+        )
         if not text and not quoted_text and not image_paths and not notes:
             return
 
@@ -713,9 +785,17 @@ class QqAdapter:
 
             runtime = self.get_or_create_runtime(chat_id)
             logger.info(
-                "qq: inbound type=%s from=%s chat=%s text_len=%d images=%d notes=%d",
-                chat_type, _safe_id(sender_id), _safe_id(chat_id),
-                len(message_text), len(image_paths), len(notes),
+                "qq: runtime_input msg=%s type=%s from=%s chat=%s text_len=%d "
+                "selected_current=%d selected_quoted=%d images=%d notes=%d",
+                _safe_id(message_id),
+                chat_type,
+                _safe_id(sender_id),
+                _safe_id(chat_id),
+                len(message_text),
+                current_attachment_count,
+                len(quoted_attachments),
+                len(image_paths),
+                len(notes),
             )
             # Typing (input_notify) is only supported for C2C.
             if chat_type == "c2c":

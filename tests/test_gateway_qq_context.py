@@ -1,6 +1,7 @@
 """Tests for QQ group @-context extraction and injection (msg_elements)."""
 
 import asyncio
+import logging
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -45,7 +46,6 @@ def _adapter(tmp_path, bot_name="Navi agent"):
     a._chat_type = {}
     a._reply_msg_id = {}
     a._reply_seq = {}
-    a._pending_group_attachments = {}
     a._last_seq = None
     return a
 
@@ -123,17 +123,20 @@ def test_extract_quoted_message_reads_first_element_text_and_attachments(tmp_pat
     assert attachments == [attachment]
 
 
-def test_quote_does_not_extract_attachment_url_from_text_summary(tmp_path):
+def test_quote_extracts_attachment_from_first_element_summary(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
     text, attachments = _adapter(tmp_path)._extract_quoted_message(
         {
+            "id": "quote-message",
             "message_type": 103,
             "msg_elements": [
                 {
                     "content": (
                         "=== 消息 1 ===\n"
                         "[消息内容] 这是报告\n"
-                        "[附件1] 类型:文件 文件名:SECRET.zip "
-                        "尺寸:0x0 大小:12 URL:https://example.com/SECRET_URL"
+                        "[附件1] 类型:文件 文件名:项目 资料.zip "
+                        "尺寸:0x0 大小:12 "
+                        "URL:https://multimedia.nt.qq.com.cn/REPORT_URL"
                     )
                 }
             ],
@@ -141,7 +144,36 @@ def test_quote_does_not_extract_attachment_url_from_text_summary(tmp_path):
     )
 
     assert text == "这是报告"
+    assert attachments == [
+        {
+            "url": "https://multimedia.nt.qq.com.cn/REPORT_URL",
+            "content_type": "file",
+            "filename": "项目 资料.zip",
+        }
+    ]
+    assert "structured=0 summary_markers=1 summary_parsed=1 summary_rejected=0" in caplog.text
+
+
+def test_quote_rejects_malformed_attachment_summary(tmp_path, caplog):
+    caplog.set_level(logging.INFO)
+    _, attachments = _adapter(tmp_path)._extract_quoted_message(
+        {
+            "id": "quote-message",
+            "message_type": 103,
+            "msg_elements": [
+                {
+                    "content": (
+                        "=== 消息 1 ===\n"
+                        "[消息内容] 这是普通文本\n"
+                        "[附件1] URL:https://multimedia.nt.qq.com.cn/FAKE"
+                    )
+                }
+            ],
+        }
+    )
+
     assert attachments == []
+    assert "summary_markers=1 summary_parsed=0 summary_rejected=1" in caplog.text
 
 
 def test_non_quote_ignores_structured_recent_message_attachments(tmp_path):
@@ -199,14 +231,15 @@ async def test_collect_media_preserves_png_extension_and_bytes(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_collect_media_surfaces_download_failure(tmp_path):
+async def test_collect_media_surfaces_and_logs_download_failure(tmp_path, caplog):
     a = _adapter(tmp_path)
     a._session = object()
     a._ensure_token = AsyncMock(return_value="TOKEN")
+    caplog.set_level(logging.INFO)
 
     with patch(
         "navi_agent.gateway.qq.download_inbound_media",
-        AsyncMock(side_effect=RuntimeError("download failed")),
+        AsyncMock(side_effect=TimeoutError()),
     ):
         image_paths, notes = await a._collect_media(
             [
@@ -216,11 +249,14 @@ async def test_collect_media_surfaces_download_failure(tmp_path):
                     "filename": "report.pdf",
                     "_source": "quoted",
                 }
-            ]
+            ],
+            message_id="quote-message",
         )
 
     assert image_paths == []
     assert notes == ["[引用消息附件接收失败：report.pdf]"]
+    assert "source=quoted host=multimedia.nt.qq.com.cn" in caplog.text
+    assert "result=failed error_type=TimeoutError error=TimeoutError()" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -262,9 +298,20 @@ async def test_download_inbound_media_streams_to_destination(tmp_path):
     assert destination.read_bytes() == b"first-second"
 
 
-def test_dispatch_caches_plain_group_message_attachment(tmp_path):
+@pytest.mark.asyncio
+async def test_download_inbound_media_rejects_non_qq_host(tmp_path):
+    with pytest.raises(ValueError, match="not a QQ CDN host"):
+        await download_inbound_media(
+            object(),
+            url="https://example.com/not-an-attachment",
+            destination=tmp_path / "attachment.part",
+            token="TOKEN",
+        )
+
+
+def test_dispatch_logs_and_ignores_plain_group_message(tmp_path, caplog):
     a = _adapter(tmp_path)
-    add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
+    caplog.set_level(logging.INFO)
 
     a._dispatch(
         {
@@ -275,6 +322,7 @@ def test_dispatch_caches_plain_group_message_attachment(tmp_path):
                 "id": "file-message",
                 "group_openid": "GROUP1",
                 "author": {"member_openid": "MEMBER1"},
+                "message_type": 0,
                 "attachments": [
                     {
                         "url": "https://example.com/source.zip",
@@ -286,29 +334,9 @@ def test_dispatch_caches_plain_group_message_attachment(tmp_path):
         }
     )
 
-    _, attachments = a._pending_group_attachments[("GROUP1", "MEMBER1")]
-    assert attachments == [
-        {
-            "url": "https://example.com/source.zip",
-            "content_type": "application/zip",
-            "filename": "source.zip",
-        }
-    ]
-
-
-def test_plain_group_attachment_without_member_openid_is_not_cached(tmp_path):
-    a = _adapter(tmp_path)
-    add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
-
-    a._remember_group_attachments(
-        {
-            "group_openid": "GROUP1",
-            "author": {"username": "alice"},
-            "attachments": [{"url": "https://example.com/source.zip"}],
-        }
-    )
-
-    assert a._pending_group_attachments == {}
+    assert a._runtimes == {}
+    assert "event=GROUP_MESSAGE_CREATE" in caplog.text
+    assert "mentioned=False top_attachments=1" in caplog.text
 
 
 def test_identify_subscribes_to_group_messages_and_config_interactions(tmp_path):
@@ -356,60 +384,10 @@ def test_dispatch_answers_qq_group_config_query(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_handle_group_at_uses_cached_attachment_from_same_sender(tmp_path):
+async def test_group_quote_uses_summary_attachment_without_sender(tmp_path, caplog):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
-    a._remember_group_attachments(
-        {
-            "id": "file-message",
-            "group_openid": "GROUP1",
-            "author": {"member_openid": "MEMBER1"},
-            "attachments": [
-                {
-                    "url": "https://example.com/source.zip",
-                    "content_type": "application/zip",
-                    "filename": "source.zip",
-                }
-            ],
-        }
-    )
-    fake = FakeRuntime()
-    a._runtimes["GROUP1"] = fake
-
-    with (
-        patch.object(
-            a,
-            "_collect_media",
-            AsyncMock(return_value=([], ["[file] /tmp/source.zip"])),
-        ) as collect,
-        patch.object(a, "send_text", AsyncMock()),
-    ):
-        await a._handle_message(
-            {
-                "id": "at-message",
-                "group_openid": "GROUP1",
-                "author": {"member_openid": "MEMBER1", "username": "alice"},
-                "content": "<@!123> 看一下这个文件",
-            },
-            "group",
-        )
-
-    assert collect.await_args.args[0] == [
-        {
-            "url": "https://example.com/source.zip",
-            "content_type": "application/zip",
-            "filename": "source.zip",
-            "_source": "pending",
-        }
-    ]
-    assert "source.zip" in fake.calls[0]["text"]
-    assert ("GROUP1", "MEMBER1") not in a._pending_group_attachments
-
-
-@pytest.mark.asyncio
-async def test_group_quote_uses_other_users_structured_attachment(tmp_path):
-    a = _adapter(tmp_path)
-    add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
+    caplog.set_level(logging.INFO)
     fake = FakeRuntime()
     a._runtimes["GROUP1"] = fake
     image = Path("quoted.png")
@@ -427,14 +405,13 @@ async def test_group_quote_uses_other_users_structured_attachment(tmp_path):
                 "content": "<@!123> 分析这张图片",
                 "msg_elements": [
                     {
-                        "content": "=== 消息 1 ===\n[消息内容] A 发的原图",
-                        "attachments": [
-                            {
-                                "url": "https://example.com/a.png",
-                                "content_type": "image/png",
-                                "filename": "a.png",
-                            }
-                        ],
+                        "content": (
+                            "=== 消息 1 ===\n"
+                            "[消息内容] A 发的原图\n"
+                            "[附件1] 类型:图片 文件名:a.png "
+                            "尺寸:100x100 大小:1024 "
+                            "URL:https://multimedia.nt.qq.com.cn/a.png"
+                        )
                     }
                 ],
             },
@@ -443,8 +420,8 @@ async def test_group_quote_uses_other_users_structured_attachment(tmp_path):
 
     assert collect.await_args.args[0] == [
         {
-            "url": "https://example.com/a.png",
-            "content_type": "image/png",
+            "url": "https://multimedia.nt.qq.com.cn/a.png",
+            "content_type": "image",
             "filename": "a.png",
             "_source": "quoted",
         }
@@ -454,25 +431,14 @@ async def test_group_quote_uses_other_users_structured_attachment(tmp_path):
     assert "A 发的原图" in fake.calls[0]["text"]
     assert "[当前消息]" in fake.calls[0]["text"]
     assert "分析这张图片" in fake.calls[0]["text"]
+    assert "media_select msg=quote-me current=0 quoted=1 total=1" in caplog.text
+    assert "selected_current=0 selected_quoted=1 images=1 notes=0" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_group_at_does_not_consume_other_users_pending_or_recent_attachment(tmp_path):
+async def test_group_at_does_not_use_recent_message_attachment(tmp_path):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "GROUP1", kind="group")
-    a._remember_group_attachments(
-        {
-            "group_openid": "GROUP1",
-            "author": {"member_openid": "MEMBER_A"},
-            "attachments": [
-                {
-                    "url": "https://example.com/a.png",
-                    "content_type": "image/png",
-                    "filename": "a.png",
-                }
-            ],
-        }
-    )
     fake = FakeRuntime()
     a._runtimes["GROUP1"] = fake
 
@@ -504,7 +470,6 @@ async def test_group_at_does_not_consume_other_users_pending_or_recent_attachmen
 
     assert collect.await_args.args[0] == []
     assert fake.calls[0]["image_paths"] == []
-    assert ("GROUP1", "MEMBER_A") in a._pending_group_attachments
 
 
 @pytest.mark.asyncio
