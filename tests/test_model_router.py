@@ -1,7 +1,12 @@
 import json
 import threading
 
-from navi_agent.model.router import LMStudioProvider, LongCatProvider, ModelRouter
+from navi_agent.model.router import (
+    LMStudioProvider,
+    ModelRouter,
+    OpenAICompatibleProvider,
+    PROVIDER_CLASSES,
+)
 from navi_agent.runtime.agent import AgentRuntime
 
 
@@ -93,7 +98,7 @@ def test_model_router_builds_and_switches_lmstudio_provider(tmp_path):
     assert router.context_window == 24576
 
 
-def test_longcat_provider_uses_standard_openai_params_with_tools(monkeypatch):
+def test_openai_compatible_provider_uses_standard_params_with_tools(monkeypatch):
     captured = {}
 
     class FakeCompletions:
@@ -107,20 +112,23 @@ def test_longcat_provider_uses_standard_openai_params_with_tools(monkeypatch):
     class FakeClient:
         chat = FakeChat()
 
-    monkeypatch.setattr(LongCatProvider, "create_client", lambda self: None)
+    monkeypatch.setattr(OpenAICompatibleProvider, "create_client", lambda self: None)
 
-    provider = LongCatProvider(
+    provider = OpenAICompatibleProvider(
         api_key="longcat-key",
         base_url="https://api.longcat.chat/openai",
         model_name="LongCat-2.0",
     )
     tools = [{"type": "function", "function": {"name": "list_dir"}}]
 
-    assert provider.chat_stream_with_client(FakeClient(), messages=[], tools=tools) == "stream"
+    assert provider.chat_stream_with_client(
+        FakeClient(), messages=[], tools=tools, max_tokens=128,
+    ) == "stream"
     assert captured == {
         "model": "LongCat-2.0",
         "messages": [],
         "stream": True,
+        "max_tokens": 128,
         "tools": tools,
     }
 
@@ -144,12 +152,16 @@ def test_model_router_builds_longcat_provider(tmp_path, monkeypatch):
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(LongCatProvider, "create_client", lambda self: None)
+    monkeypatch.setattr(OpenAICompatibleProvider, "create_client", lambda self: None)
 
     router = ModelRouter(config_path, provider="longcat", model="LongCat-2.0")
 
-    assert isinstance(router._provider, LongCatProvider)
+    assert isinstance(router._provider, OpenAICompatibleProvider)
     assert router.context_window == 1048576
+
+
+def test_grok_uses_openai_compatible_provider():
+    assert PROVIDER_CLASSES["grok"] is OpenAICompatibleProvider
 
 
 def test_runtime_rejects_model_switch_while_turn_is_running():

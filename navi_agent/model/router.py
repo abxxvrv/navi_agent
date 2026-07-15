@@ -97,13 +97,14 @@ class StepfunProvider(BaseProvider):
         )
 
 
-class LongCatProvider(BaseProvider):
-    """LongCat API（OpenAI Chat Completions 兼容）。"""
+class OpenAICompatibleProvider(BaseProvider):
+    """标准 OpenAI Chat Completions 兼容服务。"""
 
     def chat_stream_with_client(self, client, messages, tools, **kwargs):
         params: dict[str, Any] = dict(
             model=self.model_name, messages=messages, stream=True,
         )
+        params.update(kwargs)
         if tools:
             params["tools"] = tools
         return client.chat.completions.create(**params)
@@ -114,7 +115,8 @@ PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "mimo": MimoProvider,
     "qwen": QwenProvider,
     "stepfun": StepfunProvider,
-    "longcat": LongCatProvider,
+    "longcat": OpenAICompatibleProvider,
+    "grok": OpenAICompatibleProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
 }
