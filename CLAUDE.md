@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-Navi Agent — a local CLI coding assistant. LangGraph agent loop + OpenAI-compatible API (DeepSeek by default). Reads/writes files, runs commands, loads skills, records session history.
+Navi Agent — a local CLI coding assistant. Direct agent loop + OpenAI-compatible API (DeepSeek by default). Reads/writes files, runs commands, loads skills, records session history.
 
 ## Setup & Run
 
@@ -29,7 +29,7 @@ cli.py  →  runtime.py  →  context_manager.py  (system prompt, AGENTS.md, ski
                         →  approval.py        (strict/normal/open risk-based approval)
 ```
 
-- **runtime.py**: `AgentRuntime` owns the LangGraph graph (llm_node ↔ tool_node), tool registry, context manager, session store, approval manager. `_invoke_agent` is the single entry point for `run_task` and `run_turn`.
+- **runtime.py**: `AgentRuntime` owns the direct model ↔ tool loop, tool registry, context manager, session store, approval manager. `_invoke_agent` is the single entry point for `run_task` and `run_turn`.
 - **paths.py**: `get_navi_home()` → `NAVI_HOME` env or `~/.navi`. Creates `skills/` and `sessions/` on first call.
 
 ## Data Locations
