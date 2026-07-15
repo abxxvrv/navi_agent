@@ -12,13 +12,11 @@ import os
 import platform
 import time
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
 from ..paths import load_navi_dotenv
-from langgraph.graph import END, START, StateGraph
-from typing_extensions import TypedDict
 
 from ..context.context_manager import ContextManager
 from ..storage.history_store import HistoryStore
@@ -57,10 +55,6 @@ from ..tools.approval import (
     ApprovalManager,
     UserApprovalChoice,
 )
-
-class AgentState(TypedDict):
-    messages: list[dict[str, Any]]
-
 
 AgentEventHandler = Callable[[dict[str, Any]], None]
 
@@ -231,8 +225,6 @@ class AgentRuntime:
             context_window=self.router.context_window,
             router=self.router,
         )
-
-        self.graph = self._compile_graph()
 
     def _emit(self, event: dict[str, Any]) -> None:
         if self.event_handler is None:
@@ -506,17 +498,12 @@ class AgentRuntime:
             self.session_store.append_message(user_message)
             self.reviewer.user_message_count += 1
 
-            # 4. 构造 graph 初始状态
-            turn_state: AgentState = {
-                "messages": [*history, api_user_message],
-            }
+            # 4. 构造本轮初始消息
+            turn_messages = [*history, api_user_message]
 
-            # 5. 执行 graph
+            # 5. 执行 Agent 循环
             try:
-                result = self.graph.invoke(
-                    turn_state,
-                    config={"recursion_limit": self.max_steps},
-                )
+                current_turn_messages = self._run_agent_loop(turn_messages)
             except KeyboardInterrupt:
                 turn_messages = self.session_store.messages[snapshot_len:]
                 responded_ids = {
@@ -545,7 +532,7 @@ class AgentRuntime:
                 # 中断的消息和被中断后补发的消息视为同一次用户交互
                 self.reviewer.user_message_count -= 1
                 raise
-            # 6. graph 异常处理
+            # 6. Agent 循环异常处理
             except Exception as exc:
                 if keep_history:
                     self.conversation_history = self._valid_messages(self.session_store.messages)
@@ -555,9 +542,7 @@ class AgentRuntime:
                     "final_answer": "",
                 }
 
-            # 7. 取最终状态消息
-            current_turn_messages = result["messages"]
-            # 8. 提取最终回答
+            # 7. 提取最终回答
             final_message = get_final_assistant_message(current_turn_messages)
 
             if final_message is None:
@@ -568,7 +553,7 @@ class AgentRuntime:
 
             final_answer = final_message.get("content", "")
 
-            # 9. 更新 conversation_history
+            # 8. 更新 conversation_history
             if keep_history and final_answer:
                 self.conversation_history = self._valid_messages(self.session_store.messages)
 
@@ -653,28 +638,28 @@ class AgentRuntime:
             "new_message_count": len(new_store.messages),
         }
 
-    def _compile_graph(self):
-        graph_builder = StateGraph(AgentState)
+    def _run_agent_loop(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """运行单 Agent 的模型/工具循环。"""
+        steps = 0
+        while True:
+            self._raise_if_cancelled()
+            if steps >= self.max_steps:
+                raise RuntimeError(f"Agent 已达到最大执行步数（{self.max_steps}）。")
+            messages = self._llm_node(messages)
+            steps += 1
+            self._raise_if_cancelled()
 
-        graph_builder.add_node("llm_node", self._llm_node)
-        graph_builder.add_node("tool_node", self._tool_node)
+            if not messages[-1].get("tool_calls"):
+                return messages
 
-        graph_builder.add_edge(START, "llm_node")
-        graph_builder.add_conditional_edges(
-            "llm_node",
-            self._should_continue,
-            {
-                "tool_node": "tool_node",
-                END: END,
-            },
-        )
-        graph_builder.add_edge("tool_node", "llm_node")
-
-        return graph_builder.compile()
+            if steps >= self.max_steps:
+                raise RuntimeError(f"Agent 已达到最大执行步数（{self.max_steps}）。")
+            messages = self._tool_node(messages)
+            steps += 1
+            self._raise_if_cancelled()
 
     # 构造真正发给模型的 messages
-    def _llm_node(self, state: AgentState) -> dict[str, Any]:
-        messages = state["messages"]
+    def _llm_node(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
         current_api_user_message = messages[-1] if messages and messages[-1].get("role") == "user" else None
 
         # 压缩检查
@@ -828,9 +813,7 @@ class AgentRuntime:
 
                 self.session_store.append_message(assistant_message)
 
-                return {
-                    "messages": [*messages, assistant_message]
-                }
+                return [*messages, assistant_message]
             except Exception as exc:
                 if retry_count >= self.max_retries_per_step:
                     raise RuntimeError(
@@ -915,8 +898,8 @@ class AgentRuntime:
             if done_event is not None:
                 done_event.set()
 
-    def _tool_node(self, state: AgentState) -> dict[str, Any]:
-        last_message = state["messages"][-1]
+    def _tool_node(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        last_message = messages[-1]
         failed_messages: list[dict] = []
         rejected_messages: list[dict] = []
 
@@ -1120,15 +1103,13 @@ class AgentRuntime:
             self.reviewer.spawn_review(
                 [
                     {"role": "system", "content": self._system_prompt},
-                    *state["messages"],
+                    *messages,
                     *tool_messages,
                 ],
                 "skill",
             )
 
-        return {
-            "messages": [*state["messages"], *tool_messages],
-        }
+        return [*messages, *tool_messages]
 
     # 在工具节点去审批的函数
     def _handle_approval(
@@ -1212,14 +1193,6 @@ class AgentRuntime:
             }
         )
         return tool_result
-
-    # 判断图进入哪个节点
-    def _should_continue(self, state: AgentState) -> Literal["tool_node", "__end__"]:
-        self._raise_if_cancelled()
-        last_message = state["messages"][-1]
-        if last_message.get("tool_calls"):
-            return "tool_node"
-        return END
 
     def _register_tools(self) -> None:
         workspace = str(self.workspace)

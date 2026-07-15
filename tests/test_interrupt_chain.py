@@ -205,13 +205,63 @@ def test_runtime_interrupt_aborts_active_model_request():
     assert runner.aborted is True
 
 
-def test_should_continue_stops_when_interrupted_after_tool_node():
+def test_agent_loop_stops_when_interrupted_after_tool_node():
     runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.max_steps = 4
     runtime.cancel_event = threading.Event()
-    runtime.cancel_event.set()
+    runtime._current_scope = None
+    runtime._llm_node = lambda messages: [
+        *messages,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1"}],
+        },
+    ]
+
+    def interrupting_tool_node(messages):
+        runtime.cancel_event.set()
+        return [*messages, {"role": "tool", "tool_call_id": "call-1", "content": "{}"}]
+
+    runtime._tool_node = interrupting_tool_node
 
     with pytest.raises(KeyboardInterrupt):
-        runtime._should_continue({"messages": [{"role": "tool", "content": "{}"}]})
+        runtime._run_agent_loop([{"role": "tool", "content": "{}"}])
+
+
+def test_agent_loop_stops_when_interrupted_after_final_model_response():
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.max_steps = 1
+    runtime.cancel_event = threading.Event()
+    runtime._current_scope = None
+
+    def interrupting_llm_node(messages):
+        runtime.cancel_event.set()
+        return [*messages, {"role": "assistant", "content": "done"}]
+
+    runtime._llm_node = interrupting_llm_node
+
+    with pytest.raises(KeyboardInterrupt):
+        runtime._run_agent_loop([{"role": "user", "content": "hello"}])
+
+
+def test_agent_loop_enforces_max_steps_before_tool_execution():
+    runtime = AgentRuntime.__new__(AgentRuntime)
+    runtime.max_steps = 1
+    runtime.cancel_event = threading.Event()
+    runtime._current_scope = None
+    runtime._llm_node = lambda messages: [
+        *messages,
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [{"id": "call-1"}],
+        },
+    ]
+    runtime._tool_node = lambda messages: pytest.fail("tool node should not run")
+
+    with pytest.raises(RuntimeError, match="最大执行步数（1）"):
+        runtime._run_agent_loop([{"role": "user", "content": "hello"}])
 
 
 def test_model_stream_runner_aborts_blocked_request_worker():

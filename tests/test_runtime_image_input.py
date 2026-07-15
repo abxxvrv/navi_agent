@@ -12,22 +12,11 @@ class FakeReviewer:
         self.user_message_count = 0
 
 
-class FakeGraph:
-    def __init__(self, runtime):
-        self.runtime = runtime
-        self.state = None
-
-    def invoke(self, state, config):
-        self.state = state
-        assistant = {"role": "assistant", "content": "ok"}
-        self.runtime.session_store.append_message(assistant)
-        return {"messages": [*state["messages"], assistant]}
-
-
 class FakeRouter:
     def __init__(self, multimodal):
         self.provider = "test"
         self.model = "model"
+        self.model_name = "model"
         self.config = {
             "providers": {
                 "test": {
@@ -49,6 +38,7 @@ def _runtime(tmp_path, *, multimodal):
     runtime = AgentRuntime.__new__(AgentRuntime)
     runtime.workspace = tmp_path
     runtime.max_steps = 4
+    runtime._turn_lock = threading.Lock()
     runtime.cancel_event = threading.Event()
     runtime._current_scope = None
     runtime._execution_thread_id = None
@@ -61,7 +51,15 @@ def _runtime(tmp_path, *, multimodal):
     runtime.router = FakeRouter(multimodal)
     runtime._system_prompt = "system"
     runtime.tool_registry = ToolRegistry()
-    runtime.graph = FakeGraph(runtime)
+    runtime.loop_messages = None
+
+    def fake_llm(messages):
+        runtime.loop_messages = messages
+        assistant = {"role": "assistant", "content": "ok"}
+        runtime.session_store.append_message(assistant)
+        return [*messages, assistant]
+
+    runtime._llm_node = fake_llm
     return runtime
 
 
@@ -73,7 +71,7 @@ def test_multimodal_api_message_has_image_url_but_history_has_no_base64(tmp_path
     result = runtime.run_turn("describe", image_paths=[image])
 
     assert result["ok"] is True
-    user_content = runtime.graph.state["messages"][-1]["content"]
+    user_content = runtime.loop_messages[-1]["content"]
     assert isinstance(user_content, list)
     assert any(part.get("type") == "image_url" for part in user_content)
     assert "data:image/png;base64," in user_content[1]["image_url"]["url"]
@@ -103,7 +101,7 @@ def test_non_multimodal_image_becomes_description_text(tmp_path):
 
     runtime.run_turn("", image_paths=[image])
 
-    user_content = runtime.graph.state["messages"][-1]["content"]
+    user_content = runtime.loop_messages[-1]["content"]
     assert isinstance(user_content, str)
     assert "[Image #1]" in user_content
     assert f"description for {image}" in user_content
@@ -127,7 +125,7 @@ def test_non_multimodal_image_failure_is_text(tmp_path):
 
     runtime.run_turn("what is this", image_paths=[image])
 
-    user_content = runtime.graph.state["messages"][-1]["content"]
+    user_content = runtime.loop_messages[-1]["content"]
     assert "无法分析图片：vision missing" in user_content
 
     stored_user = [m for m in runtime.session_store.messages if m.get("role") == "user"][0]
