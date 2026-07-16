@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
+from .commands import parse_gateway_command
 from .ilink import (
     MessageDeduplicator,
     _safe_id,
@@ -857,6 +858,41 @@ class QqAdapter:
             else:
                 await self.send_text(chat_id, "当前没有正在运行的任务。", message_id)
             return
+
+        command = None
+        if not attachments and not quoted_text and not image_paths and not notes:
+            command = parse_gateway_command(text)
+        if command is not None:
+            if self._chat_locks[chat_id].locked():
+                await self.send_text(
+                    chat_id,
+                    "当前任务仍在运行，请等待完成或发送 !cancel。",
+                    message_id,
+                )
+                return
+            async with self._chat_locks[chat_id]:
+                command_name, command_args = command
+                if command_name == "new":
+                    self._runtimes[chat_id] = AgentRuntime(
+                        workspace=self._workspace,
+                        approval_mode=self._approval_mode,
+                        on_output=None,
+                        channel="qq",
+                    )
+                    await self.send_text(chat_id, "已开启新对话。", message_id)
+                    return
+
+                provider, model = command_args
+                runtime = self.get_or_create_runtime(chat_id)
+                if runtime.switch_model(provider, model):
+                    await self.send_text(
+                        chat_id, f"已切换模型：{provider}/{model}", message_id
+                    )
+                else:
+                    await self.send_text(
+                        chat_id, f"模型切换失败：{provider}/{model}", message_id
+                    )
+                return
 
         async with self._chat_locks[chat_id]:
             # Bind the passive-reply context for this turn (msg_id + seq counter).

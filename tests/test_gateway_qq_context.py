@@ -60,6 +60,10 @@ class FakeRuntime:
         self.calls.append({"text": text, "image_paths": image_paths or []})
         return {"final_answer": "ok", "pending_attachments": []}
 
+    def switch_model(self, provider, model):
+        self.switched_to = (provider, model)
+        return True
+
 
 def test_extract_context_parses_recent_messages(tmp_path):
     out = _adapter(tmp_path)._extract_atme_context({"msg_elements": REAL_MSG_ELEMENTS})
@@ -672,6 +676,68 @@ async def test_same_message_id_still_runs_once(tmp_path):
         await a._handle_message(message, "group")
 
     assert [call["text"] for call in fake.calls] == ["继续"]
+
+
+@pytest.mark.asyncio
+async def test_gateway_commands_switch_model_and_start_new_chat(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    old_runtime = FakeRuntime()
+    new_runtime = FakeRuntime()
+    a._runtimes["USER1"] = old_runtime
+
+    with (
+        patch.object(a, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(a, "send_text", AsyncMock()) as send_text,
+        patch("navi_agent.gateway.qq.AgentRuntime", return_value=new_runtime),
+    ):
+        await a._handle_message(
+            {
+                "id": "model-command",
+                "author": {"user_openid": "USER1"},
+                "content": "/model stepfun step-3.7-flash",
+            },
+            "c2c",
+        )
+        await a._handle_message(
+            {
+                "id": "new-command",
+                "author": {"user_openid": "USER1"},
+                "content": "/new",
+            },
+            "c2c",
+        )
+
+    assert old_runtime.switched_to == ("stepfun", "step-3.7-flash")
+    assert old_runtime.calls == []
+    assert a._runtimes["USER1"] is new_runtime
+    assert [call.args[1] for call in send_text.await_args_list] == [
+        "已切换模型：stepfun/step-3.7-flash",
+        "已开启新对话。",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_non_matching_qq_slash_text_reaches_runtime(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    a._runtimes["USER1"] = fake
+
+    with (
+        patch.object(a, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(a, "send_text", AsyncMock()),
+    ):
+        await a._handle_message(
+            {
+                "id": "ordinary-slash-text",
+                "author": {"user_openid": "USER1"},
+                "content": "/model stepfun",
+            },
+            "c2c",
+        )
+
+    assert [call["text"] for call in fake.calls] == ["/model stepfun"]
 
 
 @pytest.mark.asyncio

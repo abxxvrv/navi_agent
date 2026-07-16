@@ -28,12 +28,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
+from .commands import parse_gateway_command
 from .ilink import (
     BACKOFF_DELAY_SECONDS,
     CRYPTO_AVAILABLE,
     ILINK_BASE_URL,
     ITEM_FILE,
     ITEM_IMAGE,
+    ITEM_TEXT,
     ITEM_VIDEO,
     ITEM_VOICE,
     LONG_POLL_TIMEOUT_MS,
@@ -386,6 +388,35 @@ class WeixinAdapter:
             else:
                 await self.send_text(chat_id, "当前没有正在运行的任务。")
             return
+
+        command = None
+        if item_list and all(item.get("type") == ITEM_TEXT for item in item_list):
+            command = parse_gateway_command(text)
+        if command is not None:
+            if self._chat_locks[chat_id].locked():
+                await self.send_text(
+                    chat_id, "当前任务仍在运行，请等待完成或发送 !cancel。"
+                )
+                return
+            async with self._chat_locks[chat_id]:
+                command_name, command_args = command
+                if command_name == "new":
+                    self._runtimes[chat_id] = AgentRuntime(
+                        workspace=self._workspace,
+                        approval_mode=self._approval_mode,
+                        on_output=None,
+                        channel="weixin",
+                    )
+                    await self.send_text(chat_id, "已开启新对话。")
+                    return
+
+                provider, model = command_args
+                runtime = self.get_or_create_runtime(chat_id)
+                if runtime.switch_model(provider, model):
+                    await self.send_text(chat_id, f"已切换模型：{provider}/{model}")
+                else:
+                    await self.send_text(chat_id, f"模型切换失败：{provider}/{model}")
+                return
 
         # Fetch the typing ticket in the background so the first reply can show
         # the typing indicator once it is available.
