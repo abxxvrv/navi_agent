@@ -1833,7 +1833,7 @@ class AgentRuntime:
 - 管理全局持久化记忆，跨会话保留。
 - 存储目标 memory：你的全局笔记（跨项目环境事实、工具特性、通用经验教训）。
 - 存储目标 user：用户画像（用户偏好、沟通风格、工作习惯、技术栈）。
-- 当前项目的项目记忆不用本工具：按 memory-creator 技能的规范直接读写 .navi/memories/ 下的文件。
+- 当前项目的项目记忆不用本工具：按系统提示词里的项目记忆规范直接读写 .navi/memories/ 下的文件。
 - action="add"：添加一条新记忆。
 - action="replace"：更新已有记忆（用 old_text 定位，用 content 替换）。
 - action="remove"：删除已有记忆（用 old_text 定位）。

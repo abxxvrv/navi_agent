@@ -23,6 +23,29 @@ def _load_review_prompt(filename: str) -> str:
 MEMORY_REVIEW_PROMPT = _load_review_prompt("memory-review-prompt.md")
 SKILL_REVIEW_PROMPT = _load_review_prompt("skill-review-prompt.md")
 
+# 写入类工具 → 表示"成功改动"的返回字段（只读工具不在此表 → 永远不算改动）
+_WRITE_SUCCESS_KEYS = {
+    "memory": "success",        # memory_store.add/replace/remove
+    "skill_manage": "ok",       # SkillManageTool write/patch/delete
+}
+
+
+def _made_real_changes(tool_calls: list[dict]) -> bool:
+    """是否真的执行了改动：写入类工具且其成功标志为 True。
+
+    只读工具（read_file/search_session/read_session 等）不在 _WRITE_SUCCESS_KEYS
+    里，永远不会触发；写入失败（memory 重复/超限、skill_manage 报错）成功标志为
+    False，也不触发。
+    """
+    for tc in tool_calls:
+        key = _WRITE_SUCCESS_KEYS.get(tc.get("name", ""))
+        if key is None:
+            continue
+        result = tc.get("result")
+        if isinstance(result, dict) and result.get(key) is True:
+            return True
+    return False
+
 
 class BackgroundReviewer:
     def __init__(
@@ -79,8 +102,8 @@ class BackgroundReviewer:
                 context_messages=messages if messages else None,
             )
 
-            # 只有实际执行了修改才通知用户
-            if result.tool_calls_made:
+            # 只有写入类工具实际改成功才通知用户（只读工具/失败写入不算）
+            if _made_real_changes(result.tool_calls_made):
                 self.pending_message = "Navi 已进行自我提升"
 
         except Exception:

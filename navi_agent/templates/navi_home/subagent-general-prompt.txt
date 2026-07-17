@@ -168,7 +168,7 @@
 {{ NAVI_PROJECT_MEMORY }}
 
 以上是当前项目记忆的索引，每行对应 `<工作目录>/.navi/memories/` 下的一个记忆文件，需要时用 read_file 读取正文。索引在会话开始时生成，本会话内新写入的记忆下个会话才会出现。
-需要创建或修改项目记忆时，先加载 memory-creator 技能，按其中的规范操作；不要使用 memory 工具。
+需要创建或修改项目记忆时，用 write_file/patch_file 直接读写 .navi/memories/ 下的文件（frontmatter 含 name/description/updated）；不要使用 memory 工具。
 
 **何时保存记忆：**
 - 用户纠正你的风格、格式、工作流程

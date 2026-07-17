@@ -490,7 +490,11 @@ class WeixinAdapter:
             else:
                 workspace_text = workspace.as_posix()
             model_name = result.get("model_name") or runtime.router.model_name
-            answer = f"{answer.rstrip()}\n\n{model_name} · {pct}% · {workspace_text}"
+            answer = answer.rstrip()
+            if runtime.reviewer.pending_message:
+                answer = f"{answer}\n\n{runtime.reviewer.pending_message}"
+                runtime.reviewer.pending_message = None
+            answer = f"{answer}\n\n{model_name} · {pct}% · {workspace_text}"
             await self.send_text(chat_id, answer)
             for attach_path in result.get("pending_attachments") or []:
                 try:
