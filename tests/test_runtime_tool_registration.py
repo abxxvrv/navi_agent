@@ -151,3 +151,9 @@ def test_resume_migrates_run_command_tool_name(monkeypatch, tmp_path):
     assert "run_command" not in tool_names
     assert "run_command" not in runtime._system_prompt
     assert "bash" in runtime._system_prompt
+    assert {
+        "create_goal",
+        "get_goal",
+        "set_goal_budget",
+        "update_goal",
+    }.issubset(tool_names)

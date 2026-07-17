@@ -226,3 +226,16 @@ def test_budget_units_validate_and_merge(tmp_path):
     assert runner.set_goal_budget(999, "milliseconds")["ok"] is False
     assert runner.set_goal_budget(25, "hours")["ok"] is False
     assert runner.set_goal_budget(True, "turns")["ok"] is False
+
+
+def test_goal_mutation_tools_fail_cleanly_without_current_goal(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+
+    assert runner.set_goal_budget(1, "turns") == {
+        "ok": False,
+        "error": "No active or resumable goal.",
+    }
+    assert runner.update_goal("complete") == {
+        "ok": False,
+        "error": "No active or resumable goal.",
+    }

@@ -734,19 +734,11 @@ class AgentRuntime:
                 self._raise_if_cancelled()
 
                 # 流式调用模型
-                tools_for_api = self._tools_for_api
-                if self.goal_runner.current() is None:
-                    tools_for_api = [
-                        tool
-                        for tool in tools_for_api
-                        if tool.get("function", {}).get("name")
-                        not in {"set_goal_budget", "update_goal"}
-                    ]
                 stream = run_model_stream(
                     self._require_scope(),
                     self._model_stream_runner,
                     messages=model_messages,
-                    tools=tools_for_api,
+                    tools=self._tools_for_api,
                 )
 
                 for chunk in stream:
