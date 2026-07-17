@@ -33,6 +33,7 @@ from urllib.parse import urlparse
 from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
 from .commands import format_model_table, parse_gateway_command
+from ..runtime.goal import parse_goal_command
 from .ilink import (
     MessageDeduplicator,
     _safe_id,
@@ -817,6 +818,46 @@ class QqAdapter:
             if not attachments and not quoted_text
             else None
         )
+        goal_command = (
+            parse_goal_command(text)
+            if not attachments and not quoted_text
+            else None
+        )
+        if goal_command is not None and goal_command[0] in {"status", "pause", "cancel"}:
+            runtime = self._runtimes.get(chat_id)
+            if runtime is None:
+                await self.send_text(
+                    chat_id, "No active or resumable goal.", message_id
+                )
+                return
+            command_result = runtime.goal_runner.apply_command(*goal_command)
+            if command_result["ok"]:
+                runtime.interrupt(f"用户通过 QQ 请求 {goal_command[0]} goal")
+            await self.send_text(chat_id, command_result["message"], message_id)
+            return
+        if goal_command is not None and goal_command[0] == "create":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None:
+                await self.send_text(
+                    chat_id,
+                    (
+                        f"Goal {current['goal_id']} is still {current['status']}; "
+                        "use /goal replace <objective>."
+                    ),
+                    message_id,
+                )
+                return
+        if goal_command is not None and goal_command[0] == "replace":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None and current["status"] == "active":
+                runtime.interrupt("用户通过 QQ 请求 replace goal")
+                await self.send_text(
+                    chat_id,
+                    f"正在停止 Goal {current['goal_id']}，随后启动新目标。",
+                    message_id,
+                )
         if command:
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
@@ -898,6 +939,17 @@ class QqAdapter:
             self._reply_seq[chat_id] = 0
 
             runtime = self.get_or_create_runtime(chat_id)
+            if goal_command is not None:
+                command_result = runtime.goal_runner.apply_command(*goal_command)
+                if command_result["run_input"] is None:
+                    await self.send_text(
+                        chat_id, command_result["message"], message_id
+                    )
+                    return
+                await self.send_text(
+                    chat_id, command_result["message"], message_id
+                )
+                message_text = command_result["run_input"]
             logger.info(
                 "qq: runtime_input msg=%s type=%s from=%s chat=%s text_len=%d "
                 "selected_current=%d selected_quoted=%d images=%d notes=%d",
@@ -915,7 +967,9 @@ class QqAdapter:
             if chat_type == "c2c":
                 await self._send_typing(chat_id, message_id)
             try:
-                result = await asyncio.to_thread(runtime.run_turn, message_text, image_paths)
+                result = await asyncio.to_thread(
+                    runtime.goal_runner.drive, message_text, image_paths
+                )
             except Exception as exc:
                 logger.error("qq: run_turn failed for %s: %s", _safe_id(chat_id), exc)
                 await self.send_text(chat_id, f"处理消息时出错：{exc}", message_id)

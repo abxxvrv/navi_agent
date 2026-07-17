@@ -7,12 +7,14 @@ from typing import Any
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.key_binding import KeyBindings
+from rich.markup import escape
 
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..tools.approval_broker import ApprovalBroker
 from ..paths import get_navi_home, load_navi_dotenv
 from .prompt_ui import NaviPromptSession
 from ..runtime.agent import AgentRuntime
+from ..runtime.goal import parse_goal_command
 from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
 from .paste_collapse import expand_paste_references
 from .paste_trace import summarize_text, trace_paste
@@ -95,10 +97,13 @@ class ChatController:
         )
 
         navi_home = get_navi_home()
+        slash_commands = list(self.slash_commands)
+        if "/goal" not in slash_commands:
+            slash_commands.append("/goal")
         self.prompt_session = NaviPromptSession(
             history_path=navi_home / "chat_history.txt",
             completer=WordCompleter(
-                self.slash_commands,
+                slash_commands,
                 ignore_case=True,
                 WORD=True,
             ),
@@ -193,7 +198,24 @@ class ChatController:
                 self.output.notice(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
             return
 
-        if not image_paths and self.handle_slash_command(
+        goal_runner = runtime.goal_runner
+        goal_input: str | None = None
+        goal_command = parse_goal_command(stripped) if not image_paths else None
+        if goal_command is not None:
+            action, argument = goal_command
+            command_result = goal_runner.apply_command(action, argument)
+            goal_input = command_result["run_input"]
+            if goal_input is None:
+                style = "green" if command_result["ok"] else "yellow"
+                self.print_live(
+                    f"[{style}]{escape(str(command_result['message']))}[/{style}]"
+                )
+                return
+            self.print_live(
+                f"[green]{escape(str(command_result['message']))}[/green]"
+            )
+
+        if goal_command is None and not image_paths and self.handle_slash_command(
             command=text,
             runtime=runtime,
             workspace=self.workspace,
@@ -202,7 +224,7 @@ class ChatController:
             return
 
         display_text = text
-        runtime_text = expand_paste_references(text)
+        runtime_text = goal_input or expand_paste_references(text)
         if runtime_text != display_text:
             trace_paste("paste_reference_expanded", text_summary=summarize_text(display_text))
 
@@ -242,7 +264,7 @@ class ChatController:
 
         def runner() -> dict[str, Any]:
             try:
-                return runtime.run_turn(runtime_text, image_paths=image_paths)
+                return goal_runner.drive(runtime_text, image_paths=image_paths)
             except KeyboardInterrupt:
                 return {
                     "ok": False,
@@ -278,6 +300,15 @@ class ChatController:
         if not stream_box.had_output:
             answer = result.get("final_answer") or result.get("content") or ""
             self.output.assistant(answer)
+
+        goal_status = result.get("goal_status")
+        goal = result.get("goal") or {}
+        if goal_status == "complete":
+            self.print_live(f"[green]Goal {goal.get('goal_id', '')} completed.[/green]")
+        elif goal_status == "blocked":
+            self.print_live(f"[yellow]Goal {goal.get('goal_id', '')} is blocked.[/yellow]")
+        elif goal_status == "paused" and not prompt_session.cancel_requested:
+            self.print_live(f"[yellow]Goal {goal.get('goal_id', '')} paused.[/yellow]")
 
         if prompt_session.cancel_requested:
             self.output.notice("[yellow]Interrupted.[/yellow]")

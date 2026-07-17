@@ -2,6 +2,8 @@ from pathlib import Path
 import json
 
 from navi_agent.runtime.agent import AgentRuntime
+from navi_agent.runtime.goal import GoalRunner
+from navi_agent.storage.goal_store import GoalStore
 from navi_agent.storage.history_store import HistoryStore
 from navi_agent.tools.registry import ToolRegistry
 
@@ -37,6 +39,10 @@ def _runtime(tmp_path):
     runtime._channel = "cli"
     runtime.on_output = None
     runtime._pending_attachments = []
+    runtime.goal_runner = GoalRunner(
+        runtime,
+        GoalStore(runtime.navi_home / "history.sqlite3"),
+    )
     return runtime
 
 
@@ -49,6 +55,14 @@ def test_register_tools_renames_run_command_to_bash(monkeypatch, tmp_path):
 
     assert "bash" in runtime.tool_registry._tools
     assert "run_command" not in runtime.tool_registry._tools
+    assert {
+        "create_goal",
+        "get_goal",
+        "set_goal_budget",
+        "update_goal",
+    }.issubset(runtime.tool_registry._tools)
+    create_parameters = runtime.tool_registry._tools["create_goal"].parameters
+    assert "replace" not in create_parameters["properties"]
 
 
 def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path):
@@ -139,3 +153,9 @@ def test_resume_migrates_run_command_tool_name(monkeypatch, tmp_path):
     assert "run_command" not in tool_names
     assert "run_command" not in runtime._system_prompt
     assert "bash" in runtime._system_prompt
+    assert {
+        "create_goal",
+        "get_goal",
+        "set_goal_budget",
+        "update_goal",
+    }.issubset(tool_names)

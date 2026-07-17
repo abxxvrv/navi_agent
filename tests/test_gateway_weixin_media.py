@@ -364,15 +364,30 @@ class FakeRuntime:
 
     def __init__(self):
         self.calls: list = []
+        self.goal_commands: list = []
+        self.interrupts: list = []
+        self.current_goal = None
         self.last_usage = {"prompt_tokens": 44}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
+        self.goal_runner = SimpleNamespace(
+            drive=self.run_turn,
+            apply_command=self.apply_goal_command,
+            current=lambda: self.current_goal,
+        )
+
+    def apply_goal_command(self, action, argument):
+        self.goal_commands.append((action, argument))
+        if action == "status":
+            return {"ok": True, "message": "goal status", "run_input": None}
+        self.current_goal = {"goal_id": "g_test", "status": "active"}
+        return {"ok": True, "message": "goal created", "run_input": argument}
 
     def run_turn(self, text: str, image_paths=None):
         self.calls.append({"text": text, "image_paths": image_paths or []})
         return {"ok": True, "final_answer": "ok", "pending_attachments": []}
 
     def interrupt(self, reason: str):
-        pass
+        self.interrupts.append(reason)
 
 def _make_full_adapter(tmp_path: Path) -> Any:
     """Adapter with all fields needed for _handle_message."""
@@ -651,3 +666,73 @@ async def test_non_matching_weixin_slash_text_reaches_runtime(tmp_path):
         await adapter._handle_message(message)
 
     assert [call["text"] for call in fake_runtime.calls] == ["/model stepfun"]
+
+
+@pytest.mark.asyncio
+async def test_weixin_goal_status_is_handled_without_model_turn(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    fake_runtime = FakeRuntime()
+    adapter._runtimes["user123"] = fake_runtime
+    message = {
+        "from_user_id": "user123",
+        "message_id": "goal-status",
+        "item_list": [{"type": ITEM_TEXT, "text_item": {"text": "/goal status"}}],
+    }
+
+    send_text = AsyncMock()
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "_fetch_typing_ticket", AsyncMock()),
+        patch.object(adapter, "send_text", send_text),
+        patch.object(adapter, "_keep_typing", AsyncMock()),
+    ):
+        await adapter._handle_message(message)
+
+    assert fake_runtime.goal_commands == [("status", "")]
+    assert fake_runtime.calls == []
+    send_text.assert_awaited_with("user123", "goal status")
+
+
+@pytest.mark.asyncio
+async def test_weixin_goal_replace_interrupts_then_waits_for_busy_turn(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    fake_runtime = FakeRuntime()
+    fake_runtime.current_goal = {"goal_id": "g_active", "status": "active"}
+    adapter._runtimes["user123"] = fake_runtime
+    lock = adapter._chat_locks["user123"]
+    await lock.acquire()
+    message = {
+        "from_user_id": "user123",
+        "message_id": "goal-replace",
+        "item_list": [
+            {"type": ITEM_TEXT, "text_item": {"text": "/goal replace new objective"}}
+        ],
+    }
+
+    send_text = AsyncMock()
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "_fetch_typing_ticket", AsyncMock()),
+        patch.object(adapter, "send_text", send_text),
+        patch.object(adapter, "_keep_typing", AsyncMock()),
+    ):
+        task = asyncio.create_task(adapter._handle_message(message))
+        await asyncio.sleep(0)
+        assert fake_runtime.interrupts
+        assert fake_runtime.goal_commands == []
+        assert "正在停止" in send_text.await_args_list[0].args[1]
+
+        lock.release()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert fake_runtime.goal_commands == [("replace", "new objective")]
+    assert [call["text"] for call in fake_runtime.calls] == ["new objective"]
+    assert "goal created" in [call.args[1] for call in send_text.await_args_list]

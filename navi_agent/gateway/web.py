@@ -263,6 +263,7 @@ class WebAdapter:
             resume_session_id=resume_session_id,
             on_output=None,
             channel="cli",
+            enable_goal_mode=False,
         )
 
     def _authorized(self, request) -> bool:

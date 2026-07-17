@@ -355,6 +355,21 @@ class ApprovalManager:
         args = tool_args or {}
         normalized_tool_name = self._normalize_tool_name(tool_name)
 
+        if normalized_tool_name in {
+            "create_goal",
+            "get_goal",
+            "set_goal_budget",
+            "update_goal",
+        }:
+            return ApprovalDecision(
+                action=ApprovalAction.ALLOW,
+                risk=RiskLevel.SAFE,
+                reason="Goal state tool, allowed internally.",
+                tool_name=tool_name,
+                tool_args=args,
+                approval_key=None,
+            )
+
         if normalized_tool_name in self.COMMAND_TOOLS:
             return self._check_command_tool(normalized_tool_name, args)
 

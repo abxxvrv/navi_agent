@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
 from .commands import format_model_table, parse_gateway_command
+from ..runtime.goal import parse_goal_command
 from .ilink import (
     BACKOFF_DELAY_SECONDS,
     CRYPTO_AVAILABLE,
@@ -389,6 +390,43 @@ class WeixinAdapter:
                 await self.send_text(chat_id, "当前没有正在运行的任务。")
             return
 
+        goal_command = (
+            parse_goal_command(text)
+            if all(item.get("type") == ITEM_TEXT for item in item_list)
+            else None
+        )
+        if goal_command is not None and goal_command[0] in {"status", "pause", "cancel"}:
+            runtime = self._runtimes.get(chat_id)
+            if runtime is None:
+                await self.send_text(chat_id, "No active or resumable goal.")
+                return
+            command_result = runtime.goal_runner.apply_command(*goal_command)
+            if command_result["ok"]:
+                runtime.interrupt(f"用户通过微信请求 {goal_command[0]} goal")
+            await self.send_text(chat_id, command_result["message"])
+            return
+        if goal_command is not None and goal_command[0] == "create":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None:
+                await self.send_text(
+                    chat_id,
+                    (
+                        f"Goal {current['goal_id']} is still {current['status']}; "
+                        "use /goal replace <objective>."
+                    ),
+                )
+                return
+        if goal_command is not None and goal_command[0] == "replace":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None and current["status"] == "active":
+                runtime.interrupt("用户通过微信请求 replace goal")
+                await self.send_text(
+                    chat_id,
+                    f"正在停止 Goal {current['goal_id']}，随后启动新目标。",
+                )
+
         command = (
             parse_gateway_command(text)
             if all(item.get("type") == ITEM_TEXT for item in item_list)
@@ -421,6 +459,13 @@ class WeixinAdapter:
 
         async with self._chat_locks[chat_id]:
             runtime = self.get_or_create_runtime(chat_id)
+            if goal_command is not None:
+                command_result = runtime.goal_runner.apply_command(*goal_command)
+                if command_result["run_input"] is None:
+                    await self.send_text(chat_id, command_result["message"])
+                    return
+                await self.send_text(chat_id, command_result["message"])
+                message_text = command_result["run_input"]
             logger.info(
                 "weixin: inbound from=%s text_len=%d images=%d notes=%d",
                 _safe_id(sender_id), len(message_text), len(image_paths), len(notes),
@@ -498,7 +543,7 @@ class WeixinAdapter:
     ) -> Dict[str, Any]:
         typing_task = asyncio.create_task(self._keep_typing(chat_id))
         try:
-            return await asyncio.to_thread(runtime.run_turn, text, image_paths)
+            return await asyncio.to_thread(runtime.goal_runner.drive, text, image_paths)
         finally:
             typing_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):

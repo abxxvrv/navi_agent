@@ -197,6 +197,9 @@ def test_process_message_prints_submitted_preview_once(tmp_path):
     class Runtime:
         reviewer = SimpleNamespace(pending_message=None)
 
+        def __init__(self):
+            self.goal_runner = SimpleNamespace(drive=self.run_turn)
+
         def run_turn(self, text, image_paths=None):
             return {"ok": True, "final_answer": "", "content": ""}
 
