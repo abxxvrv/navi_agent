@@ -583,6 +583,48 @@ async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_
 
 
 @pytest.mark.asyncio
+async def test_model_command_waits_for_current_weixin_turn(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    runtime = FakeRuntime()
+    runtime.switch_model = MagicMock(return_value=True)
+    adapter._runtimes["user123"] = runtime
+    lock = adapter._chat_locks["user123"]
+    await lock.acquire()
+    message = {
+        "from_user_id": "user123",
+        "message_id": "queued-model-command",
+        "item_list": [
+            {
+                "type": ITEM_TEXT,
+                "text_item": {"text": "/model stepfun step-3.7-flash"},
+            }
+        ],
+    }
+
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "send_text", AsyncMock()) as send_text,
+    ):
+        task = asyncio.create_task(adapter._handle_message(message))
+        await asyncio.sleep(0)
+        assert not task.done()
+        send_text.assert_not_awaited()
+
+        lock.release()
+        await task
+
+    runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
+    send_text.assert_awaited_once_with(
+        "user123", "已切换模型：stepfun/step-3.7-flash"
+    )
+
+
+@pytest.mark.asyncio
 async def test_non_matching_weixin_slash_text_reaches_runtime(tmp_path):
     adapter = _make_full_adapter(tmp_path)
 

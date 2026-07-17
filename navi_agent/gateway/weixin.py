@@ -395,11 +395,6 @@ class WeixinAdapter:
             else None
         )
         if command:
-            if self._chat_locks[chat_id].locked():
-                await self.send_text(
-                    chat_id, "当前任务仍在运行，请等待完成或发送 !cancel。"
-                )
-                return
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
                 if command_name == "new":

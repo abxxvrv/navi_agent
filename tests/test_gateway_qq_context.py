@@ -726,6 +726,38 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_new_command_waits_for_current_qq_turn(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    a._runtimes["USER1"] = FakeRuntime()
+    lock = a._chat_locks["USER1"]
+    await lock.acquire()
+
+    with (
+        patch.object(a, "send_text", AsyncMock()) as send_text,
+        patch("navi_agent.gateway.qq.AgentRuntime", return_value=FakeRuntime()),
+    ):
+        task = asyncio.create_task(
+            a._handle_message(
+                {
+                    "id": "queued-new-command",
+                    "author": {"user_openid": "USER1"},
+                    "content": "/new",
+                },
+                "c2c",
+            )
+        )
+        await asyncio.sleep(0)
+        assert not task.done()
+        send_text.assert_not_awaited()
+
+        lock.release()
+        await task
+
+    send_text.assert_awaited_once_with("USER1", "已开启新对话。", "queued-new-command")
+
+
+@pytest.mark.asyncio
 async def test_non_matching_qq_slash_text_reaches_runtime(tmp_path):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
