@@ -32,6 +32,7 @@ from urllib.parse import urlparse
 
 from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
+from .commands import format_model_table, parse_gateway_command
 from .ilink import (
     MessageDeduplicator,
     _safe_id,
@@ -810,6 +811,39 @@ class QqAdapter:
                 seen_urls.add(url)
                 unique_attachments.append(att)
         attachments = unique_attachments
+
+        command = (
+            parse_gateway_command(text)
+            if not attachments and not quoted_text
+            else None
+        )
+        if command:
+            async with self._chat_locks[chat_id]:
+                command_name, command_args = command
+                if command_name == "new":
+                    self._runtimes.pop(chat_id, None)
+                    self.get_or_create_runtime(chat_id)
+                    await self.send_text(chat_id, "已开启新对话。", message_id)
+                    return
+
+                runtime = self.get_or_create_runtime(chat_id)
+                if command_name == "model_list":
+                    await self.send_text(
+                        chat_id, format_model_table(runtime.router), message_id
+                    )
+                    return
+
+                provider, model = command_args
+                if runtime.switch_model(provider, model):
+                    await self.send_text(
+                        chat_id, f"已切换模型：{provider}/{model}", message_id
+                    )
+                else:
+                    await self.send_text(
+                        chat_id, f"模型切换失败：{provider}/{model}", message_id
+                    )
+                return
+
         logger.info(
             "qq: media_select msg=%s current=%d quoted=%d total=%d",
             _safe_id(message_id),

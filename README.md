@@ -279,7 +279,7 @@ navi weixin deny <user_id> --account <account_id>
 navi weixin allowlist --account <account_id>
 ```
 
-微信网关支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。较长任务执行期间，网关会使用 iLink typing ticket 周期性发送“正在输入中”状态。
+微信网关支持文本、图片、文件、视频和语音文件路径注入。聊天中可发送 `/new` 开启新对话，用 `/model list` 查看提供商和模型名称列表，或用 `/model <provider> <modelname>` 切换模型；只有这三种精确格式会作为网关命令处理，其他以 `/` 开头的内容仍作为普通消息交给模型。运行中可发送 `!cancel` 请求取消当前任务。较长任务执行期间，网关会使用 iLink typing ticket 周期性发送“正在输入中”状态。
 
 ## QQ 网关
 
@@ -300,7 +300,7 @@ navi qq deny <user_id> --account <account_id>
 navi qq allowlist --account <account_id>
 ```
 
-QQ 网关同时处理私聊（C2C）和群聊（@机器人）消息，支持文本、图片、文件、视频和语音文件路径注入。运行中可通过聊天发送 `!cancel` 请求取消当前任务。
+QQ 网关同时处理私聊（C2C）和群聊（@机器人）消息，支持文本、图片、文件、视频和语音文件路径注入。聊天中可发送 `/new` 开启新对话，用 `/model list` 查看提供商和模型名称列表，或用 `/model <provider> <modelname>` 切换模型；只有这三种精确格式会作为网关命令处理，其他以 `/` 开头的内容仍作为普通消息交给模型。运行中可发送 `!cancel` 请求取消当前任务。
 
 群聊按群维度单独授权（同样 fail-closed，未授权的群会被静默忽略），加 `--group` 即可：
 

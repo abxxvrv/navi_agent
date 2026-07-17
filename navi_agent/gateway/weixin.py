@@ -28,12 +28,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
+from .commands import format_model_table, parse_gateway_command
 from .ilink import (
     BACKOFF_DELAY_SECONDS,
     CRYPTO_AVAILABLE,
     ILINK_BASE_URL,
     ITEM_FILE,
     ITEM_IMAGE,
+    ITEM_TEXT,
     ITEM_VIDEO,
     ITEM_VOICE,
     LONG_POLL_TIMEOUT_MS,
@@ -386,6 +388,32 @@ class WeixinAdapter:
             else:
                 await self.send_text(chat_id, "当前没有正在运行的任务。")
             return
+
+        command = (
+            parse_gateway_command(text)
+            if all(item.get("type") == ITEM_TEXT for item in item_list)
+            else None
+        )
+        if command:
+            async with self._chat_locks[chat_id]:
+                command_name, command_args = command
+                if command_name == "new":
+                    self._runtimes.pop(chat_id, None)
+                    self.get_or_create_runtime(chat_id)
+                    await self.send_text(chat_id, "已开启新对话。")
+                    return
+
+                runtime = self.get_or_create_runtime(chat_id)
+                if command_name == "model_list":
+                    await self.send_text(chat_id, format_model_table(runtime.router))
+                    return
+
+                provider, model = command_args
+                if runtime.switch_model(provider, model):
+                    await self.send_text(chat_id, f"已切换模型：{provider}/{model}")
+                else:
+                    await self.send_text(chat_id, f"模型切换失败：{provider}/{model}")
+                return
 
         # Fetch the typing ticket in the background so the first reply can show
         # the typing indicator once it is available.

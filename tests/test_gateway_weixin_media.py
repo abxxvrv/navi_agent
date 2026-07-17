@@ -374,7 +374,6 @@ class FakeRuntime:
     def interrupt(self, reason: str):
         pass
 
-
 def _make_full_adapter(tmp_path: Path) -> Any:
     """Adapter with all fields needed for _handle_message."""
     from collections import defaultdict
@@ -536,3 +535,119 @@ async def test_handle_message_empty_drops(tmp_path):
 
     # run_turn should never be called
     assert fake_runtime.calls == []
+
+
+@pytest.mark.asyncio
+async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    old_runtime = FakeRuntime()
+    old_runtime.switch_model = MagicMock(return_value=True)
+    old_runtime.router.list_providers = lambda: ["stepfun", "deepseek"]
+    old_runtime.router.list_models = lambda provider: {
+        "stepfun": {"step-3.7-flash": {}},
+        "deepseek": {"deepseek-chat": {}},
+    }[provider]
+    new_runtime = FakeRuntime()
+    adapter._runtimes["user123"] = old_runtime
+
+    def message(message_id, text):
+        return {
+            "from_user_id": "user123",
+            "message_id": message_id,
+            "item_list": [{"type": ITEM_TEXT, "text_item": {"text": text}}],
+        }
+
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "send_text", AsyncMock()) as send_text,
+        patch("navi_agent.gateway.weixin.AgentRuntime", return_value=new_runtime),
+    ):
+        await adapter._handle_message(
+            message("model-command", "/model stepfun step-3.7-flash")
+        )
+        await adapter._handle_message(message("model-list-command", "/model list"))
+        await adapter._handle_message(message("new-command", "/new"))
+
+    old_runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
+    assert old_runtime.calls == []
+    assert adapter._runtimes["user123"] is new_runtime
+    replies = [call.args[1] for call in send_text.await_args_list]
+    assert replies[0] == "已切换模型：stepfun/step-3.7-flash"
+    assert replies[1].startswith("| 提供商 | 模型名称 |")
+    assert replies[2] == "已开启新对话。"
+
+
+@pytest.mark.asyncio
+async def test_model_command_waits_for_current_weixin_turn(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    runtime = FakeRuntime()
+    runtime.switch_model = MagicMock(return_value=True)
+    adapter._runtimes["user123"] = runtime
+    lock = adapter._chat_locks["user123"]
+    await lock.acquire()
+    message = {
+        "from_user_id": "user123",
+        "message_id": "queued-model-command",
+        "item_list": [
+            {
+                "type": ITEM_TEXT,
+                "text_item": {"text": "/model stepfun step-3.7-flash"},
+            }
+        ],
+    }
+
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "send_text", AsyncMock()) as send_text,
+    ):
+        task = asyncio.create_task(adapter._handle_message(message))
+        await asyncio.sleep(0)
+        assert not task.done()
+        send_text.assert_not_awaited()
+
+        lock.release()
+        await task
+
+    runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
+    send_text.assert_awaited_once_with(
+        "user123", "已切换模型：stepfun/step-3.7-flash"
+    )
+
+
+@pytest.mark.asyncio
+async def test_non_matching_weixin_slash_text_reaches_runtime(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    fake_runtime = FakeRuntime()
+    adapter._runtimes["user123"] = fake_runtime
+    message = {
+        "from_user_id": "user123",
+        "message_id": "ordinary-slash-text",
+        "item_list": [
+            {"type": ITEM_TEXT, "text_item": {"text": "/model stepfun"}}
+        ],
+    }
+
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "_fetch_typing_ticket", AsyncMock()),
+        patch.object(adapter, "send_text", AsyncMock()),
+        patch.object(adapter, "_keep_typing", AsyncMock()),
+    ):
+        await adapter._handle_message(message)
+
+    assert [call["text"] for call in fake_runtime.calls] == ["/model stepfun"]
