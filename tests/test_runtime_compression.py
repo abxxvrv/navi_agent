@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.storage.history_store import HistoryStore
 
@@ -30,6 +32,7 @@ def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
     runtime.session_store = parent
     runtime.conversation_history = AgentRuntime._valid_messages(parent.messages)
     runtime.compressor = FakeCompressor(compressed_messages)
+    runtime.goal_runner = SimpleNamespace(rebind=lambda old, new: None)
 
     result = runtime.compress_context_to_new_session()
 

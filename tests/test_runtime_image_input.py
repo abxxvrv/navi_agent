@@ -3,6 +3,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from navi_agent.runtime.agent import AgentRuntime
+from navi_agent.runtime.goal import GoalRunner
+from navi_agent.storage.goal_store import GoalStore
 from navi_agent.storage.history_store import HistoryStore
 from navi_agent.tools.registry import ToolRegistry
 
@@ -50,7 +52,10 @@ def _runtime(tmp_path, *, multimodal):
     runtime.reviewer = FakeReviewer()
     runtime.router = FakeRouter(multimodal)
     runtime._system_prompt = "system"
+    runtime.enable_goal_mode = True
     runtime.tool_registry = ToolRegistry()
+    runtime.goal_runner = GoalRunner(runtime, GoalStore(store.db_path))
+    runtime._goal_turn_reminder = ""
     runtime.loop_messages = None
 
     def fake_llm(messages):
@@ -130,3 +135,19 @@ def test_non_multimodal_image_failure_is_text(tmp_path):
 
     stored_user = [m for m in runtime.session_store.messages if m.get("role") == "user"][0]
     assert "无法分析图片：vision missing" in stored_user["content"]
+
+
+def test_goal_reminder_follows_user_input_without_being_persisted(tmp_path):
+    runtime = _runtime(tmp_path, multimodal=True)
+    runtime.goal_runner.create_goal("finish <safely>", "tests pass")
+
+    runtime.run_turn("start")
+
+    assert runtime.loop_messages[-2] == {"role": "user", "content": "start"}
+    assert runtime.loop_messages[-1]["role"] == "user"
+    assert runtime.loop_messages[-1]["content"].startswith("<system-reminder>")
+    assert "finish &lt;safely&gt;" in runtime.loop_messages[-1]["content"]
+    assert all(
+        not str(message.get("content", "")).startswith("<system-reminder>")
+        for message in runtime.session_store.messages
+    )

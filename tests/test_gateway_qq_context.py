@@ -53,12 +53,27 @@ def _adapter(tmp_path, bot_name="Navi agent"):
 class FakeRuntime:
     def __init__(self):
         self.calls = []
+        self.goal_commands = []
+        self.interrupts = []
         self.last_usage = {"prompt_tokens": 10}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
+        self.goal_runner = SimpleNamespace(
+            drive=self.run_turn,
+            apply_command=self.apply_goal_command,
+        )
+
+    def apply_goal_command(self, action, argument):
+        self.goal_commands.append((action, argument))
+        if action == "status":
+            return {"ok": True, "message": "goal status", "run_input": None}
+        return {"ok": True, "message": "goal created", "run_input": argument}
 
     def run_turn(self, text, image_paths=None):
         self.calls.append({"text": text, "image_paths": image_paths or []})
         return {"final_answer": "ok", "pending_attachments": []}
+
+    def interrupt(self, reason):
+        self.interrupts.append(reason)
 
 def test_extract_context_parses_recent_messages(tmp_path):
     out = _adapter(tmp_path)._extract_atme_context({"msg_elements": REAL_MSG_ELEMENTS})
@@ -809,3 +824,55 @@ async def test_handle_message_injects_group_context(tmp_path):
     assert "[当前 @ 你的消息]" in sent
     assert "有小丑怎么办" in sent
     assert "faceType" not in sent
+
+
+@pytest.mark.asyncio
+async def test_qq_goal_command_is_handled_and_driven(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    a._runtimes["USER1"] = fake
+
+    with (
+        patch.object(a, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(a, "send_text", AsyncMock()),
+    ):
+        await a._handle_message(
+            {
+                "id": "goal-command",
+                "author": {"user_openid": "USER1"},
+                "content": "/goal ship it",
+            },
+            "c2c",
+        )
+
+    assert fake.goal_commands == [("create", "ship it")]
+    assert [call["text"] for call in fake.calls] == ["ship it"]
+
+
+@pytest.mark.asyncio
+async def test_qq_goal_pause_bypasses_busy_turn_lock(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    a._runtimes["USER1"] = fake
+    lock = a._chat_locks["USER1"]
+    await lock.acquire()
+
+    with patch.object(a, "send_text", AsyncMock()) as send_text:
+        task = asyncio.create_task(
+            a._handle_message(
+                {
+                    "id": "goal-pause",
+                    "author": {"user_openid": "USER1"},
+                    "content": "/goal pause",
+                },
+                "c2c",
+            )
+        )
+        await asyncio.wait_for(task, timeout=1)
+
+    lock.release()
+    assert fake.goal_commands == [("pause", "")]
+    assert fake.interrupts
+    send_text.assert_awaited_once()

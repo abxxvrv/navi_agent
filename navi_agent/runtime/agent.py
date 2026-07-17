@@ -47,8 +47,10 @@ from ..storage.version_tracker import VersionTracker
 from ..context.compressor import ContextCompressor
 from ..storage.memory_store import MemoryStore
 from .background_review import BackgroundReviewer
+from .goal import GOAL_TOOL_NAMES, GoalRunner
 from .sub_agent import prepare_agent, EXPLORE_TOOLS
 from ..skills.skill_manage import SkillManageTool
+from ..storage.goal_store import GoalStore
 
 from ..tools.approval import (
     ApprovalDecision,
@@ -96,6 +98,7 @@ class AgentRuntime:
         resume_session_id: str | None = None,
         on_output=None,
         channel: str = "cli",
+        enable_goal_mode: bool = True,
     ):
         load_navi_dotenv()
 
@@ -106,6 +109,7 @@ class AgentRuntime:
         self.approval_handler = approval_handler
         self.on_output = on_output
         self._channel = channel
+        self.enable_goal_mode = enable_goal_mode
         self.navi_home = get_navi_home()
         self.approval_manager = ApprovalManager(
             mode=approval_mode,
@@ -158,6 +162,10 @@ class AgentRuntime:
 
         self.router = ModelRouter(_config_path, provider=_provider, model=_model)
         self.last_usage: dict[str, int] = self.session_store.get_usage()
+        self.goal_runner = GoalRunner(self, GoalStore(history_db_path))
+        if resume_session_id and self.enable_goal_mode:
+            self.goal_runner.store.normalize_interrupted(self.session_store.session_id)
+        self._goal_turn_reminder = ""
 
         # Ctrl+C 中断信号（流式循环中检查）
         self.cancel_event = threading.Event()
@@ -190,6 +198,9 @@ class AgentRuntime:
             self._system_prompt: str = _messages[0]["content"] if _messages else ""
 
         self._register_tools()
+        if not self.enable_goal_mode:
+            for name in GOAL_TOOL_NAMES:
+                self.tool_registry.unregister(name)
 
         # 初始化 MCP 工具（如果配置了的话）
         self._init_mcp_tools()
@@ -206,7 +217,7 @@ class AgentRuntime:
         
         # 3. 如果是 resume 且旧 session 确实记录了工具列表
         if resume_session_id and persisted_tool_names:
-            allowed = set(persisted_tool_names)
+            allowed = {*persisted_tool_names, *GOAL_TOOL_NAMES}
             self._tools_for_api = [
                 tool
                 for tool in all_tools_for_api
@@ -500,6 +511,15 @@ class AgentRuntime:
 
             # 4. 构造本轮初始消息
             turn_messages = [*history, api_user_message]
+            self._goal_turn_reminder = (
+                self.goal_runner.build_reminder()
+                if keep_history and self.enable_goal_mode
+                else ""
+            )
+            if self._goal_turn_reminder:
+                turn_messages.append(
+                    {"role": "user", "content": self._goal_turn_reminder}
+                )
 
             # 5. 执行 Agent 循环
             try:
@@ -568,6 +588,7 @@ class AgentRuntime:
                 "pending_attachments": list(self._pending_attachments),
             }
         finally:
+            self._goal_turn_reminder = ""
             scope.close()
             if self._current_scope is scope:
                 self._current_scope = None
@@ -627,6 +648,7 @@ class AgentRuntime:
         self.session_store = new_store
         self.conversation_history = self._valid_messages(new_store.messages)
         self.last_usage = {}
+        self.goal_runner.rebind(old_session_id, new_store.session_id)
 
         return {
             "ok": True,
@@ -657,10 +679,19 @@ class AgentRuntime:
             messages = self._tool_node(messages)
             steps += 1
             self._raise_if_cancelled()
+            budget_error = self.goal_runner.enforce_token_budget_after_step()
+            if budget_error:
+                raise RuntimeError(budget_error)
 
     # 构造真正发给模型的 messages
     def _llm_node(self, messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        current_api_user_message = messages[-1] if messages and messages[-1].get("role") == "user" else None
+        current_api_user_message = None
+        if messages and messages[-1].get("role") == "user":
+            if messages[-1].get("content") == self._goal_turn_reminder and len(messages) > 1:
+                if messages[-2].get("role") == "user":
+                    current_api_user_message = messages[-2]
+            else:
+                current_api_user_message = messages[-1]
 
         # 压缩检查
         prompt_tokens = self.last_usage.get("prompt_tokens", 0)
@@ -670,6 +701,10 @@ class AgentRuntime:
                 messages = self._valid_messages(self.session_store.messages)
                 if current_api_user_message is not None and messages and messages[-1].get("role") == "user":
                     messages = [*messages[:-1], current_api_user_message]
+                if self._goal_turn_reminder:
+                    messages.append(
+                        {"role": "user", "content": self._goal_turn_reminder}
+                    )
             elif not result.get("ok"):
                 self._emit(
                     {
@@ -699,11 +734,19 @@ class AgentRuntime:
                 self._raise_if_cancelled()
 
                 # 流式调用模型
+                tools_for_api = self._tools_for_api
+                if self.goal_runner.current() is None:
+                    tools_for_api = [
+                        tool
+                        for tool in tools_for_api
+                        if tool.get("function", {}).get("name")
+                        not in {"set_goal_budget", "update_goal"}
+                    ]
                 stream = run_model_stream(
                     self._require_scope(),
                     self._model_stream_runner,
                     messages=model_messages,
-                    tools=self._tools_for_api,
+                    tools=tools_for_api,
                 )
 
                 for chunk in stream:
@@ -712,11 +755,16 @@ class AgentRuntime:
 
                     # usage（最后一个 chunk，choices 通常为空）
                     if hasattr(chunk, "usage") and chunk.usage:
+                        request_tokens = (
+                            (chunk.usage.prompt_tokens or 0)
+                            + (chunk.usage.completion_tokens or 0)
+                        )
                         # prompt_tokens 只取最后一次（当前上下文大小）
                         self.last_usage["prompt_tokens"] = chunk.usage.prompt_tokens or 0
                         # completion_tokens 累加（全程生成总量）
                         self.last_usage["completion_tokens"] = self.last_usage.get("completion_tokens", 0) + (chunk.usage.completion_tokens or 0)
                         self.session_store.save_usage(self.last_usage)
+                        self.goal_runner.record_tokens(request_tokens)
 
                     if not chunk.choices:
                         continue
@@ -961,7 +1009,14 @@ class AgentRuntime:
             wait_on: dict[str, threading.Event] = {}
             done_signal: dict[str, threading.Event] = {}
             last_writer: dict[str, str] = {}
+            last_goal_tool: str | None = None
             for cid, name, args in to_execute:
+                if name in GOAL_TOOL_NAMES:
+                    if last_goal_tool is not None:
+                        wait_on[cid] = done_signal.setdefault(
+                            last_goal_tool, threading.Event()
+                        )
+                    last_goal_tool = cid
                 if name not in ("write_file", "patch_file") or not args.get("path"):
                     continue
                 try:
@@ -1197,6 +1252,70 @@ class AgentRuntime:
     def _register_tools(self) -> None:
         workspace = str(self.workspace)
         tracker = VersionTracker()
+
+        self.tool_registry.register(
+            name="create_goal",
+            description=(
+                "Create a persistent goal only when the user explicitly asks for autonomous, "
+                "multi-turn execution. By default, refuse if a goal already exists; set replace "
+                "only when the user explicitly asked to replace it."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "objective": {"type": "string", "minLength": 1},
+                    "completion_criterion": {"type": "string", "default": ""},
+                    "replace": {"type": "boolean", "default": False},
+                },
+                "required": ["objective"],
+            },
+            function=self.goal_runner.create_goal,
+        )
+        self.tool_registry.register(
+            name="get_goal",
+            description="Get the current goal, status, progress, and budgets.",
+            parameters={"type": "object", "properties": {}},
+            function=self.goal_runner.get_goal,
+        )
+        self.tool_registry.register(
+            name="set_goal_budget",
+            description=(
+                "Set or replace one execution budget for the current goal. Repeated calls merge "
+                "turn, token, and wall-clock budgets."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "value": {"type": "number", "exclusiveMinimum": 0},
+                    "unit": {
+                        "type": "string",
+                        "enum": [
+                            "turns", "tokens", "milliseconds", "seconds", "minutes", "hours"
+                        ],
+                    },
+                },
+                "required": ["value", "unit"],
+            },
+            function=self.goal_runner.set_goal_budget,
+        )
+        self.tool_registry.register(
+            name="update_goal",
+            description=(
+                "Update the current goal status. A normal final response never completes a goal; "
+                "use complete only after checking the objective and completion criterion."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "complete", "paused", "blocked"],
+                    }
+                },
+                "required": ["status"],
+            },
+            function=self.goal_runner.update_goal,
+        )
 
         # list_dir
         self.tool_registry.register(
@@ -1906,7 +2025,11 @@ class AgentRuntime:
             tool_names = [n for n in EXPLORE_TOOLS if n in self.tool_registry._tools]
             prompt_file = "subagent-explore-prompt.txt"
         elif subagent_type == "general":
-            tool_names = [n for n in self.tool_registry._tools if n != "agent"]
+            tool_names = [
+                n
+                for n in self.tool_registry._tools
+                if n != "agent" and n not in GOAL_TOOL_NAMES
+            ]
             prompt_file = "subagent-general-prompt.txt"
         else:
             return {"ok": False, "error": f"未知 subagent_type：{subagent_type}，应为 explore 或 general。"}

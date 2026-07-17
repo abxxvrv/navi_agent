@@ -364,8 +364,19 @@ class FakeRuntime:
 
     def __init__(self):
         self.calls: list = []
+        self.goal_commands: list = []
         self.last_usage = {"prompt_tokens": 44}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
+        self.goal_runner = SimpleNamespace(
+            drive=self.run_turn,
+            apply_command=self.apply_goal_command,
+        )
+
+    def apply_goal_command(self, action, argument):
+        self.goal_commands.append((action, argument))
+        if action == "status":
+            return {"ok": True, "message": "goal status", "run_input": None}
+        return {"ok": True, "message": "goal created", "run_input": argument}
 
     def run_turn(self, text: str, image_paths=None):
         self.calls.append({"text": text, "image_paths": image_paths or []})
@@ -651,3 +662,32 @@ async def test_non_matching_weixin_slash_text_reaches_runtime(tmp_path):
         await adapter._handle_message(message)
 
     assert [call["text"] for call in fake_runtime.calls] == ["/model stepfun"]
+
+
+@pytest.mark.asyncio
+async def test_weixin_goal_status_is_handled_without_model_turn(tmp_path):
+    adapter = _make_full_adapter(tmp_path)
+    from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
+
+    allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
+    _atomic_json_write(allow_path, {"allowed": ["user123"]})
+    fake_runtime = FakeRuntime()
+    adapter._runtimes["user123"] = fake_runtime
+    message = {
+        "from_user_id": "user123",
+        "message_id": "goal-status",
+        "item_list": [{"type": ITEM_TEXT, "text_item": {"text": "/goal status"}}],
+    }
+
+    send_text = AsyncMock()
+    with (
+        patch.object(adapter, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(adapter, "_fetch_typing_ticket", AsyncMock()),
+        patch.object(adapter, "send_text", send_text),
+        patch.object(adapter, "_keep_typing", AsyncMock()),
+    ):
+        await adapter._handle_message(message)
+
+    assert fake_runtime.goal_commands == [("status", "")]
+    assert fake_runtime.calls == []
+    send_text.assert_awaited_with("user123", "goal status")

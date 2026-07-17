@@ -108,6 +108,7 @@ def test_web_runtime_uses_cli_channel(monkeypatch, tmp_path):
 
     assert isinstance(runtime, FakeAgentRuntime)
     assert captured["channel"] == "cli"
+    assert captured["enable_goal_mode"] is False
 
 
 def test_hosted_gateways_use_their_default_workspaces(monkeypatch, tmp_path):

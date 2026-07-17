@@ -1,8 +1,11 @@
+import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 
-from navi_agent.runtime.goal import GoalRunner
+import pytest
+
+from navi_agent.runtime.goal import CONTINUE_PROMPT, GoalRunner, parse_goal_command
 from navi_agent.storage.goal_store import GoalStore
-from navi_agent.tools.registry import ToolRegistry
 
 
 class FakeRuntime:
@@ -11,97 +14,215 @@ class FakeRuntime:
         self.session_ids = list(session_ids or [])
         self.prompts = []
         self.session_store = SimpleNamespace(session_id="session-1")
-        self.tool_registry = ToolRegistry()
-        self._tools_for_api = [{"type": "function", "function": {"name": "read_file"}}]
-        self.approval_manager = SimpleNamespace(READ_ONLY_TOOLS={"read_file"})
+        self.goal_runner = None
 
-    def run_turn(self, prompt):
-        self.prompts.append(prompt)
+    def run_turn(self, prompt, image_paths: list[Path] | None = None):
+        self.prompts.append((prompt, image_paths))
         response = self.responses.pop(0)
         if self.session_ids:
             self.session_store.session_id = self.session_ids.pop(0)
         if isinstance(response, dict):
             return response
-        self.tool_registry.invoke(
-            "goal_status",
-            {
-                "status": response,
-                "summary": f"reported {response}",
-            },
-        )
+        if isinstance(response, tuple) and response[0] == "tokens":
+            self.goal_runner.record_tokens(response[1])
+        elif response in {"active", "complete", "paused", "blocked"}:
+            self.goal_runner.update_goal(response)
         return {
             "ok": True,
             "final_answer": f"turn {response}",
             "content": f"turn {response}",
+            "pending_attachments": [],
         }
 
 
-def test_goal_store_persists_latest_goal(tmp_path):
+def make_runner(tmp_path, responses, session_ids=None):
+    runtime = FakeRuntime(responses, session_ids)
+    runner = GoalRunner(runtime, GoalStore(tmp_path / "history.sqlite3"))
+    runtime.goal_runner = runner
+    return runtime, runner
+
+
+def test_goal_store_persists_progress_budgets_and_rebinds(tmp_path):
     store = GoalStore(tmp_path / "history.sqlite3")
+    goal = store.create("session-1", "finish the task", "tests pass")
 
-    goal = store.create("session-1", "finish the task", max_cycles=5)
-    updated = store.update(goal["goal_id"], status="running", cycle_count=2)
+    store.begin_turn(goal["goal_id"])
+    store.record_tokens(goal["goal_id"], 123)
+    store.set_budget(goal["goal_id"], 3, "turns")
+    updated = store.rebind(goal["goal_id"], "session-2")
 
-    assert updated["status"] == "running"
-    assert updated["cycle_count"] == 2
-    assert store.latest("session-1")["goal_id"] == goal["goal_id"]
-    assert store.latest("session-1", active_only=True)["goal_id"] == goal["goal_id"]
+    assert updated["turns_used"] == 1
+    assert updated["tokens_used"] == 123
+    assert updated["turn_budget"] == 3
+    assert store.current("session-1") is None
+    assert store.current("session-2")["goal_id"] == goal["goal_id"]
 
 
-def test_goal_runner_requires_verification_before_completion(tmp_path):
-    runtime = FakeRuntime(
-        ["ready", "completed"],
+def test_goal_store_migrates_the_pr_prototype_schema(tmp_path):
+    db_path = tmp_path / "history.sqlite3"
+    with sqlite3.connect(db_path) as conn:
+        conn.executescript(
+            """
+            CREATE TABLE goals (
+                goal_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                objective TEXT NOT NULL,
+                status TEXT NOT NULL,
+                cycle_count INTEGER NOT NULL DEFAULT 0,
+                max_cycles INTEGER NOT NULL DEFAULT 20,
+                last_summary TEXT NOT NULL DEFAULT '',
+                last_error TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            INSERT INTO goals VALUES (
+                'g_old', 'session-1', 'old objective', 'running', 3, 20,
+                '', NULL, '2026-01-01', '2026-01-01'
+            );
+            """
+        )
+
+    migrated = GoalStore(db_path).current("session-1")
+
+    assert migrated["status"] == "paused"
+    assert migrated["turns_used"] == 3
+    assert migrated["completion_criterion"] == ""
+
+
+def test_normal_final_does_not_end_goal_and_continue_prompt_starts_next_turn(tmp_path):
+    runtime, runner = make_runner(
+        tmp_path,
+        ["normal final", "complete"],
         session_ids=["session-2", "session-2"],
     )
-    store = GoalStore(tmp_path / "history.sqlite3")
-    runner = GoalRunner(runtime, store)
-    goal = runner.create("finish and verify the task")
+    created = runner.create_goal("finish and verify the task", "focused checks pass")
 
-    result = runner.run(goal["goal_id"])
+    result = runner.drive("finish and verify the task")
 
-    assert result["goal_status"] == "completed"
-    assert result["goal"]["cycle_count"] == 2
-    assert store.latest("session-2")["goal_id"] == goal["goal_id"]
-    assert "Independently verify" in runtime.prompts[1]
-    assert not runtime.tool_registry.has("goal_status")
-    assert runtime._tools_for_api == [{"type": "function", "function": {"name": "read_file"}}]
-    assert runtime.approval_manager.READ_ONLY_TOOLS == {"read_file"}
+    assert created["ok"] is True
+    assert [prompt for prompt, _ in runtime.prompts] == [
+        "finish and verify the task",
+        CONTINUE_PROMPT,
+    ]
+    assert result["goal_status"] == "complete"
+    assert result["goal"]["progress"]["turns"] == 2
+    assert runner.current() is None
 
 
-def test_goal_runner_blocks_and_can_resume(tmp_path):
-    store = GoalStore(tmp_path / "history.sqlite3")
-    first_runtime = FakeRuntime(["blocked"])
-    goal = GoalRunner(first_runtime, store).create("wait for required input")
+def test_blocked_goal_can_be_resumed(tmp_path):
+    runtime, runner = make_runner(tmp_path, ["blocked", "complete"])
+    runner.create_goal("wait for required input")
 
-    blocked = GoalRunner(first_runtime, store).run(goal["goal_id"])
+    blocked = runner.drive("wait for required input")
+    resumed = runner.apply_command("resume", "")
+    completed = runner.drive(resumed["run_input"])
+
     assert blocked["goal_status"] == "blocked"
+    assert resumed["run_input"] == CONTINUE_PROMPT
+    assert completed["goal_status"] == "complete"
 
-    second_runtime = FakeRuntime(["ready", "completed"])
-    completed = GoalRunner(second_runtime, store).run(
-        goal["goal_id"],
-        note="use the supplied value",
+
+def test_turn_and_token_budgets_block_before_another_turn(tmp_path):
+    runtime, runner = make_runner(tmp_path / "turns", ["normal final"])
+    runner.create_goal("one turn only")
+    runner.set_goal_budget(1, "turns")
+
+    turn_result = runner.drive("one turn only")
+
+    assert len(runtime.prompts) == 1
+    assert turn_result["goal_status"] == "blocked"
+    assert "turn budget exhausted" in turn_result["goal"]["reason"]
+
+    runtime, runner = make_runner(tmp_path / "tokens", [("tokens", 10)])
+    runner.create_goal("ten tokens only")
+    runner.set_goal_budget(10, "tokens")
+
+    token_result = runner.drive("ten tokens only")
+
+    assert len(runtime.prompts) == 1
+    assert token_result["goal_status"] == "blocked"
+    assert "token budget exhausted" in token_result["goal"]["reason"]
+
+
+def test_token_budget_enforcement_blocks_at_safe_model_tool_step_boundary(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+    runner.create_goal("bounded tool work")
+    runner.set_goal_budget(10, "tokens")
+    runner.record_tokens(10)
+
+    reason = runner.enforce_token_budget_after_step()
+
+    assert "token budget exhausted" in reason
+    assert runner.current()["status"] == "blocked"
+
+
+def test_turn_error_and_resume_normalization_pause_goal(tmp_path):
+    runtime, runner = make_runner(
+        tmp_path,
+        [{"ok": False, "error": "network error", "final_answer": "", "content": ""}],
     )
+    runner.create_goal("handle an error")
 
-    assert completed["goal_status"] == "completed"
-    assert "Additional user guidance: use the supplied value" in second_runtime.prompts[0]
+    result = runner.drive("handle an error")
+    normalized = runner.store.normalize_interrupted(runtime.session_store.session_id)
+
+    assert result["goal_status"] == "paused"
+    assert normalized["status"] == "paused"
+    assert normalized["status_reason"] == "network error"
+
+    runner.store.set_status(normalized["goal_id"], "active")
+    normalized = runner.store.normalize_interrupted(runtime.session_store.session_id)
+    assert normalized["status"] == "paused"
+    assert normalized["status_reason"] == "paused after session resume"
 
 
-def test_goal_runner_pauses_on_turn_error_and_cycle_limit(tmp_path):
-    store = GoalStore(tmp_path / "history.sqlite3")
-    error_runtime = FakeRuntime([
-        {"ok": False, "error": "network error", "final_answer": "", "content": ""}
-    ])
-    error_goal = GoalRunner(error_runtime, store).create("handle an error")
+def test_goal_reminder_is_dynamic_escaped_and_budget_aware(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+    runner.create_goal("use <input> safely", "all tests pass")
+    runner.set_goal_budget(4, "turns")
+    goal = runner.current()
+    runner.store.begin_turn(goal["goal_id"])
+    runner.store.begin_turn(goal["goal_id"])
+    runner.store.begin_turn(goal["goal_id"])
 
-    errored = GoalRunner(error_runtime, store).run(error_goal["goal_id"])
-    assert errored["goal_status"] == "paused"
-    assert "network error" in errored["error"]
+    reminder = runner.build_reminder()
 
-    limit_runtime = FakeRuntime(["continue"])
-    limit_runner = GoalRunner(limit_runtime, store)
-    limit_goal = limit_runner.create("keep working", max_cycles=1)
+    assert "<untrusted_objective>use &lt;input&gt; safely</untrusted_objective>" in reminder
+    assert "<completion_criterion>all tests pass</completion_criterion>" in reminder
+    assert "nearing its budget" in reminder
+    assert "normal final answer does not complete" in reminder
 
-    limited = limit_runner.run(limit_goal["goal_id"])
-    assert limited["goal_status"] == "paused"
-    assert limited["goal"]["cycle_count"] == 1
-    assert "maximum number of cycles" in limited["error"]
+    runner.update_goal("paused")
+    paused = runner.build_reminder()
+    assert "Do not pursue this goal autonomously" in paused
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("/goal", ("status", "")),
+        ("/goal status", ("status", "")),
+        ("/goal pause", ("pause", "")),
+        ("/goal resume", ("resume", "")),
+        ("/goal cancel", ("cancel", "")),
+        ("/goal replace ship it", ("replace", "ship it")),
+        ("/goal ship it", ("create", "ship it")),
+        ("/goal status extra", ("usage", "")),
+        ("/goal replace", ("usage", "")),
+        ("/goals", None),
+    ],
+)
+def test_parse_goal_command(text, expected):
+    assert parse_goal_command(text) == expected
+
+
+def test_budget_units_validate_and_merge(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+    runner.create_goal("budgeted task")
+
+    assert runner.set_goal_budget(2.4, "turns")["goal"]["budgets"]["turns"] == 2
+    assert runner.set_goal_budget(5000, "tokens")["goal"]["budgets"]["tokens"] == 5000
+    assert runner.set_goal_budget(2, "minutes")["goal"]["budgets"]["milliseconds"] == 120000
+    assert runner.set_goal_budget(999, "milliseconds")["ok"] is False
+    assert runner.set_goal_budget(25, "hours")["ok"] is False
+    assert runner.set_goal_budget(True, "turns")["ok"] is False

@@ -7,14 +7,14 @@ from typing import Any
 
 from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.key_binding import KeyBindings
+from rich.markup import escape
 
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..tools.approval_broker import ApprovalBroker
 from ..paths import get_navi_home, load_navi_dotenv
 from .prompt_ui import NaviPromptSession
 from ..runtime.agent import AgentRuntime
-from ..runtime.goal import GoalRunner
-from ..storage.goal_store import GoalStore
+from ..runtime.goal import parse_goal_command
 from .interrupt_trace import interrupt_trace_enabled, trace_interrupt
 from .paste_collapse import expand_paste_references
 from .paste_trace import summarize_text, trace_paste
@@ -61,7 +61,6 @@ class ChatController:
         self.result_error = result_error
 
         self.runtime: AgentRuntime | None = None
-        self.goal_runner: GoalRunner | None = None
         self.prompt_session: NaviPromptSession | None = None
         self.approval_broker: ApprovalBroker | None = None
         self.stream_box: StreamingBox | None = None
@@ -98,10 +97,6 @@ class ChatController:
         )
 
         navi_home = get_navi_home()
-        self.goal_runner = GoalRunner(
-            self.runtime,
-            GoalStore(navi_home / "history.sqlite3"),
-        )
         slash_commands = list(self.slash_commands)
         if "/goal" not in slash_commands:
             slash_commands.append("/goal")
@@ -181,7 +176,6 @@ class ChatController:
             text_summary=summarize_text(text),
         )
         runtime = self._runtime()
-        goal_runner = self._goal_runner()
         prompt_session = self._prompt_session()
         stream_box = self._stream_box()
 
@@ -204,66 +198,24 @@ class ChatController:
                 self.output.notice(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
             return
 
-        goal_id: str | None = None
-        goal_note = ""
-        if not image_paths and (stripped == "/goal" or stripped.startswith("/goal ")):
-            goal_args = stripped[len("/goal"):].strip()
-            if not goal_args:
-                self.print_live("[yellow]Usage: /goal <objective> | status | pause | resume [note] | cancel[/yellow]")
-                return
-
-            parts = goal_args.split(maxsplit=1)
-            action = parts[0].lower()
-            action_arg = parts[1] if len(parts) > 1 else ""
-            session_id = runtime.session_store.session_id
-            store = goal_runner.store
-
-            if action == "status":
-                goal = store.latest(session_id)
-                if goal is None:
-                    self.print_live("[yellow]No goal found for this session.[/yellow]")
-                    return
+        goal_runner = runtime.goal_runner
+        goal_input: str | None = None
+        goal_command = parse_goal_command(stripped) if not image_paths else None
+        if goal_command is not None:
+            action, argument = goal_command
+            command_result = goal_runner.apply_command(action, argument)
+            goal_input = command_result["run_input"]
+            if goal_input is None:
+                style = "green" if command_result["ok"] else "yellow"
                 self.print_live(
-                    f"[bold]Goal {goal['goal_id']}[/bold] · {goal['status']} · "
-                    f"cycle {goal['cycle_count']}/{goal['max_cycles']}"
+                    f"[{style}]{escape(str(command_result['message']))}[/{style}]"
                 )
-                self.print_live(goal["objective"])
-                if goal.get("last_summary"):
-                    self.print_live(f"[dim]{goal['last_summary']}[/dim]")
-                if goal.get("last_error"):
-                    self.print_live(f"[yellow]{goal['last_error']}[/yellow]")
                 return
+            self.print_live(
+                f"[green]{escape(str(command_result['message']))}[/green]"
+            )
 
-            if action in {"pause", "cancel"}:
-                goal = store.latest(session_id, active_only=True)
-                if goal is None:
-                    self.print_live("[yellow]No active goal found.[/yellow]")
-                    return
-                status = "paused" if action == "pause" else "cancelled"
-                goal = store.update(goal["goal_id"], status=status)
-                self.print_live(f"[yellow]Goal {goal['goal_id']} {status}.[/yellow]")
-                return
-
-            if action == "resume":
-                goal = store.latest(session_id, active_only=True)
-                if goal is None:
-                    self.print_live("[yellow]No resumable goal found.[/yellow]")
-                    return
-                goal_id = goal["goal_id"]
-                goal_note = action_arg
-            else:
-                active = store.latest(session_id, active_only=True)
-                if active is not None:
-                    self.print_live(
-                        f"[yellow]Goal {active['goal_id']} is still {active['status']}. "
-                        "Resume or cancel it first.[/yellow]"
-                    )
-                    return
-                goal = goal_runner.create(goal_args)
-                goal_id = goal["goal_id"]
-                self.print_live(f"[green]Created goal {goal_id}.[/green]")
-
-        if goal_id is None and not image_paths and self.handle_slash_command(
+        if goal_command is None and not image_paths and self.handle_slash_command(
             command=text,
             runtime=runtime,
             workspace=self.workspace,
@@ -272,7 +224,7 @@ class ChatController:
             return
 
         display_text = text
-        runtime_text = expand_paste_references(text)
+        runtime_text = goal_input or expand_paste_references(text)
         if runtime_text != display_text:
             trace_paste("paste_reference_expanded", text_summary=summarize_text(display_text))
 
@@ -312,9 +264,7 @@ class ChatController:
 
         def runner() -> dict[str, Any]:
             try:
-                if goal_id is not None:
-                    return goal_runner.run(goal_id, note=goal_note)
-                return runtime.run_turn(runtime_text, image_paths=image_paths)
+                return goal_runner.drive(runtime_text, image_paths=image_paths)
             except KeyboardInterrupt:
                 return {
                     "ok": False,
@@ -353,7 +303,7 @@ class ChatController:
 
         goal_status = result.get("goal_status")
         goal = result.get("goal") or {}
-        if goal_status == "completed":
+        if goal_status == "complete":
             self.print_live(f"[green]Goal {goal.get('goal_id', '')} completed.[/green]")
         elif goal_status == "blocked":
             self.print_live(f"[yellow]Goal {goal.get('goal_id', '')} is blocked.[/yellow]")
@@ -423,11 +373,6 @@ class ChatController:
         if self.runtime is None:
             raise RuntimeError("ChatController runtime is not initialized.")
         return self.runtime
-
-    def _goal_runner(self) -> GoalRunner:
-        if self.goal_runner is None:
-            raise RuntimeError("ChatController goal runner is not initialized.")
-        return self.goal_runner
 
     def _prompt_session(self) -> NaviPromptSession:
         if self.prompt_session is None:
