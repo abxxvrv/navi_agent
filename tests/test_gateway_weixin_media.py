@@ -543,7 +543,7 @@ async def test_handle_message_empty_drops(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_weixin_gateway_commands_switch_model_and_start_new_chat(tmp_path):
+async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
     adapter = _make_full_adapter(tmp_path)
 
     from navi_agent.gateway.ilink import ITEM_TEXT, _account_dir, _atomic_json_write
@@ -551,6 +551,11 @@ async def test_weixin_gateway_commands_switch_model_and_start_new_chat(tmp_path)
     allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
     _atomic_json_write(allow_path, {"allowed": ["user123"]})
     old_runtime = FakeRuntime()
+    old_runtime.router.list_providers = lambda: ["stepfun", "deepseek"]
+    old_runtime.router.list_models = lambda provider: {
+        "stepfun": {"step-3.7-flash": {}},
+        "deepseek": {"deepseek-chat": {}},
+    }[provider]
     new_runtime = FakeRuntime()
     adapter._runtimes["user123"] = old_runtime
 
@@ -569,6 +574,7 @@ async def test_weixin_gateway_commands_switch_model_and_start_new_chat(tmp_path)
         await adapter._handle_message(
             message("model-command", "/model stepfun step-3.7-flash")
         )
+        await adapter._handle_message(message("model-list-command", "/model list"))
         await adapter._handle_message(message("new-command", "/new"))
 
     assert old_runtime.switched_to == ("stepfun", "step-3.7-flash")
@@ -576,6 +582,12 @@ async def test_weixin_gateway_commands_switch_model_and_start_new_chat(tmp_path)
     assert adapter._runtimes["user123"] is new_runtime
     assert [call.args[1] for call in send_text.await_args_list] == [
         "已切换模型：stepfun/step-3.7-flash",
+        (
+            "| 提供商 | 模型名称 |\n"
+            "| --- | --- |\n"
+            "| stepfun | step-3.7-flash |\n"
+            "| deepseek | deepseek-chat |"
+        ),
         "已开启新对话。",
     ]
 

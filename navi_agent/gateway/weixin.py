@@ -28,7 +28,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
-from .commands import parse_gateway_command
+from .commands import format_model_table, parse_gateway_command
 from .ilink import (
     BACKOFF_DELAY_SECONDS,
     CRYPTO_AVAILABLE,
@@ -410,8 +410,12 @@ class WeixinAdapter:
                     await self.send_text(chat_id, "已开启新对话。")
                     return
 
-                provider, model = command_args
                 runtime = self.get_or_create_runtime(chat_id)
+                if command_name == "model_list":
+                    await self.send_text(chat_id, format_model_table(runtime.router))
+                    return
+
+                provider, model = command_args
                 if runtime.switch_model(provider, model):
                     await self.send_text(chat_id, f"已切换模型：{provider}/{model}")
                 else:

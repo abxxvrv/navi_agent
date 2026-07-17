@@ -679,10 +679,15 @@ async def test_same_message_id_still_runs_once(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_gateway_commands_switch_model_and_start_new_chat(tmp_path):
+async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
     old_runtime = FakeRuntime()
+    old_runtime.router.list_providers = lambda: ["stepfun", "deepseek"]
+    old_runtime.router.list_models = lambda provider: {
+        "stepfun": {"step-3.7-flash": {}},
+        "deepseek": {"deepseek-chat": {}},
+    }[provider]
     new_runtime = FakeRuntime()
     a._runtimes["USER1"] = old_runtime
 
@@ -701,6 +706,14 @@ async def test_gateway_commands_switch_model_and_start_new_chat(tmp_path):
         )
         await a._handle_message(
             {
+                "id": "model-list-command",
+                "author": {"user_openid": "USER1"},
+                "content": "/model list",
+            },
+            "c2c",
+        )
+        await a._handle_message(
+            {
                 "id": "new-command",
                 "author": {"user_openid": "USER1"},
                 "content": "/new",
@@ -713,6 +726,12 @@ async def test_gateway_commands_switch_model_and_start_new_chat(tmp_path):
     assert a._runtimes["USER1"] is new_runtime
     assert [call.args[1] for call in send_text.await_args_list] == [
         "已切换模型：stepfun/step-3.7-flash",
+        (
+            "| 提供商 | 模型名称 |\n"
+            "| --- | --- |\n"
+            "| stepfun | step-3.7-flash |\n"
+            "| deepseek | deepseek-chat |"
+        ),
         "已开启新对话。",
     ]
 

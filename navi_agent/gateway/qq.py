@@ -32,7 +32,7 @@ from urllib.parse import urlparse
 
 from ..paths import get_config_path, get_navi_home
 from ..runtime.agent import AgentRuntime
-from .commands import parse_gateway_command
+from .commands import format_model_table, parse_gateway_command
 from .ilink import (
     MessageDeduplicator,
     _safe_id,
@@ -882,8 +882,14 @@ class QqAdapter:
                     await self.send_text(chat_id, "已开启新对话。", message_id)
                     return
 
-                provider, model = command_args
                 runtime = self.get_or_create_runtime(chat_id)
+                if command_name == "model_list":
+                    await self.send_text(
+                        chat_id, format_model_table(runtime.router), message_id
+                    )
+                    return
+
+                provider, model = command_args
                 if runtime.switch_model(provider, model):
                     await self.send_text(
                         chat_id, f"已切换模型：{provider}/{model}", message_id

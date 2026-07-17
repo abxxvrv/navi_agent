@@ -1,12 +1,13 @@
 import pytest
 
-from navi_agent.gateway.commands import parse_gateway_command
+from navi_agent.gateway.commands import format_model_table, parse_gateway_command
 
 
 @pytest.mark.parametrize(
     ("text", "expected"),
     [
         ("/new", ("new", ())),
+        ("/model list", ("model_list", ())),
         ("/model stepfun step-3.7-flash", ("model", ("stepfun", "step-3.7-flash"))),
         ("/model openrouter anthropic/claude-sonnet-4", ("model", ("openrouter", "anthropic/claude-sonnet-4"))),
     ],
@@ -29,3 +30,23 @@ def test_parse_gateway_command_accepts_exact_forms(text, expected):
 )
 def test_parse_gateway_command_rejects_other_slash_text(text):
     assert parse_gateway_command(text) is None
+
+
+def test_format_model_table_has_provider_and_model_columns():
+    class Router:
+        def list_providers(self):
+            return ["stepfun", "deepseek"]
+
+        def list_models(self, provider):
+            return {
+                "stepfun": {"step-3.7-flash": {}},
+                "deepseek": {"deepseek-chat": {}, "deepseek-reasoner": {}},
+            }[provider]
+
+    assert format_model_table(Router()) == (
+        "| 提供商 | 模型名称 |\n"
+        "| --- | --- |\n"
+        "| stepfun | step-3.7-flash |\n"
+        "| deepseek | deepseek-chat |\n"
+        "| deepseek | deepseek-reasoner |"
+    )
