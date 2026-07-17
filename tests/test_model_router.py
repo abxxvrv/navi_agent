@@ -164,11 +164,23 @@ def test_grok_uses_openai_compatible_provider():
     assert PROVIDER_CLASSES["grok"] is OpenAICompatibleProvider
 
 
-def test_runtime_rejects_model_switch_while_turn_is_running():
+def test_runtime_rejects_model_switch_while_turn_is_running(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()
     router_calls = []
     stored_models = []
+    config_path = tmp_path / "config.json"
+    config_path.write_text(
+        json.dumps(
+            {
+                "default_provider": "old-provider",
+                "default_model": "old-model",
+                "providers": {"new-provider": {"models": {"new-model": {}}}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("navi_agent.runtime.agent.get_config_path", lambda: config_path)
 
     class FakeRouter:
         model_name = "old-model"
@@ -202,6 +214,7 @@ def test_runtime_rejects_model_switch_while_turn_is_running():
     assert runtime.switch_model("new-provider", "new-model") is False
     assert router_calls == []
     assert stored_models == []
+    assert json.loads(config_path.read_text(encoding="utf-8"))["default_model"] == "old-model"
 
     release.set()
     thread.join(2)
@@ -209,3 +222,8 @@ def test_runtime_rejects_model_switch_while_turn_is_running():
     assert runtime.switch_model("new-provider", "new-model") is True
     assert router_calls == [("new-provider", "new-model")]
     assert stored_models == [("new-provider", "new-model")]
+    assert json.loads(config_path.read_text(encoding="utf-8")) == {
+        "default_provider": "new-provider",
+        "default_model": "new-model",
+        "providers": {"new-provider": {"models": {"new-model": {}}}},
+    }

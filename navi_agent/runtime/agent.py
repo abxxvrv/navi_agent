@@ -314,6 +314,14 @@ class AgentRuntime:
             ok = self.router.switch_model(provider_name, model_name)
             if ok:
                 self.session_store.set_model(provider_name, model_name)
+                config_path = get_config_path()
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                config["default_provider"] = provider_name
+                config["default_model"] = model_name
+                config_path.write_text(
+                    json.dumps(config, ensure_ascii=False, indent=2) + "\n",
+                    encoding="utf-8",
+                )
             return ok
         finally:
             self._turn_lock.release()
