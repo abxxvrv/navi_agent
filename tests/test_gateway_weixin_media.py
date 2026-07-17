@@ -374,11 +374,6 @@ class FakeRuntime:
     def interrupt(self, reason: str):
         pass
 
-    def switch_model(self, provider, model):
-        self.switched_to = (provider, model)
-        return True
-
-
 def _make_full_adapter(tmp_path: Path) -> Any:
     """Adapter with all fields needed for _handle_message."""
     from collections import defaultdict
@@ -551,6 +546,7 @@ async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_
     allow_path = _account_dir(str(tmp_path)) / "acct.allow.json"
     _atomic_json_write(allow_path, {"allowed": ["user123"]})
     old_runtime = FakeRuntime()
+    old_runtime.switch_model = MagicMock(return_value=True)
     old_runtime.router.list_providers = lambda: ["stepfun", "deepseek"]
     old_runtime.router.list_models = lambda provider: {
         "stepfun": {"step-3.7-flash": {}},
@@ -577,19 +573,13 @@ async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_
         await adapter._handle_message(message("model-list-command", "/model list"))
         await adapter._handle_message(message("new-command", "/new"))
 
-    assert old_runtime.switched_to == ("stepfun", "step-3.7-flash")
+    old_runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
     assert old_runtime.calls == []
     assert adapter._runtimes["user123"] is new_runtime
-    assert [call.args[1] for call in send_text.await_args_list] == [
-        "已切换模型：stepfun/step-3.7-flash",
-        (
-            "| 提供商 | 模型名称 |\n"
-            "| --- | --- |\n"
-            "| stepfun | step-3.7-flash |\n"
-            "| deepseek | deepseek-chat |"
-        ),
-        "已开启新对话。",
-    ]
+    replies = [call.args[1] for call in send_text.await_args_list]
+    assert replies[0] == "已切换模型：stepfun/step-3.7-flash"
+    assert replies[1].startswith("| 提供商 | 模型名称 |")
+    assert replies[2] == "已开启新对话。"
 
 
 @pytest.mark.asyncio

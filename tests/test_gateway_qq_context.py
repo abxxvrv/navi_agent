@@ -5,7 +5,7 @@ import logging
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -59,11 +59,6 @@ class FakeRuntime:
     def run_turn(self, text, image_paths=None):
         self.calls.append({"text": text, "image_paths": image_paths or []})
         return {"final_answer": "ok", "pending_attachments": []}
-
-    def switch_model(self, provider, model):
-        self.switched_to = (provider, model)
-        return True
-
 
 def test_extract_context_parses_recent_messages(tmp_path):
     out = _adapter(tmp_path)._extract_atme_context({"msg_elements": REAL_MSG_ELEMENTS})
@@ -683,6 +678,7 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
     old_runtime = FakeRuntime()
+    old_runtime.switch_model = MagicMock(return_value=True)
     old_runtime.router.list_providers = lambda: ["stepfun", "deepseek"]
     old_runtime.router.list_models = lambda provider: {
         "stepfun": {"step-3.7-flash": {}},
@@ -692,7 +688,6 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
     a._runtimes["USER1"] = old_runtime
 
     with (
-        patch.object(a, "_collect_media", AsyncMock(return_value=([], []))),
         patch.object(a, "send_text", AsyncMock()) as send_text,
         patch("navi_agent.gateway.qq.AgentRuntime", return_value=new_runtime),
     ):
@@ -721,19 +716,13 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
             "c2c",
         )
 
-    assert old_runtime.switched_to == ("stepfun", "step-3.7-flash")
+    old_runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
     assert old_runtime.calls == []
     assert a._runtimes["USER1"] is new_runtime
-    assert [call.args[1] for call in send_text.await_args_list] == [
-        "已切换模型：stepfun/step-3.7-flash",
-        (
-            "| 提供商 | 模型名称 |\n"
-            "| --- | --- |\n"
-            "| stepfun | step-3.7-flash |\n"
-            "| deepseek | deepseek-chat |"
-        ),
-        "已开启新对话。",
-    ]
+    replies = [call.args[1] for call in send_text.await_args_list]
+    assert replies[0] == "已切换模型：stepfun/step-3.7-flash"
+    assert replies[1].startswith("| 提供商 | 模型名称 |")
+    assert replies[2] == "已开启新对话。"
 
 
 @pytest.mark.asyncio

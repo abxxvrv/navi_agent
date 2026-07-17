@@ -1,3 +1,5 @@
+from types import SimpleNamespace
+
 import pytest
 
 from navi_agent.gateway.commands import format_model_table, parse_gateway_command
@@ -33,17 +35,16 @@ def test_parse_gateway_command_rejects_other_slash_text(text):
 
 
 def test_format_model_table_has_provider_and_model_columns():
-    class Router:
-        def list_providers(self):
-            return ["stepfun", "deepseek"]
+    models = {
+        "stepfun": {"step-3.7-flash": {}},
+        "deepseek": {"deepseek-chat": {}, "deepseek-reasoner": {}},
+    }
+    router = SimpleNamespace(
+        list_providers=lambda: list(models),
+        list_models=lambda provider: models[provider],
+    )
 
-        def list_models(self, provider):
-            return {
-                "stepfun": {"step-3.7-flash": {}},
-                "deepseek": {"deepseek-chat": {}, "deepseek-reasoner": {}},
-            }[provider]
-
-    assert format_model_table(Router()) == (
+    assert format_model_table(router) == (
         "| 提供商 | 模型名称 |\n"
         "| --- | --- |\n"
         "| stepfun | step-3.7-flash |\n"

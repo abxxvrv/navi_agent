@@ -389,10 +389,12 @@ class WeixinAdapter:
                 await self.send_text(chat_id, "当前没有正在运行的任务。")
             return
 
-        command = None
-        if item_list and all(item.get("type") == ITEM_TEXT for item in item_list):
-            command = parse_gateway_command(text)
-        if command is not None:
+        command = (
+            parse_gateway_command(text)
+            if all(item.get("type") == ITEM_TEXT for item in item_list)
+            else None
+        )
+        if command:
             if self._chat_locks[chat_id].locked():
                 await self.send_text(
                     chat_id, "当前任务仍在运行，请等待完成或发送 !cancel。"
@@ -401,12 +403,8 @@ class WeixinAdapter:
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
                 if command_name == "new":
-                    self._runtimes[chat_id] = AgentRuntime(
-                        workspace=self._workspace,
-                        approval_mode=self._approval_mode,
-                        on_output=None,
-                        channel="weixin",
-                    )
+                    self._runtimes.pop(chat_id, None)
+                    self.get_or_create_runtime(chat_id)
                     await self.send_text(chat_id, "已开启新对话。")
                     return
 

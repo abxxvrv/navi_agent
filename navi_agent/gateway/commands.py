@@ -1,7 +1,5 @@
 """Exact slash commands shared by Navi gateway adapters."""
 
-from __future__ import annotations
-
 import re
 
 
