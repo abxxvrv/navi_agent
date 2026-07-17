@@ -20,6 +20,11 @@ CONTINUE_PROMPT = (
     "use tools as needed, and do not stop merely because this turn can produce a final reply."
 )
 
+START_PROMPT = (
+    "The user-facing command has already created the active goal.\n"
+    "Begin working toward it now. Do not call create_goal or replace the current goal."
+)
+
 
 def parse_goal_command(text: str) -> tuple[str, str] | None:
     text = text.strip()
@@ -383,7 +388,7 @@ class GoalRunner:
         return {
             "ok": True,
             "message": f"Created goal {created['goal']['goal_id']}.",
-            "run_input": argument,
+            "run_input": START_PROMPT,
         }
 
     @staticmethod

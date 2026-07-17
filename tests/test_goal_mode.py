@@ -4,7 +4,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from navi_agent.runtime.goal import CONTINUE_PROMPT, GoalRunner, parse_goal_command
+from navi_agent.runtime.goal import (
+    CONTINUE_PROMPT,
+    START_PROMPT,
+    GoalRunner,
+    parse_goal_command,
+)
 from navi_agent.storage.goal_store import GoalStore
 
 
@@ -120,6 +125,17 @@ def test_blocked_goal_can_be_resumed(tmp_path):
     assert blocked["goal_status"] == "blocked"
     assert resumed["run_input"] == CONTINUE_PROMPT
     assert completed["goal_status"] == "complete"
+
+
+def test_goal_commands_start_with_an_already_created_goal_prompt(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+
+    created = runner.apply_command("create", "build the project")
+    replaced = runner.apply_command("replace", "build the replacement")
+
+    assert created["run_input"] == START_PROMPT
+    assert replaced["run_input"] == START_PROMPT
+    assert runner.current()["objective"] == "build the replacement"
 
 
 def test_turn_and_token_budgets_block_before_another_turn(tmp_path):
