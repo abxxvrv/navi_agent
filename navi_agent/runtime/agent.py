@@ -1249,15 +1249,14 @@ class AgentRuntime:
             name="create_goal",
             description=(
                 "Create a persistent goal only when the user explicitly asks for autonomous, "
-                "multi-turn execution. By default, refuse if a goal already exists; set replace "
-                "only when the user explicitly asked to replace it."
+                "multi-turn execution. Refuse if an active or resumable goal already exists; "
+                "only the user-facing /goal replace command can replace a goal."
             ),
             parameters={
                 "type": "object",
                 "properties": {
                     "objective": {"type": "string", "minLength": 1},
                     "completion_criterion": {"type": "string", "default": ""},
-                    "replace": {"type": "boolean", "default": False},
                 },
                 "required": ["objective"],
             },

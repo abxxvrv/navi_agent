@@ -61,6 +61,8 @@ def test_register_tools_renames_run_command_to_bash(monkeypatch, tmp_path):
         "set_goal_budget",
         "update_goal",
     }.issubset(runtime.tool_registry._tools)
+    create_parameters = runtime.tool_registry._tools["create_goal"].parameters
+    assert "replace" not in create_parameters["properties"]
 
 
 def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path):

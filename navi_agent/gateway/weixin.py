@@ -395,7 +395,7 @@ class WeixinAdapter:
             if all(item.get("type") == ITEM_TEXT for item in item_list)
             else None
         )
-        if goal_command is not None and goal_command[0] in {"pause", "cancel"}:
+        if goal_command is not None and goal_command[0] in {"status", "pause", "cancel"}:
             runtime = self._runtimes.get(chat_id)
             if runtime is None:
                 await self.send_text(chat_id, "No active or resumable goal.")
@@ -405,6 +405,27 @@ class WeixinAdapter:
                 runtime.interrupt(f"用户通过微信请求 {goal_command[0]} goal")
             await self.send_text(chat_id, command_result["message"])
             return
+        if goal_command is not None and goal_command[0] == "create":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None:
+                await self.send_text(
+                    chat_id,
+                    (
+                        f"Goal {current['goal_id']} is still {current['status']}; "
+                        "use /goal replace <objective>."
+                    ),
+                )
+                return
+        if goal_command is not None and goal_command[0] == "replace":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None and current["status"] == "active":
+                runtime.interrupt("用户通过微信请求 replace goal")
+                await self.send_text(
+                    chat_id,
+                    f"正在停止 Goal {current['goal_id']}，随后启动新目标。",
+                )
 
         command = (
             parse_gateway_command(text)
@@ -443,6 +464,7 @@ class WeixinAdapter:
                 if command_result["run_input"] is None:
                     await self.send_text(chat_id, command_result["message"])
                     return
+                await self.send_text(chat_id, command_result["message"])
                 message_text = command_result["run_input"]
             logger.info(
                 "weixin: inbound from=%s text_len=%d images=%d notes=%d",

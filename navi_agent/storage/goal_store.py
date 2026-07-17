@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 import uuid
@@ -35,7 +36,15 @@ class GoalStore:
         now = self._now()
         with self._connect() as conn:
             if current is not None:
-                conn.execute("DELETE FROM goals WHERE goal_id = ?", (current["goal_id"],))
+                conn.execute(
+                    """
+                    UPDATE goals
+                    SET status = 'cancelled', active_elapsed_ms = ?, active_since = NULL,
+                        status_reason = 'replaced', finished_at = ?, updated_at = ?
+                    WHERE goal_id = ?
+                    """,
+                    (current["elapsed_ms"], now, now, current["goal_id"]),
+                )
             conn.execute(
                 """
                 INSERT INTO goals (
@@ -60,6 +69,19 @@ class GoalStore:
         return self._snapshot(dict(row))
 
     def current(self, session_id: str) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM goals
+                WHERE session_id = ? AND status IN ('active', 'paused', 'blocked')
+                ORDER BY updated_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (session_id,),
+            ).fetchone()
+        return self._snapshot(dict(row)) if row is not None else None
+
+    def latest(self, session_id: str) -> dict[str, Any] | None:
         with self._connect() as conn:
             row = conn.execute(
                 """
@@ -132,15 +154,33 @@ class GoalStore:
         )
 
     def clear(self, goal_id: str, status: str) -> dict[str, Any]:
+        if status not in {"complete", "cancelled"}:
+            raise ValueError(f"Unsupported terminal goal status: {status}")
         goal = self.get(goal_id)
-        if goal["status"] == "active":
-            goal["active_elapsed_ms"] = goal["elapsed_ms"]
-            goal["active_since"] = None
-        goal["status"] = status
-        goal["updated_at"] = self._now()
-        with self._connect() as conn:
-            conn.execute("DELETE FROM goals WHERE goal_id = ?", (goal_id,))
-        return goal
+        elapsed_ms = (
+            goal["elapsed_ms"]
+            if goal["status"] == "active"
+            else goal["active_elapsed_ms"]
+        )
+        return self._update(
+            goal_id,
+            status=status,
+            active_elapsed_ms=elapsed_ms,
+            active_since=None,
+            finished_at=self._now(),
+        )
+
+    def record_result(
+        self,
+        goal_id: str,
+        result_text: str,
+        attachments: list[str],
+    ) -> dict[str, Any]:
+        return self._update(
+            goal_id,
+            result_text=result_text,
+            attachments_json=json.dumps(attachments, ensure_ascii=False),
+        )
 
     def normalize_interrupted(self, session_id: str) -> dict[str, Any] | None:
         goal = self.current(session_id)
@@ -166,6 +206,9 @@ class GoalStore:
             "token_budget",
             "wall_clock_budget_ms",
             "status_reason",
+            "result_text",
+            "attachments_json",
+            "finished_at",
         }
         values = {key: value for key, value in fields.items() if key in allowed}
         values["updated_at"] = self._now()
@@ -184,6 +227,11 @@ class GoalStore:
         if goal["status"] == "active" and goal["active_since"] is not None:
             elapsed_ms += max(0, int((time.time() - goal["active_since"]) * 1000))
         goal["elapsed_ms"] = elapsed_ms
+        try:
+            attachments = json.loads(goal.get("attachments_json") or "[]")
+        except (TypeError, ValueError):
+            attachments = []
+        goal["attachments"] = attachments if isinstance(attachments, list) else []
         return goal
 
     def _connect(self) -> sqlite3.Connection:
@@ -209,6 +257,9 @@ class GoalStore:
                     token_budget INTEGER,
                     wall_clock_budget_ms INTEGER,
                     status_reason TEXT NOT NULL DEFAULT '',
+                    result_text TEXT NOT NULL DEFAULT '',
+                    attachments_json TEXT NOT NULL DEFAULT '[]',
+                    finished_at TEXT,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
@@ -228,6 +279,9 @@ class GoalStore:
                 "token_budget": "INTEGER",
                 "wall_clock_budget_ms": "INTEGER",
                 "status_reason": "TEXT NOT NULL DEFAULT ''",
+                "result_text": "TEXT NOT NULL DEFAULT ''",
+                "attachments_json": "TEXT NOT NULL DEFAULT '[]'",
+                "finished_at": "TEXT",
             }
             for name, declaration in additions.items():
                 if name not in columns:
@@ -241,9 +295,7 @@ class GoalStore:
                     "UPDATE goals SET status = 'paused', active_since = NULL "
                     "WHERE status IN ('running', 'verifying')"
                 )
-                conn.execute(
-                    "DELETE FROM goals WHERE status IN ('completed', 'cancelled')"
-                )
+                conn.execute("UPDATE goals SET status = 'complete' WHERE status = 'completed'")
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_goals_session_updated "
                 "ON goals(session_id, updated_at DESC)"

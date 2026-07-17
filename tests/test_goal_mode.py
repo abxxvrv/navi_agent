@@ -28,6 +28,8 @@ class FakeRuntime:
             self.session_store.session_id = self.session_ids.pop(0)
         if isinstance(response, dict):
             return response
+        if callable(response):
+            response = response(self.goal_runner)
         if isinstance(response, tuple) and response[0] == "tokens":
             self.goal_runner.record_tokens(response[1])
         elif response in {"active", "complete", "paused", "blocked"}:
@@ -112,6 +114,8 @@ def test_normal_final_does_not_end_goal_and_continue_prompt_starts_next_turn(tmp
     assert result["goal_status"] == "complete"
     assert result["goal"]["progress"]["turns"] == 2
     assert runner.current() is None
+    assert runner.latest()["status"] == "complete"
+    assert runner.latest()["result_text"] == "turn complete"
 
 
 def test_blocked_goal_can_be_resumed(tmp_path):
@@ -131,11 +135,42 @@ def test_goal_commands_start_with_an_already_created_goal_prompt(tmp_path):
     _, runner = make_runner(tmp_path, [])
 
     created = runner.apply_command("create", "build the project")
+    created_id = runner.current()["goal_id"]
     replaced = runner.apply_command("replace", "build the replacement")
 
     assert created["run_input"] == START_PROMPT
     assert replaced["run_input"] == START_PROMPT
     assert runner.current()["objective"] == "build the replacement"
+    assert runner.store.get(created_id)["status"] == "cancelled"
+
+
+def test_goal_created_and_completed_inside_runtime_turn_counts_that_turn(tmp_path):
+    def create_and_complete(runner):
+        assert runner.create_goal("created by the model")["ok"] is True
+        assert runner.update_goal("complete")["ok"] is True
+        return "created and completed"
+
+    _, runner = make_runner(tmp_path, [create_and_complete])
+
+    result = runner.drive("start a persistent goal")
+
+    assert result["goal_status"] == "complete"
+    assert result["goal"]["progress"]["turns"] == 1
+    assert runner.latest()["result_text"] == "turn created and completed"
+    assert "turn created and completed" in runner.describe()
+
+
+def test_cancelled_goal_is_retained_but_is_not_current(tmp_path):
+    _, runner = make_runner(tmp_path, [])
+    runner.apply_command("create", "cancel me")
+    created_id = runner.current()["goal_id"]
+
+    cancelled = runner.apply_command("cancel", "")
+
+    assert cancelled["ok"] is True
+    assert runner.current() is None
+    assert runner.latest()["goal_id"] == created_id
+    assert runner.latest()["status"] == "cancelled"
 
 
 def test_turn_and_token_budgets_block_before_another_turn(tmp_path):

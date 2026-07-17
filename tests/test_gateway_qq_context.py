@@ -55,17 +55,20 @@ class FakeRuntime:
         self.calls = []
         self.goal_commands = []
         self.interrupts = []
+        self.current_goal = None
         self.last_usage = {"prompt_tokens": 10}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
         self.goal_runner = SimpleNamespace(
             drive=self.run_turn,
             apply_command=self.apply_goal_command,
+            current=lambda: self.current_goal,
         )
 
     def apply_goal_command(self, action, argument):
         self.goal_commands.append((action, argument))
         if action == "status":
             return {"ok": True, "message": "goal status", "run_input": None}
+        self.current_goal = {"goal_id": "g_test", "status": "active"}
         return {"ok": True, "message": "goal created", "run_input": argument}
 
     def run_turn(self, text, image_paths=None):
@@ -876,3 +879,96 @@ async def test_qq_goal_pause_bypasses_busy_turn_lock(tmp_path):
     assert fake.goal_commands == [("pause", "")]
     assert fake.interrupts
     send_text.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_qq_goal_status_bypasses_busy_turn_lock(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    a._runtimes["USER1"] = fake
+    lock = a._chat_locks["USER1"]
+    await lock.acquire()
+
+    with patch.object(a, "send_text", AsyncMock()) as send_text:
+        await asyncio.wait_for(
+            a._handle_message(
+                {
+                    "id": "goal-status",
+                    "author": {"user_openid": "USER1"},
+                    "content": "/goal status",
+                },
+                "c2c",
+            ),
+            timeout=1,
+        )
+
+    lock.release()
+    assert fake.goal_commands == [("status", "")]
+    send_text.assert_awaited_once_with("USER1", "goal status", "goal-status")
+
+
+@pytest.mark.asyncio
+async def test_qq_goal_create_rejects_active_goal_without_waiting_for_lock(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    fake.current_goal = {"goal_id": "g_active", "status": "active"}
+    a._runtimes["USER1"] = fake
+    lock = a._chat_locks["USER1"]
+    await lock.acquire()
+
+    with patch.object(a, "send_text", AsyncMock()) as send_text:
+        await asyncio.wait_for(
+            a._handle_message(
+                {
+                    "id": "goal-create",
+                    "author": {"user_openid": "USER1"},
+                    "content": "/goal new objective",
+                },
+                "c2c",
+            ),
+            timeout=1,
+        )
+
+    lock.release()
+    assert fake.goal_commands == []
+    assert fake.calls == []
+    assert "/goal replace" in send_text.await_args.args[1]
+
+
+@pytest.mark.asyncio
+async def test_qq_goal_replace_interrupts_then_waits_for_busy_turn(tmp_path):
+    a = _adapter(tmp_path)
+    add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
+    fake = FakeRuntime()
+    fake.current_goal = {"goal_id": "g_active", "status": "active"}
+    a._runtimes["USER1"] = fake
+    lock = a._chat_locks["USER1"]
+    await lock.acquire()
+
+    with (
+        patch.object(a, "_collect_media", AsyncMock(return_value=([], []))),
+        patch.object(a, "send_text", AsyncMock()) as send_text,
+    ):
+        task = asyncio.create_task(
+            a._handle_message(
+                {
+                    "id": "goal-replace",
+                    "author": {"user_openid": "USER1"},
+                    "content": "/goal replace new objective",
+                },
+                "c2c",
+            )
+        )
+        await asyncio.sleep(0)
+        assert fake.interrupts
+        assert fake.goal_commands == []
+        assert "正在停止" in send_text.await_args_list[0].args[1]
+
+        lock.release()
+        await asyncio.wait_for(task, timeout=1)
+
+    assert fake.goal_commands == [("replace", "new objective")]
+    assert [call["text"] for call in fake.calls] == ["new objective"]
+    assert "goal created" in [call.args[1] for call in send_text.await_args_list]

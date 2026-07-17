@@ -823,7 +823,7 @@ class QqAdapter:
             if not attachments and not quoted_text
             else None
         )
-        if goal_command is not None and goal_command[0] in {"pause", "cancel"}:
+        if goal_command is not None and goal_command[0] in {"status", "pause", "cancel"}:
             runtime = self._runtimes.get(chat_id)
             if runtime is None:
                 await self.send_text(
@@ -835,6 +835,29 @@ class QqAdapter:
                 runtime.interrupt(f"用户通过 QQ 请求 {goal_command[0]} goal")
             await self.send_text(chat_id, command_result["message"], message_id)
             return
+        if goal_command is not None and goal_command[0] == "create":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None:
+                await self.send_text(
+                    chat_id,
+                    (
+                        f"Goal {current['goal_id']} is still {current['status']}; "
+                        "use /goal replace <objective>."
+                    ),
+                    message_id,
+                )
+                return
+        if goal_command is not None and goal_command[0] == "replace":
+            runtime = self._runtimes.get(chat_id)
+            current = runtime.goal_runner.current() if runtime is not None else None
+            if current is not None and current["status"] == "active":
+                runtime.interrupt("用户通过 QQ 请求 replace goal")
+                await self.send_text(
+                    chat_id,
+                    f"正在停止 Goal {current['goal_id']}，随后启动新目标。",
+                    message_id,
+                )
         if command:
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
@@ -923,6 +946,9 @@ class QqAdapter:
                         chat_id, command_result["message"], message_id
                     )
                     return
+                await self.send_text(
+                    chat_id, command_result["message"], message_id
+                )
                 message_text = command_result["run_input"]
             logger.info(
                 "qq: runtime_input msg=%s type=%s from=%s chat=%s text_len=%d "

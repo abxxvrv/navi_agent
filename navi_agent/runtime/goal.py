@@ -51,22 +51,38 @@ class GoalRunner:
         self.runtime = runtime
         self.store = store
         self._last_outcome: dict[str, Any] | None = None
+        self._inside_runtime_turn = False
 
     def current(self) -> dict[str, Any] | None:
         return self.store.current(self.runtime.session_store.session_id)
+
+    def latest(self) -> dict[str, Any] | None:
+        return self.store.latest(self.runtime.session_store.session_id)
 
     def create_goal(
         self,
         objective: str,
         completion_criterion: str = "",
-        replace: bool = False,
+    ) -> dict[str, Any]:
+        return self._create_goal(
+            objective,
+            completion_criterion,
+            replace=False,
+            count_current_turn=self._inside_runtime_turn,
+        )
+
+    def _create_goal(
+        self,
+        objective: str,
+        completion_criterion: str = "",
+        *,
+        replace: bool,
+        count_current_turn: bool = False,
     ) -> dict[str, Any]:
         if not isinstance(objective, str) or not objective.strip():
             return {"ok": False, "error": "objective must be a non-empty string"}
         if not isinstance(completion_criterion, str):
             return {"ok": False, "error": "completion_criterion must be a string"}
-        if not isinstance(replace, bool):
-            return {"ok": False, "error": "replace must be a boolean"}
         objective = objective.strip()
         completion_criterion = completion_criterion.strip()
         try:
@@ -78,13 +94,21 @@ class GoalRunner:
             )
         except ValueError as exc:
             return {"ok": False, "error": str(exc)}
+        if count_current_turn:
+            goal = self.store.begin_turn(goal["goal_id"])
         self._last_outcome = None
         return {"ok": True, "goal": self._public(goal)}
 
     def get_goal(self) -> dict[str, Any]:
         goal = self.current()
         if goal is None:
-            return {"ok": True, "goal": None, "message": "No active or resumable goal."}
+            latest = self.latest()
+            return {
+                "ok": True,
+                "goal": None,
+                "last_goal": self._public(latest) if latest is not None else None,
+                "message": "No active or resumable goal.",
+            }
         return {"ok": True, "goal": self._public(goal)}
 
     def set_goal_budget(self, value: float, unit: str) -> dict[str, Any]:
@@ -187,6 +211,7 @@ class GoalRunner:
                 goal = self.store.begin_turn(goal["goal_id"])
 
             goal_id = goal["goal_id"] if goal is not None and goal["status"] == "active" else None
+            self._inside_runtime_turn = True
             try:
                 result = self.runtime.run_turn(prompt, image_paths=image_paths)
             except KeyboardInterrupt:
@@ -205,6 +230,8 @@ class GoalRunner:
                     },
                     attachments,
                 )
+            finally:
+                self._inside_runtime_turn = False
 
             image_paths = None
             attachments.extend(result.get("pending_attachments") or [])
@@ -317,7 +344,7 @@ class GoalRunner:
         )
 
     def describe(self) -> str:
-        goal = self.current()
+        goal = self.current() or self.latest()
         if goal is None:
             return "No active or resumable goal."
         public = self._public(goal)
@@ -337,6 +364,12 @@ class GoalRunner:
                     f"time_ms={budgets['milliseconds'] or 'none'}"
                 ),
                 *([f"Reason: {goal['status_reason']}"] if goal["status_reason"] else []),
+                *([f"Result:\n{goal['result_text']}"] if goal["result_text"] else []),
+                *(
+                    ["Attachments:\n" + "\n".join(goal["attachments"])]
+                    if goal["attachments"]
+                    else []
+                ),
             ]
         )
 
@@ -382,7 +415,10 @@ class GoalRunner:
                 "run_input": CONTINUE_PROMPT,
             }
 
-        created = self.create_goal(argument, replace=action == "replace")
+        created = self._create_goal(
+            argument,
+            replace=action == "replace",
+        )
         if not created["ok"]:
             return {"ok": False, "message": created["error"], "run_input": None}
         return {
@@ -413,6 +449,9 @@ class GoalRunner:
                 "milliseconds": goal["wall_clock_budget_ms"],
             },
             "reason": goal["status_reason"],
+            "result": goal["result_text"],
+            "attachments": goal["attachments"],
+            "finished_at": goal["finished_at"],
         }
 
     @staticmethod
@@ -448,6 +487,17 @@ class GoalRunner:
         result["pending_attachments"] = attachments
         outcome = self._last_outcome or self.current()
         if outcome is not None:
+            if outcome["status"] in {"complete", "cancelled"}:
+                result_text = str(
+                    result.get("final_answer")
+                    or result.get("content")
+                    or result.get("error")
+                    or ""
+                )
+                outcome = self.store.record_result(
+                    outcome["goal_id"], result_text, attachments
+                )
+                self._last_outcome = outcome
             result["goal_status"] = outcome["status"]
             result["goal"] = self._public(outcome)
         return result
