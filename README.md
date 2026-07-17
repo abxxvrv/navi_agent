@@ -314,7 +314,7 @@ navi qq allowlist --group --account <account_id>
 
 ## Web UI
 
-`navi web` 在本机启动一个网页控制台，聊天能力与 CLI 一致（流式输出、思考过程、工具卡片、审批、中断、会话恢复、模型切换），输入框同样支持精确格式的 `/new` 和 `/model <provider> <modelname>` 网关命令，并可在页面上启动/停止 QQ 和微信网关（扫码登录仍需在终端完成）：
+`navi web` 在本机启动一个网页控制台，聊天能力与 CLI 一致（流式输出、思考过程、工具卡片、审批、中断、会话恢复、模型切换），并可在页面上启动/停止 QQ 和微信网关（扫码登录仍需在终端完成）：
 
 ```powershell
 navi web                       # 默认 127.0.0.1:8788，审批 normal

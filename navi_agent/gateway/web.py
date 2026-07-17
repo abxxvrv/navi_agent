@@ -33,7 +33,6 @@ from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
 from ..storage.history_store import HistoryStore
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
-from .commands import parse_gateway_command
 
 logger = logging.getLogger(__name__)
 
@@ -66,7 +65,6 @@ class WebConnection:
 
         # runtime.interrupt() 经 TurnScope 调用 cancel_current 解锁挂起的审批
         approval_handler.cancel_current = self._cancel_approval  # type: ignore[attr-defined]
-        self._approval_handler = approval_handler
 
         cached = adapter._runtime_cache.get(resume_session_id or "")
         if cached is not None:
@@ -92,14 +90,6 @@ class WebConnection:
                 )
             adapter._runtime_cache[self.runtime.session_store.session_id] = self.runtime
         self._adapter = adapter
-
-    def start_new_session(self) -> None:
-        self.runtime = self._adapter.create_runtime(
-            resume_session_id=None,
-            event_handler=self._emit_threadsafe,
-            approval_handler=self._approval_handler,
-        )
-        self._adapter._runtime_cache[self.runtime.session_store.session_id] = self.runtime
 
     # ── runtime 线程 → 事件队列 ──────────────────────────────────────────────
 
@@ -477,38 +467,6 @@ class WebAdapter:
                 await ws.send_str(_json_dumps({"type": "notice", "text": "上一轮仍在进行中，请先等待或中断。"}))
                 return
             text = str(data.get("text") or "").strip()
-            command = None
-            if not data.get("images"):
-                command = parse_gateway_command(text)
-            if command is not None:
-                command_name, command_args = command
-                if command_name == "new":
-                    await asyncio.to_thread(conn.start_new_session)
-                    await ws.send_str(_json_dumps(conn.init_payload()))
-                    await ws.send_str(
-                        _json_dumps({"type": "notice", "text": "已开启新对话。"})
-                    )
-                    return
-
-                provider, model = command_args
-                ok = conn.runtime.switch_model(provider, model)
-                if ok:
-                    await ws.send_str(
-                        _json_dumps(
-                            {
-                                "type": "model_switched",
-                                "ok": True,
-                                "model_info": conn.runtime.get_model_info(),
-                            }
-                        )
-                    )
-                result = {
-                    "ok": ok,
-                    "final_answer": f"已切换模型：{provider}/{model}" if ok else "",
-                    "error": None if ok else f"模型切换失败：{provider}/{model}",
-                }
-                await ws.send_str(_json_dumps(conn._turn_end_payload(result)))
-                return
             image_paths, rejected_images = conn.save_images(data.get("images") or [])
             if rejected_images:
                 names = "、".join(rejected_images[:3])

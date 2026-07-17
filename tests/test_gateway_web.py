@@ -58,7 +58,6 @@ class FakeRuntime:
         self.conversation_history: list[dict] = []
         self.interrupted: str | None = None
         self.is_busy = False
-        self.switch_calls: list[tuple[str, str]] = []
 
     def run_turn(self, text, image_paths=None):
         return self.script(self, text)
@@ -80,8 +79,6 @@ class FakeRuntime:
         }
 
     def switch_model(self, provider, model):
-        self.switch_calls.append((provider, model))
-        self.router.model_name = model
         return True
 
 
@@ -596,62 +593,6 @@ def test_keyboard_interrupt_becomes_turn_end():
             await client.close()
 
     asyncio.run(scenario())
-
-
-def test_web_gateway_commands_switch_model_and_start_new_chat():
-    calls: list[str] = []
-
-    def script(rt: FakeRuntime, text: str) -> dict:
-        calls.append(text)
-        return {"ok": True, "final_answer": "ordinary"}
-
-    async def scenario():
-        adapter = make_adapter(script)
-        created = 0
-
-        def create_runtime(resume_session_id, event_handler, approval_handler):
-            nonlocal created
-            created += 1
-            runtime = FakeRuntime(event_handler, approval_handler, script)
-            runtime.session_store = type(
-                "SessionStore", (), {"session_id": f"sess-{created}"}
-            )()
-            return runtime
-
-        adapter.create_runtime = create_runtime  # type: ignore[method-assign]
-        client = TestClient(TestServer(adapter.build_app()))
-        await client.start_server()
-        try:
-            ws = await client.ws_connect(f"/ws?token={TOKEN}")
-            first_init = await ws.receive_json()
-            assert first_init["session_id"] == "sess-1"
-
-            await ws.send_json({"type": "user_message", "text": "/new"})
-            new_init = (await recv_until(ws, "init"))[-1]
-            assert new_init["session_id"] == "sess-2"
-            await recv_until(ws, "notice")
-
-            await ws.send_json(
-                {
-                    "type": "user_message",
-                    "text": "/model stepfun step-3.7-flash",
-                }
-            )
-            events = await recv_until(ws, "turn_end")
-            assert any(event["type"] == "model_switched" for event in events)
-            assert events[-1]["final_answer"] == "已切换模型：stepfun/step-3.7-flash"
-            assert adapter._runtime_cache["sess-2"].switch_calls == [
-                ("stepfun", "step-3.7-flash")
-            ]
-
-            await ws.send_json({"type": "user_message", "text": "/model stepfun"})
-            events = await recv_until(ws, "turn_end")
-            assert events[-1]["final_answer"] == "ordinary"
-        finally:
-            await client.close()
-
-    asyncio.run(scenario())
-    assert calls == ["/model stepfun"]
 
 
 class FakeGatewayAdapter:
