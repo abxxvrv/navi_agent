@@ -48,6 +48,15 @@ PROVIDERS: dict[str, dict[str, Any]] = {
             "LongCat-2.0": {"context_window": 1048576},
         },
     },
+    "kimi": {
+        "base_url": "https://api.moonshot.cn/v1",
+        "models": {
+            "kimi-k3": {"context_window": 1048576, "multimodal": True},
+            "kimi-k2.7-code": {"context_window": 262144, "multimodal": True},
+            "kimi-k2.7-code-highspeed": {"context_window": 262144, "multimodal": True},
+            "kimi-k2.6": {"context_window": 262144, "multimodal": True},
+        },
+    },
     "lmstudio": {
         "base_url": "http://localhost:1234/v1",
         "models": {},

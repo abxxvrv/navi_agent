@@ -86,3 +86,33 @@ def test_prompt_provider_config_accepts_longcat_defaults(monkeypatch):
             }
         },
     }
+
+
+def test_prompt_provider_config_accepts_kimi_defaults(monkeypatch):
+    def prompt(text, default="", **kwargs):
+        if text == "Select provider":
+            return "kimi"
+        if text.startswith("API key"):
+            return "moonshot-key"
+        if text == "Base URL":
+            return default
+        if text == "Select model":
+            return "1"
+        raise AssertionError(f"unexpected prompt: {text}")
+
+    monkeypatch.setattr(init_command.typer, "prompt", prompt)
+
+    provider, model, provider_config = init_command._prompt_provider_config("Main model", {})
+
+    assert provider == "kimi"
+    assert model == "kimi-k3"
+    assert provider_config == {
+        "api_key": "moonshot-key",
+        "base_url": "https://api.moonshot.cn/v1",
+        "models": {
+            "kimi-k3": {"context_window": 1048576, "multimodal": True},
+            "kimi-k2.7-code": {"context_window": 262144, "multimodal": True},
+            "kimi-k2.7-code-highspeed": {"context_window": 262144, "multimodal": True},
+            "kimi-k2.6": {"context_window": 262144, "multimodal": True},
+        },
+    }
