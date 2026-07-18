@@ -160,6 +160,10 @@ def test_model_router_builds_longcat_provider(tmp_path, monkeypatch):
     assert router.context_window == 1048576
 
 
+def test_kimi_uses_openai_compatible_provider():
+    assert PROVIDER_CLASSES["kimi"] is OpenAICompatibleProvider
+
+
 def test_grok_uses_openai_compatible_provider():
     assert PROVIDER_CLASSES["grok"] is OpenAICompatibleProvider
 

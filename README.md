@@ -185,6 +185,33 @@ LongCat 使用 OpenAI Chat Completions 兼容接口。通过 `navi init` 选择 
 }
 ```
 
+### Kimi API
+
+Kimi 使用 Moonshot 官方的 OpenAI Chat Completions 兼容接口。通过 `navi init` 选择 `kimi` 并填写 Moonshot API Key，默认模型为 Kimi K3；也可以选择 Kimi K2.7 Code、其高速版本或 Kimi K2.6：
+
+```json
+{
+  "default_provider": "kimi",
+  "default_model": "kimi-k3",
+  "compression": {
+    "provider": "kimi",
+    "model": "kimi-k3"
+  },
+  "providers": {
+    "kimi": {
+      "api_key": "...",
+      "base_url": "https://api.moonshot.cn/v1",
+      "models": {
+        "kimi-k3": { "context_window": 1048576, "multimodal": true },
+        "kimi-k2.7-code": { "context_window": 262144, "multimodal": true },
+        "kimi-k2.7-code-highspeed": { "context_window": 262144, "multimodal": true },
+        "kimi-k2.6": { "context_window": 262144, "multimodal": true }
+      }
+    }
+  }
+}
+```
+
 ## 工具系统
 
 主要内置工具包括：

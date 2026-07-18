@@ -116,6 +116,7 @@ PROVIDER_CLASSES: dict[str, type[BaseProvider]] = {
     "qwen": QwenProvider,
     "stepfun": StepfunProvider,
     "longcat": OpenAICompatibleProvider,
+    "kimi": OpenAICompatibleProvider,
     "grok": OpenAICompatibleProvider,
     "llama": LlamaProvider,
     "lmstudio": LMStudioProvider,
