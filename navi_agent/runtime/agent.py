@@ -583,7 +583,11 @@ class AgentRuntime:
 
             # 8. 更新 conversation_history
             if keep_history and final_answer:
-                self.conversation_history = self._valid_messages(self.session_store.messages)
+                # Keep the API-facing multimodal message alive for subsequent
+                # turns while the process is running. The session store still
+                # contains the lightweight path-only user message written
+                # above, so persisted history remains free of base64 payloads.
+                self.conversation_history = self._valid_messages(current_turn_messages)
 
             return { # 返回CLI
                 "ok": bool(final_answer),
