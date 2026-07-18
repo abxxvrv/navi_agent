@@ -173,3 +173,19 @@ def test_goal_reminder_follows_user_input_without_being_persisted(tmp_path):
         not str(message.get("content", "")).startswith("<system-reminder>")
         for message in runtime.session_store.messages
     )
+
+
+def test_goal_reminder_does_not_leak_into_follow_up_turn(tmp_path):
+    runtime = _runtime(tmp_path, multimodal=True)
+    runtime.goal_runner.create_goal("finish safely", "tests pass")
+
+    runtime.run_turn("first")
+    runtime.run_turn("second")
+
+    reminders = [
+        message
+        for message in runtime.loop_messages
+        if message.get("role") == "user"
+        and str(message.get("content", "")).startswith("<system-reminder>")
+    ]
+    assert len(reminders) == 1

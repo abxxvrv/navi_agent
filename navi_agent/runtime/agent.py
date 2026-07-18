@@ -587,7 +587,17 @@ class AgentRuntime:
                 # turns while the process is running. The session store still
                 # contains the lightweight path-only user message written
                 # above, so persisted history remains free of base64 payloads.
-                self.conversation_history = self._valid_messages(current_turn_messages)
+                history_messages = current_turn_messages
+                if self._goal_turn_reminder:
+                    history_messages = [
+                        message
+                        for message in history_messages
+                        if not (
+                            message.get("role") == "user"
+                            and message.get("content") == self._goal_turn_reminder
+                        )
+                    ]
+                self.conversation_history = self._valid_messages(history_messages)
 
             return { # 返回CLI
                 "ok": bool(final_answer),
