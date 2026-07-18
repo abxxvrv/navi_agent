@@ -68,7 +68,7 @@ def _runtime(tmp_path, *, multimodal):
     return runtime
 
 
-def test_multimodal_api_message_has_image_url_but_history_has_no_base64(tmp_path):
+def test_multimodal_image_stays_in_active_history_but_not_session_store(tmp_path):
     image = tmp_path / "img.png"
     image.write_bytes(b"image-bytes")
     runtime = _runtime(tmp_path, multimodal=True)
@@ -88,6 +88,28 @@ def test_multimodal_api_message_has_image_url_but_history_has_no_base64(tmp_path
     assert "data:image" not in stored_user["content"]
     assert "base64" not in stored_user["content"]
     assert "[screenshot]" not in stored_user["content"]
+
+    active_user = [m for m in runtime.conversation_history if m.get("role") == "user"][0]
+    assert isinstance(active_user["content"], list)
+    assert "data:image/png;base64," in active_user["content"][1]["image_url"]["url"]
+
+
+def test_multimodal_image_is_sent_again_on_follow_up_turn(tmp_path):
+    image = tmp_path / "img.png"
+    image.write_bytes(b"image-bytes")
+    runtime = _runtime(tmp_path, multimodal=True)
+
+    runtime.run_turn("describe", image_paths=[image])
+    runtime.run_turn("what is in the lower-right corner?")
+
+    first_user = runtime.loop_messages[0]
+    assert first_user["role"] == "user"
+    assert isinstance(first_user["content"], list)
+    assert "data:image/png;base64," in first_user["content"][1]["image_url"]["url"]
+
+    stored_user = [m for m in runtime.session_store.messages if m.get("role") == "user"][0]
+    assert isinstance(stored_user["content"], str)
+    assert "data:image" not in stored_user["content"]
 
 
 def test_non_multimodal_image_becomes_description_text(tmp_path):
@@ -151,3 +173,19 @@ def test_goal_reminder_follows_user_input_without_being_persisted(tmp_path):
         not str(message.get("content", "")).startswith("<system-reminder>")
         for message in runtime.session_store.messages
     )
+
+
+def test_goal_reminder_does_not_leak_into_follow_up_turn(tmp_path):
+    runtime = _runtime(tmp_path, multimodal=True)
+    runtime.goal_runner.create_goal("finish safely", "tests pass")
+
+    runtime.run_turn("first")
+    runtime.run_turn("second")
+
+    reminders = [
+        message
+        for message in runtime.loop_messages
+        if message.get("role") == "user"
+        and str(message.get("content", "")).startswith("<system-reminder>")
+    ]
+    assert len(reminders) == 1
