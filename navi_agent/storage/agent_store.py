@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -23,6 +24,7 @@ class AgentInstanceStore:
 
     def __init__(self, root: Path | None = None):
         self.root = root or get_agents_dir()
+        self._lock = threading.RLock()
 
     def create(
         self,
@@ -53,23 +55,25 @@ class AgentInstanceStore:
 
     def get_meta(self, agent_id: str) -> dict[str, Any] | None:
         """读取实例元信息，不存在返回 None。"""
-        meta_path = self.root / agent_id / "meta.json"
-        if not meta_path.exists():
-            return None
-        return json.loads(meta_path.read_text(encoding="utf-8"))
+        with self._lock:
+            meta_path = self.root / agent_id / "meta.json"
+            if not meta_path.exists():
+                return None
+            return json.loads(meta_path.read_text(encoding="utf-8"))
 
     def update_meta(self, agent_id: str, **fields: Any) -> None:
         """更新实例元信息的指定字段。"""
-        meta = self.get_meta(agent_id)
-        if meta is None:
-            return
-        meta.update(fields)
-        meta["updated_at"] = time.time()
-        meta_path = self.root / agent_id / "meta.json"
-        meta_path.write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        with self._lock:
+            meta = self.get_meta(agent_id)
+            if meta is None:
+                return
+            meta.update(fields)
+            meta["updated_at"] = time.time()
+            meta_path = self.root / agent_id / "meta.json"
+            meta_path.write_text(
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
 
     def load_context(self, agent_id: str) -> list[dict[str, Any]]:
         """加载实例的对话历史。"""

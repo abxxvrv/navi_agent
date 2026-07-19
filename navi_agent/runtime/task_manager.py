@@ -231,6 +231,7 @@ class TaskManager:
             task.background = True
             task.detached.set()
             snapshot = self._snapshot_locked(task)
+            self._condition.notify_all()
         if self.on_event is not None:
             self.on_event({"type": "task_backgrounded", "task": snapshot})
         return snapshot
@@ -386,10 +387,13 @@ class TaskManager:
                 for task_id in task_ids
                 if task_id in self._tasks and self._tasks[task_id].status == "running"
             ]
+            detach_waiting = [task for task in waiting if not task.background]
             for task in waiting:
                 task.waiters += 1
             try:
                 while True:
+                    if any(task.detached.is_set() for task in detach_waiting):
+                        return
                     states = [
                         self._tasks[task_id].status
                         if task_id in self._tasks
@@ -453,13 +457,16 @@ class TaskManager:
             if task.output_file
             else None
         )
+        logged_chars = 0
         try:
             assert task.process.stdout is not None
             for raw_line in task.process.stdout:
                 text = raw_line.decode(encoding, errors="replace")
-                if log is not None:
-                    log.write(text)
+                if log is not None and logged_chars < self.max_output_chars:
+                    chunk = text[: self.max_output_chars - logged_chars]
+                    log.write(chunk)
                     log.flush()
+                    logged_chars += len(chunk)
                 with self._condition:
                     task.output += text
                     if len(task.output) > self.max_output_chars:
@@ -571,7 +578,9 @@ class TaskManager:
             metadata = {"error": str(exc)}
 
         if task.output_file:
-            Path(task.output_file).write_text(output, encoding="utf-8")
+            Path(task.output_file).write_text(
+                output[-self.max_output_chars :], encoding="utf-8"
+            )
         with self._condition:
             task.output = output[-self.max_output_chars :]
             task.truncated = len(output) > self.max_output_chars

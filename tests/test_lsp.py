@@ -1,6 +1,8 @@
 import json
 import sys
 import threading
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
@@ -270,3 +272,54 @@ def test_lsp_config_precedence_routing_and_input_validation(tmp_path):
     assert manager.query("workspaceSymbol", query=" ")["ok"] is False
     assert manager.query("goToDefinition", "sample.py")["ok"] is False
     assert manager.clients == {}
+
+
+def test_lsp_discards_dead_client_for_next_lazy_start(tmp_path):
+    source = tmp_path / "sample.py"
+    source.write_text("value = 1\n", encoding="utf-8")
+    manager = LspManager(
+        tmp_path,
+        navi_home=tmp_path / "home",
+        plugin_servers={
+            "python": {
+                "command": "unused",
+                "extensions": {".py": "python"},
+            }
+        },
+    )
+    client = SimpleNamespace(
+        process=SimpleNamespace(poll=lambda: 1),
+        _reader_error="server closed stdout",
+        sync_document=Mock(side_effect=RuntimeError("server stopped")),
+        close=Mock(),
+    )
+    manager.clients["python"] = client
+
+    result = manager.query("goToDefinition", "sample.py", line=0, character=0)
+
+    assert result["ok"] is False
+    assert manager.clients == {}
+    client.close.assert_called_once_with()
+
+
+def test_lsp_restart_closes_active_clients(tmp_path):
+    manager = LspManager(
+        tmp_path,
+        navi_home=tmp_path / "home",
+        plugin_servers={
+            "python": {
+                "command": "unused",
+                "extensions": {".py": "python"},
+            }
+        },
+    )
+    client = Mock()
+    manager.clients["python"] = client
+
+    assert manager.query("restart") == {
+        "ok": True,
+        "operation": "restart",
+        "servers": ["python"],
+    }
+    assert manager.clients == {}
+    client.close.assert_called_once_with()

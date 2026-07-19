@@ -1,9 +1,52 @@
 from __future__ import annotations
 
+import threading
+from pathlib import Path
+
 import pytest
 
 from navi_agent.runtime.sub_agent import SubAgent
 from navi_agent.storage.agent_store import AgentInstanceStore
+
+
+def test_agent_meta_updates_are_serialized(monkeypatch, tmp_path):
+    store = AgentInstanceStore(tmp_path / "agents")
+    agent_id = store.create()
+    first_writing = threading.Event()
+    release = threading.Event()
+    second_done = threading.Event()
+    original_write_text = Path.write_text
+
+    def delayed_write(path, content, *args, **kwargs):
+        if path.name == "meta.json" and threading.current_thread().name == "first-update":
+            first_writing.set()
+            release.wait(timeout=1)
+        return original_write_text(path, content, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", delayed_write)
+    first = threading.Thread(
+        name="first-update",
+        target=lambda: store.update_meta(agent_id, parent_session_id="session-2"),
+    )
+    second = threading.Thread(
+        target=lambda: (
+            store.update_meta(agent_id, status="completed"),
+            second_done.set(),
+        )
+    )
+    first.start()
+    try:
+        assert first_writing.wait(timeout=1)
+        second.start()
+        assert not second_done.wait(timeout=0.1)
+    finally:
+        release.set()
+        first.join(timeout=1)
+        second.join(timeout=1)
+
+    meta = store.get_meta(agent_id)
+    assert meta["parent_session_id"] == "session-2"
+    assert meta["status"] == "completed"
 
 
 def test_subagent_persists_complete_transcript_and_resumes(tmp_path):

@@ -360,13 +360,32 @@ class ApprovalManager:
         args = tool_args or {}
         normalized_tool_name = self._normalize_tool_name(tool_name)
 
+        if normalized_tool_name == "scheduler_create":
+            approval_key = "tool:scheduler_create"
+            if self.mode == ApprovalMode.OPEN or self.is_session_allowed(approval_key):
+                return ApprovalDecision(
+                    action=ApprovalAction.ALLOW,
+                    risk=RiskLevel.RISKY,
+                    reason="定时任务创建已被允许。",
+                    tool_name=tool_name,
+                    tool_args=args,
+                    approval_key=approval_key,
+                )
+            return ApprovalDecision(
+                action=ApprovalAction.ASK,
+                risk=RiskLevel.RISKY,
+                reason="创建定时任务需要用户审批。",
+                tool_name=tool_name,
+                tool_args=args,
+                approval_key=approval_key,
+            )
+
         if normalized_tool_name in {
             "create_goal",
             "get_goal",
             "set_goal_budget",
             "update_goal",
             "kill_task",
-            "scheduler_create",
             "scheduler_delete",
         }:
             return ApprovalDecision(

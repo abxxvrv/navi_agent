@@ -297,6 +297,35 @@ def test_matchers_use_exact_lists_regex_and_claude_aliases(tmp_path):
     assert output.read_text(encoding="utf-8").splitlines() == ["exact", "regex"]
 
 
+def test_legacy_tool_events_get_implicit_matchers(tmp_path):
+    manager = HookManager(
+        tmp_path,
+        tmp_path / "home",
+        {
+            "beforeReadFile": [
+                {"hooks": [{"type": "command", "command": "read-hook"}]}
+            ],
+            "beforeMCPExecution": [
+                {"hooks": [{"type": "command", "command": "mcp-hook"}]}
+            ],
+            "afterFileEdit": [
+                {"hooks": [{"type": "command", "command": "edit-hook"}]}
+            ],
+            "afterAgentResponse": [
+                {"hooks": [{"type": "command", "command": "response-hook"}]}
+            ],
+        },
+    )
+
+    assert [handler["matcher"] for handler in manager.handlers["PreToolUse"]] == [
+        "Read",
+        "^mcp_",
+    ]
+    assert [handler["matcher"] for handler in manager.handlers["PostToolUse"]] == [
+        "Edit|Write"
+    ]
+
+
 def test_pre_tool_use_json_decision_wins_and_first_deny_stops(tmp_path):
     workspace = tmp_path / "workspace"
     navi_home = tmp_path / "navi"

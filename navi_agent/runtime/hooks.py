@@ -48,8 +48,6 @@ class HookManager:
             "afterShellExecution": "PostToolUse",
             "afterMCPExecution": "PostToolUse",
             "afterFileEdit": "PostToolUse",
-            "afterAgentResponse": "PostToolUse",
-            "afterAgentThought": "PostToolUse",
             "PostToolUseFailure": "PostToolUseFailure",
             "post_tool_use_failure": "PostToolUseFailure",
             "postToolUseFailure": "PostToolUseFailure",
@@ -151,6 +149,15 @@ class HookManager:
                     matcher = group.get("matcher", "")
                     if not isinstance(matcher, str):
                         continue
+                    if not matcher:
+                        matcher = {
+                            "beforeShellExecution": "Bash",
+                            "afterShellExecution": "Bash",
+                            "beforeMCPExecution": "^mcp_",
+                            "afterMCPExecution": "^mcp_",
+                            "beforeReadFile": "Read",
+                            "afterFileEdit": "Edit|Write",
+                        }.get(event_name, "")
                     matcher_regex = None
                     if matcher not in {"", "*"} and re.fullmatch(
                         r"[A-Za-z0-9_|]+",

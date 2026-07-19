@@ -475,6 +475,101 @@ def test_subagent_foreground_returns_complete_result(monkeypatch, tmp_path):
         clear_all()
 
 
+def test_subagent_foreground_returns_when_moved_to_background(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    entered = threading.Event()
+    release = threading.Event()
+    result = {}
+
+    class FakeAgent:
+        def run(self, user_input):
+            entered.set()
+            release.wait(timeout=5)
+            return SimpleNamespace(
+                success=True,
+                content="done",
+                steps=1,
+                tool_calls_made=[],
+            )
+
+    monkeypatch.setattr(
+        "navi_agent.runtime.agent.prepare_agent", lambda **_kwargs: FakeAgent()
+    )
+    worker = threading.Thread(
+        target=lambda: result.setdefault(
+            "value",
+            runtime._run_subagent(
+                prompt="keep working",
+                description="background me",
+                background=False,
+                timeout_ms=5_000,
+            ),
+        )
+    )
+    worker.start()
+    try:
+        assert entered.wait(timeout=1)
+        assert runtime.task_manager.background_current() is not None
+        worker.join(timeout=1)
+
+        assert not worker.is_alive()
+        assert result["value"]["ok"] is True
+        assert result["value"]["backgrounded"] is True
+        assert result["value"]["status"] == "running"
+
+        release.set()
+        task = runtime.task_manager.wait_tasks(
+            [result["value"]["task_id"]], timeout_ms=1_000
+        )[0]
+        assert task["status"] == "completed"
+    finally:
+        release.set()
+        worker.join(timeout=1)
+        runtime.task_manager.shutdown()
+        runtime._current_scope.close()
+        clear_all()
+
+
+def test_subagent_start_hook_interrupt_still_stops_and_cleans_up(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    events = []
+    captured = {}
+
+    def dispatch(event, *_args, **_kwargs):
+        events.append(event)
+        if event == "SubagentStart":
+            raise KeyboardInterrupt("hook cancelled")
+
+    runtime.hooks = SimpleNamespace(dispatch=dispatch)
+
+    class FakeAgent:
+        def run(self, _user_input):
+            raise AssertionError("agent must not run after a cancelled start hook")
+
+    def prepare(**kwargs):
+        captured["scope"] = kwargs["scope"]
+        return FakeAgent()
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", prepare)
+    try:
+        result = runtime._run_subagent(
+            prompt="cancel before start",
+            description="cancelled start",
+            background=False,
+            timeout_ms=1_000,
+        )
+
+        assert result["ok"] is False
+        assert result["status"] == "cancelled"
+        assert events == ["SubagentStart", "SubagentStop"]
+        assert runtime.agent_store.get_meta(result["subagent_id"])["status"] == "cancelled"
+        assert captured["scope"].execution_thread_id is None
+    finally:
+        runtime.task_manager.shutdown()
+        runtime._current_scope.close()
+        clear_all()
+
+
 def test_plugin_subagent_uses_qualified_prompt_and_tool_filter(monkeypatch, tmp_path):
     runtime = _make_subagent_runtime(tmp_path)
     runtime.tool_registry.register(

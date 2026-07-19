@@ -232,6 +232,12 @@ Kimi 使用 Moonshot 官方的 OpenAI Chat Completions 兼容接口。通过 `na
 | `skill_manage` | 管理技能文件 |
 | `memory` | 管理长期记忆 |
 | `agent` | 管理子 agent |
+| `get_task_output` / `wait_tasks` / `kill_task` | 查询、等待或停止后台命令、监控和子 agent |
+| `monitor` | 持续监控命令输出并把事件送回会话 |
+| `scheduler_create` / `scheduler_list` / `scheduler_delete` | 在交互式 CLI 中管理定时 prompt |
+| `lsp` | 查询定义、引用、实现和符号 |
+
+长命令和子 agent 可直接在后台运行；前台执行时按 `Ctrl+G` 会无损转到后台。定时 prompt 只在交互式 CLI 暴露，因为该入口会消费触发事件并启动新一轮对话。
 
 `skill_manage` 支持：
 
@@ -279,6 +285,8 @@ navi --plugin-dir /path/to/plugin
 
 项目 `.navi/plugins`、`.grok/plugins`、`.claude/plugins` 和用户 `~/.navi/plugins` 中的插件默认禁用。项目或外部配置插件还需把插件根目录的规范化绝对路径逐行写入 `~/.navi/trusted-plugins`，才会启动其 Agent、Hooks、MCP 或 LSP；`--plugin-dir` 代表本次会话显式信任。插件命令使用 `/plugin-name:command`，插件技能和 Agent 使用 `plugin-name:name`。
 
+`enabled` / `disabled` 中的裸插件名只匹配用户插件；项目和外部配置插件使用发现结果中的完整 `id`。同名插件按 CLI、项目、用户、外部配置的优先级选择，但未启用或未信任的副本不会遮蔽后续可用副本。
+
 ## Hooks
 
 Navi 在启动时依次加载 `config.json` 顶层 `hooks`、`~/.navi/hooks/*.json` 和已启用且可信的插件 Hooks。项目目录中的 Hook 不会自动执行。首版支持 Claude/Grok 兼容的 command handler：
@@ -314,7 +322,7 @@ Navi 在启动时依次加载 `config.json` 顶层 `hooks`、`~/.navi/hooks/*.js
 }
 ```
 
-配置存在时，Navi 注册一个只读 `lsp` 工具，支持 `goToDefinition`、`findReferences`、`goToImplementation`、`documentSymbol` 和 `workspaceSymbol`。输入行列从 0 开始，结果行列从 1 开始。用户配置覆盖同名插件配置；只有用户配置和已信任插件中的 LSP 会启动，不会执行项目目录里的 LSP 配置。
+配置存在时，Navi 注册 `lsp` 工具，支持 `goToDefinition`、`findReferences`、`goToImplementation`、`documentSymbol`、`workspaceSymbol` 和 `restart`。输入行列从 0 开始，结果行列从 1 开始。修改 `pyrightconfig.json`、`pyproject.toml` 等项目原生配置后，调用 `restart` 会关闭现有 language server，下一次查询按新配置启动。用户配置覆盖同名插件配置；只有用户配置和已信任插件中的 LSP 会启动，不会执行项目目录里的 LSP server 配置。
 
 ## 会话与记忆
 

@@ -320,6 +320,8 @@ class LspClient:
         try:
             if process.poll() is None:
                 try:
+                    if self._reader_error is not None:
+                        raise RuntimeError(self._reader_error)
                     self.request(
                         "shutdown",
                         None,
@@ -420,6 +422,18 @@ class LspManager:
         character: int | None = None,
         query: str | None = None,
     ) -> dict[str, Any]:
+        if operation == "restart":
+            with self._lock:
+                clients = list(self.clients.values())
+                self.clients.clear()
+            for client in clients:
+                client.close()
+            return {
+                "ok": True,
+                "operation": operation,
+                "servers": sorted(self.servers),
+            }
+
         operations = {
             "goToDefinition": "textDocument/definition",
             "findReferences": "textDocument/references",
@@ -465,6 +479,13 @@ class LspManager:
                         raw_results.extend(result)
                 except Exception as exc:
                     errors.append(f"{name}: {exc}")
+                    if client._reader_error is not None or (
+                        client.process is not None and client.process.poll() is not None
+                    ):
+                        with self._lock:
+                            if self.clients.get(name) is client:
+                                self.clients.pop(name)
+                        client.close()
             if not succeeded:
                 return {
                     "ok": False,
@@ -537,6 +558,13 @@ class LspManager:
                 else:
                     raw_results = []
             except Exception as exc:
+                if client._reader_error is not None or (
+                    client.process is not None and client.process.poll() is not None
+                ):
+                    with self._lock:
+                        if self.clients.get(name) is client:
+                            self.clients.pop(name)
+                    client.close()
                 return {
                     "ok": False,
                     "operation": operation,

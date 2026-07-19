@@ -59,6 +59,28 @@ def test_explicit_background_returns_running_snapshot_and_final_output(tmp_path)
         manager.shutdown()
 
 
+def test_output_files_are_limited_to_max_output_chars(tmp_path):
+    manager = TaskManager(tmp_path / "logs", max_output_chars=8)
+    try:
+        started = _start(manager, tmp_path, "print('abcdefghijklmnop', end='')")
+        command = manager.get_output([started["task_id"]], timeout_ms=3000)[0]
+        worker = manager.start_worker(
+            "worker",
+            "inspect",
+            tmp_path,
+            description="inspect",
+            target=lambda: {"success": True, "content": "abcdefghijklmnop"},
+            cancel=lambda _reason: None,
+            background=True,
+        )
+        manager.wait_tasks([worker["task_id"]], timeout_ms=3000)
+
+        assert Path(command["output_file"]).read_text(encoding="utf-8") == "abcdefgh"
+        assert Path(worker["output_file"]).read_text(encoding="utf-8") == "ijklmnop"
+    finally:
+        manager.shutdown()
+
+
 def test_poll_is_non_blocking_and_wait_all_preserves_input_order(tmp_path):
     manager = TaskManager(tmp_path / "logs")
     try:
