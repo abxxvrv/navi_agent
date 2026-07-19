@@ -167,7 +167,7 @@ def test_image_slash_command_attaches_path(tmp_path):
     assert attached == [image]
 
 
-def test_process_message_prints_submitted_preview_once(tmp_path):
+def test_process_message_prints_submitted_preview_once_and_expands_loop(tmp_path):
     controller = ChatController.__new__(ChatController)
     calls = []
 
@@ -198,9 +198,11 @@ def test_process_message_prints_submitted_preview_once(tmp_path):
         reviewer = SimpleNamespace(pending_message=None)
 
         def __init__(self):
+            self.inputs = []
             self.goal_runner = SimpleNamespace(drive=self.run_turn)
 
         def run_turn(self, text, image_paths=None):
+            self.inputs.append(text)
             return {"ok": True, "final_answer": "", "content": ""}
 
     controller.runtime = Runtime()
@@ -217,6 +219,9 @@ def test_process_message_prints_submitted_preview_once(tmp_path):
     controller.result_is_ok = lambda result: True
     controller.result_error = lambda result: "error"
 
-    asyncio.run(controller.process_message("hello"))
+    asyncio.run(controller.process_message("/loop every 5 minutes check deploy"))
 
     assert len(calls) == 1
+    assert "Do NOT execute the prompt inline" in controller.runtime.inputs[0]
+    assert "instead of guessing" in controller.runtime.inputs[0]
+    assert "every 5 minutes check deploy" in controller.runtime.inputs[0]

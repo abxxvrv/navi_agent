@@ -1,5 +1,8 @@
+from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
+
+from rich.console import Console
 
 from navi_agent.cli import main
 from navi_agent.integrations import mcp_commands
@@ -54,6 +57,24 @@ def test_handle_slash_command_handles_help(monkeypatch) -> None:
     printer = lambda *args, **kwargs: None
     assert main.handle_slash_command("/help", _runtime_stub(), Path("."), printer=printer) is True
     assert calls == [printer]
+
+
+def test_loop_is_listed_in_completion_and_help() -> None:
+    output = StringIO()
+    console = Console(file=output, color_system=None, width=100)
+
+    main.print_chat_help(printer=console.print)
+
+    assert "/loop" in main.SLASH_COMMANDS
+    assert "/loop" in output.getvalue()
+
+
+def test_loop_with_arguments_reaches_the_agent() -> None:
+    assert main.handle_slash_command(
+        "/loop 5m check deployment",
+        _runtime_stub(),
+        Path("."),
+    ) is False
 
 
 def test_handle_slash_command_handles_search_with_tab_separator(monkeypatch, tmp_path) -> None:

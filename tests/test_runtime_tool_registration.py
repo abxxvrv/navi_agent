@@ -1,8 +1,12 @@
 from pathlib import Path
 import json
 
-from navi_agent.runtime.agent import AgentRuntime
+from navi_agent.runtime.agent import AgentRuntime, BACKGROUND_TOOL_NAMES
 from navi_agent.runtime.goal import GoalRunner
+from navi_agent.runtime.monitor import Monitor
+from navi_agent.runtime.scheduler import Scheduler
+from navi_agent.runtime.task_manager import TaskManager
+from navi_agent.storage.scheduler_store import SchedulerStore
 from navi_agent.storage.goal_store import GoalStore
 from navi_agent.storage.history_store import HistoryStore
 from navi_agent.tools.registry import ToolRegistry
@@ -39,6 +43,13 @@ def _runtime(tmp_path):
     runtime._channel = "cli"
     runtime.on_output = None
     runtime._pending_attachments = []
+    runtime.task_manager = TaskManager(Path(tmp_path) / "tasks")
+    runtime.monitor = Monitor(runtime.task_manager, lambda _event: None)
+    runtime.scheduler = Scheduler(
+        "test-session",
+        SchedulerStore(Path(tmp_path) / "scheduler.sqlite3"),
+        lambda _event: None,
+    )
     runtime.goal_runner = GoalRunner(
         runtime,
         GoalStore(runtime.navi_home / "history.sqlite3"),
@@ -55,6 +66,11 @@ def test_register_tools_renames_run_command_to_bash(monkeypatch, tmp_path):
 
     assert "bash" in runtime.tool_registry._tools
     assert "run_command" not in runtime.tool_registry._tools
+    assert BACKGROUND_TOOL_NAMES.issubset(runtime.tool_registry._tools)
+    bash = runtime.tool_registry._tools["bash"]
+    assert bash.function.kwargs["task_manager"] is runtime.task_manager
+    assert bash.parameters["properties"]["background"]["default"] is False
+    assert bash.parameters["properties"]["timeout_seconds"]["maximum"] == 36_000
     assert {
         "create_goal",
         "get_goal",
@@ -159,3 +175,5 @@ def test_resume_migrates_run_command_tool_name(monkeypatch, tmp_path):
         "set_goal_budget",
         "update_goal",
     }.issubset(tool_names)
+    assert BACKGROUND_TOOL_NAMES.issubset(tool_names)
+    runtime.close()

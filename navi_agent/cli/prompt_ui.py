@@ -68,6 +68,7 @@ class NaviPromptSession:
         bottom_toolbar: Callable[[], Any],
         image_dir: Path | None = None,
         on_cancel: Callable[[], None] | None = None,
+        on_background: Callable[[], Any] | None = None,
         on_approval_response: Callable[[UserApprovalChoice], None] | None = None,
         input: Any = None,
         output: Any = None,
@@ -75,9 +76,10 @@ class NaviPromptSession:
         self._running = False
         self._bottom_toolbar = bottom_toolbar
         self._on_cancel = on_cancel
+        self._on_background = on_background
         self._on_approval_response = on_approval_response
         self._custom_io = input is not None or output is not None
-        self._idle_queue: asyncio.Queue[tuple[str, list[Path]]] = asyncio.Queue()
+        self._idle_queue: asyncio.Queue[tuple[str, list[Path], str]] = asyncio.Queue()
         self._image_dir = image_dir
         self._attached_images: list[Path] = []
         self._image_counter = 0
@@ -261,6 +263,20 @@ class NaviPromptSession:
                 buffer_len=len(event.current_buffer.text),
             )
             event.current_buffer.insert_text("\n")
+            event.app.invalidate()
+
+        @running_bindings.add(
+            "c-g",
+            eager=True,
+            filter=Condition(
+                lambda: self._running
+                and self._approval_state is None
+                and self.model_picker is None
+            ),
+        )
+        def _(event: KeyPressEvent) -> None:
+            if self._on_background is not None:
+                self._on_background()
             event.app.invalidate()
 
         # ── Idle key bindings ──
@@ -454,20 +470,22 @@ class NaviPromptSession:
     ) -> None:
         self._loop = asyncio.get_running_loop()
         submit_params = inspect.signature(on_submit).parameters
-        submit_takes_images = any(
+        has_varargs = any(
             param.kind == inspect.Parameter.VAR_POSITIONAL
             for param in submit_params.values()
-        ) or len(submit_params) >= 2
+        )
 
         async def message_loop() -> None:
             while True:
-                text, images = await self._idle_queue.get()
+                text, images, origin = await self._idle_queue.get()
                 trace_paste(
                     "idle_queue_get",
                     text_summary=summarize_text(text),
                     queue_size=self._idle_queue.qsize(),
                 )
-                if submit_takes_images:
+                if has_varargs or len(submit_params) >= 3:
+                    await on_submit(text, images, origin)
+                elif len(submit_params) >= 2:
                     await on_submit(text, images)
                 else:
                     await on_submit(text)
@@ -873,7 +891,7 @@ class NaviPromptSession:
             picker_active=self.model_picker is not None,
             submit_mode=mode,
         )
-        self._idle_queue.put_nowait((text, images))
+        self._idle_queue.put_nowait((text, images, "user"))
         trace_paste(
             "idle_queue_put",
             text_summary=summarize_text(text),

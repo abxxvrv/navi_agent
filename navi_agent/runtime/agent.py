@@ -22,6 +22,10 @@ from ..context.context_manager import ContextManager
 from ..storage.history_store import HistoryStore
 from .interrupt_scope import TurnScope
 from .interruptible import run_model_stream, tool_worker, wait_approval
+from .monitor import Monitor
+from .scheduler import Scheduler
+from .task_manager import TaskManager
+from .tool_context import CURRENT_TOOL_CONTEXT, ToolExecutionContext
 from ..model.request import ModelStreamRunner
 from ..model.router import ModelRouter
 from ..paths import get_config_path, get_navi_home
@@ -51,6 +55,7 @@ from .goal import GOAL_TOOL_NAMES, GoalRunner
 from .sub_agent import prepare_agent, EXPLORE_TOOLS
 from ..skills.skill_manage import SkillManageTool
 from ..storage.goal_store import GoalStore
+from ..storage.scheduler_store import SchedulerStore
 
 from ..tools.approval import (
     ApprovalDecision,
@@ -61,6 +66,16 @@ from ..tools.approval import (
 AgentEventHandler = Callable[[dict[str, Any]], None]
 
 ApprovalHandler = Callable[[ApprovalDecision], str | UserApprovalChoice | bool]
+
+BACKGROUND_TOOL_NAMES = {
+    "get_task_output",
+    "wait_tasks",
+    "kill_task",
+    "monitor",
+    "scheduler_create",
+    "scheduler_list",
+    "scheduler_delete",
+}
 
 
 class EmptyModelResponseError(RuntimeError):
@@ -177,6 +192,16 @@ class AgentRuntime:
         self._execution_thread_id: int | None = None
         self._tool_worker_threads: set[int] = set()
         self._tool_worker_threads_lock = threading.Lock()
+        self.task_manager = TaskManager(
+            self.navi_home / "sessions" / self.session_store.session_id / "tasks",
+            on_event=self._emit,
+        )
+        self.monitor = Monitor(self.task_manager, self._emit)
+        self.scheduler = Scheduler(
+            self.session_store.session_id,
+            SchedulerStore(history_db_path),
+            self._emit,
+        )
 
         # 初始化后台审查器
         self.reviewer = BackgroundReviewer(
@@ -217,7 +242,7 @@ class AgentRuntime:
         
         # 3. 如果是 resume 且旧 session 确实记录了工具列表
         if resume_session_id and persisted_tool_names:
-            allowed = {*persisted_tool_names, *GOAL_TOOL_NAMES}
+            allowed = {*persisted_tool_names, *GOAL_TOOL_NAMES, *BACKGROUND_TOOL_NAMES}
             self._tools_for_api = [
                 tool
                 for tool in all_tools_for_api
@@ -667,6 +692,11 @@ class AgentRuntime:
             title=old_store.meta.get("title"),
         )
         new_store.save_usage({})
+        self.scheduler.rebind(new_store.session_id)
+        self.task_manager.log_dir = (
+            self.navi_home / "sessions" / new_store.session_id / "tasks"
+        )
+        self.task_manager.log_dir.mkdir(parents=True, exist_ok=True)
         self.session_store = new_store
         self.conversation_history = self._valid_messages(new_store.messages)
         self.last_usage = {}
@@ -902,20 +932,34 @@ class AgentRuntime:
     ) -> tuple[str, Any, str, dict]:
         """执行单个工具，供线程池调用。返回 (tool_call_id, result, name, args)。"""
         def invoke_tool() -> tuple[str, Any, str, dict]:
-            self._emit({"type": "tool_start", "tool_name": tool_name, "tool_args": tool_args})
+            self._emit({
+                "type": "tool_start",
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+                "tool_args": tool_args,
+            })
 
             t0 = time.monotonic()
+            token = CURRENT_TOOL_CONTEXT.set(
+                ToolExecutionContext(
+                    scope=scope,
+                    tool_call_id=tool_call_id,
+                )
+            )
             try:
                 tool_result = self.tool_registry.invoke(tool_name, tool_args)
             except Exception as exc:
                 tool_result = {"ok": False, "error": str(exc)}
-                self._emit({"type": "tool_error", "tool_name": tool_name,
-                            "tool_args": tool_args, "error": str(exc)})
+                self._emit({"type": "tool_error", "tool_call_id": tool_call_id,
+                            "tool_name": tool_name, "tool_args": tool_args,
+                            "error": str(exc)})
             else:
                 elapsed = time.monotonic() - t0
-                self._emit({"type": "tool_result", "tool_name": tool_name,
-                            "tool_args": tool_args, "tool_result": tool_result,
-                            "elapsed": elapsed})
+                self._emit({"type": "tool_result", "tool_call_id": tool_call_id,
+                            "tool_name": tool_name, "tool_args": tool_args,
+                            "tool_result": tool_result, "elapsed": elapsed})
+            finally:
+                CURRENT_TOOL_CONTEXT.reset(token)
             return (tool_call_id, tool_result, tool_name, tool_args)
 
         scope = getattr(self, "_current_scope", None)
@@ -1563,7 +1607,11 @@ class AgentRuntime:
             visible=False,
         )
 
-        # bash
+        bash_tool = RunCommandTool(
+            workspace=workspace,
+            task_manager=self.task_manager,
+            on_output=self.on_output,
+        )
         self.tool_registry.register(
             name="bash",
             description="""
@@ -1571,7 +1619,7 @@ class AgentRuntime:
 - 写完代码后，使用该工具运行测试、检查语法或查看错误信息。
 - 命令应使用 Bash 语法，不是 PowerShell 或 cmd 语法。
 - 该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。
-- 不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。
+- 长时间构建或服务命令使用 background=true；工具会立即返回 task_id。
 - 对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。
 """,
             parameters={
@@ -1588,24 +1636,27 @@ class AgentRuntime:
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "命令超时时间，单位秒。",
-                        "default": 60,
-                        "maximum": 300,
+                        "description": (
+                            "命令超时时间，单位秒。前台默认 60、最多 300；"
+                            "后台省略或设为 0 表示一直运行，正数最多 36000。"
+                        ),
+                        "minimum": 0,
+                        "maximum": 36000,
                     },
                     "encoding": {
                         "type": "string",
                         "description": "输出解码编码。",
                         "default": "utf-8",
                     },
+                    "background": {
+                        "type": "boolean",
+                        "description": "在后台运行并立即返回 task_id。",
+                        "default": False,
+                    },
                 },
                 "required": ["command"],
             },
-            function=RunCommandTool(
-                workspace=workspace,
-                on_output=lambda *args, **kwargs: (
-                    self.on_output(*args, **kwargs) if self.on_output else None
-                ),
-            ),
+            function=bash_tool,
         )
 
         if platform.system() == "Windows":
@@ -1616,7 +1667,7 @@ class AgentRuntime:
 - 只在 Windows 环境可用；需要 PowerShell 语法时使用它，不要用 bash 硬凑。
 - 写完 Windows/PowerShell 相关代码后，可用该工具运行测试、检查语法或查看错误信息。
 - 该工具会返回 stdout、stderr、output、exit_code、timed_out 和 shell。
-- 不要运行会长期占用终端的服务命令；超时时间会被限制在工具允许范围内。
+- 长时间构建或服务命令使用 background=true；工具会立即返回 task_id。
 - 对会修改工作区外系统内容的命令要谨慎，必要时使用明确路径。
 """,
                 parameters={
@@ -1633,14 +1684,22 @@ class AgentRuntime:
                         },
                         "timeout_seconds": {
                             "type": "integer",
-                            "description": "命令超时时间，单位秒。",
-                            "default": 60,
-                            "maximum": 300,
+                            "description": (
+                                "命令超时时间，单位秒。前台默认 60、最多 300；"
+                                "后台省略或设为 0 表示一直运行，正数最多 36000。"
+                            ),
+                            "minimum": 0,
+                            "maximum": 36000,
                         },
                         "encoding": {
                             "type": "string",
                             "description": "输出解码编码。",
                             "default": "utf-8",
+                        },
+                        "background": {
+                            "type": "boolean",
+                            "description": "在后台运行并立即返回 task_id。",
+                            "default": False,
                         },
                     },
                     "required": ["command"],
@@ -1648,11 +1707,140 @@ class AgentRuntime:
                 function=RunCommandTool(
                     workspace=workspace,
                     shell="powershell",
-                    on_output=lambda *args, **kwargs: (
-                        self.on_output(*args, **kwargs) if self.on_output else None
-                    ),
+                    task_manager=self.task_manager,
+                    on_output=self.on_output,
                 ),
             )
+
+        self.tool_registry.register(
+            name="get_task_output",
+            description=(
+                "Get status and output for up to 20 background tasks. Omit timeout_ms or "
+                "use 0 to poll; a positive timeout waits until all requested tasks finish."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 20,
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 600000,
+                        "default": 0,
+                    },
+                },
+                "required": ["task_ids"],
+            },
+            function=self.task_manager.get_output,
+        )
+        self.tool_registry.register(
+            name="wait_tasks",
+            description="Wait until any or all requested background tasks finish.",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "task_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": 1,
+                        "maxItems": 20,
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["wait_any", "wait_all"],
+                        "default": "wait_all",
+                    },
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 600000,
+                        "default": 30000,
+                    },
+                },
+                "required": ["task_ids"],
+            },
+            function=self.task_manager.wait_tasks,
+        )
+        self.tool_registry.register(
+            name="kill_task",
+            description="Stop a background command or monitor by task ID.",
+            parameters={
+                "type": "object",
+                "properties": {"task_id": {"type": "string"}},
+                "required": ["task_id"],
+            },
+            function=self.task_manager.kill,
+        )
+        self.tool_registry.register(
+            name="monitor",
+            description=(
+                "Start a background monitor. Each non-empty output line becomes a session "
+                "event; keep the command selective and line-buffered."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "description": {"type": "string"},
+                    "timeout_ms": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 36000000,
+                        "default": 36000000,
+                    },
+                    "persistent": {"type": "boolean", "default": False},
+                },
+                "required": ["command", "description"],
+            },
+            function=lambda command, description, timeout_ms=None, persistent=False: self.monitor.start(
+                command,
+                description,
+                workspace,
+                bash_tool.shell_path,
+                timeout_ms=timeout_ms,
+                persistent=persistent,
+            ),
+        )
+        self.tool_registry.register(
+            name="scheduler_create",
+            description=(
+                "Schedule a prompt. Intervals use Ns, Nm, Nh, or Nd and are clamped to a "
+                "minimum of 60 seconds. Recurring tasks expire after 7 days."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "interval": {"type": "string"},
+                    "prompt": {"type": "string", "minLength": 1},
+                    "recurring": {"type": "boolean", "default": True},
+                    "durable": {"type": "boolean", "default": False},
+                    "fire_immediately": {"type": "boolean", "default": False},
+                },
+                "required": ["interval", "prompt"],
+            },
+            function=self.scheduler.create,
+        )
+        self.tool_registry.register(
+            name="scheduler_list",
+            description="List active scheduled prompts and their next fire times.",
+            parameters={"type": "object", "properties": {}},
+            function=self.scheduler.list,
+        )
+        self.tool_registry.register(
+            name="scheduler_delete",
+            description="Cancel a scheduled prompt by ID.",
+            parameters={
+                "type": "object",
+                "properties": {"id": {"type": "string"}},
+                "required": ["id"],
+            },
+            function=self.scheduler.delete,
+        )
 
         # glob
         self.tool_registry.register(
@@ -2141,10 +2329,7 @@ class AgentRuntime:
         except Exception as e:
             logger.debug("MCP initialization failed (non-fatal): %s", e)
 
-    def shutdown_mcp(self) -> None:
-        """关闭 MCP 连接（在 AgentRuntime 销毁时调用）。"""
-        try:
-            from ..integrations.mcp_client import shutdown_mcp_servers
-            shutdown_mcp_servers()
-        except Exception:
-            pass
+    def close(self) -> None:
+        with self._turn_lock:
+            self.scheduler.close()
+            self.task_manager.shutdown()

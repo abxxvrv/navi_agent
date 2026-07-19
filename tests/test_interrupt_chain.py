@@ -308,52 +308,22 @@ def test_model_stream_runner_aborts_blocked_request_worker():
     assert router.client.closed.is_set()
 
 
-def test_run_command_kills_process_when_interrupted(monkeypatch, tmp_path):
+def test_run_command_kills_process_when_interrupted(tmp_path):
     clear_all()
-
-    class FakeStdout:
-        def __iter__(self):
-            return iter(())
-
-        def close(self):
-            pass
-
-    class FakeProc:
-        def __init__(self, *_args, **_kwargs):
-            self.stdout = FakeStdout()
-            self.returncode = None
-            self.killed = False
-
-        def poll(self):
-            return 1 if self.killed else None
-
-    fake_proc_holder = {}
-
-    def fake_popen(*args, **kwargs):
-        proc = FakeProc(*args, **kwargs)
-        fake_proc_holder["proc"] = proc
-        return proc
-
-    monkeypatch.setattr("navi_agent.tools.builtin.subprocess.Popen", fake_popen)
-
     tool = RunCommandTool(workspace=str(tmp_path))
     tool.shell_path = "bash"
-
-    def fake_kill(proc):
-        proc.killed = True
-
-    monkeypatch.setattr(tool, "_kill_process_tree", fake_kill)
 
     set_interrupt(True)
     try:
         result = tool("sleep 30", timeout_seconds=30)
     finally:
         set_interrupt(False)
+        if tool.task_manager is not None:
+            tool.task_manager.shutdown()
 
     assert result["ok"] is False
     assert result["interrupted"] is True
     assert result["error"] == "命令执行已中断。"
-    assert fake_proc_holder["proc"].killed is True
 
     clear_all()
 

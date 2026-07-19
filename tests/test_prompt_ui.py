@@ -355,6 +355,80 @@ def test_running_toolbar_shows_tool_status():
         assert "enter: newline" in fragment_list_to_text(prompt._render_toolbar())
 
 
+def test_ctrl_g_only_backgrounds_a_running_non_approval_prompt():
+    async def run():
+        backgrounds = []
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(
+                pipe_input,
+                on_background=lambda: backgrounds.append(True),
+            )
+
+            async def on_submit(text):
+                pass
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            pipe_input.send_text("\x07")
+            await asyncio.sleep(0.05)
+            assert backgrounds == []
+
+            prompt.begin_running()
+            pipe_input.send_text("\x07")
+            await asyncio.sleep(0.05)
+            assert backgrounds == [True]
+
+            prompt.show_approval(
+                ApprovalDecision(
+                    action=ApprovalAction.ASK,
+                    risk=RiskLevel.RISKY,
+                    reason="Need approval",
+                    tool_name="bash",
+                    tool_args={"command": "echo hi"},
+                    approval_key="run:echo hi",
+                    command="echo hi",
+                )
+            )
+            pipe_input.send_text("\x07")
+            await asyncio.sleep(0.05)
+            assert backgrounds == [True]
+
+            prompt.clear_approval()
+            prompt.exit()
+            await asyncio.wait_for(task, timeout=1.0)
+
+    asyncio.run(run())
+
+
+def test_single_prompt_queue_passes_synthetic_and_user_origins():
+    async def run():
+        submitted = []
+        with create_pipe_input() as pipe_input:
+            prompt = _make_prompt(pipe_input)
+
+            async def on_submit(text, images, origin):
+                submitted.append((text, images, origin))
+                if len(submitted) == 2:
+                    prompt.exit()
+
+            task = asyncio.create_task(prompt.run_session(on_submit=on_submit))
+            await asyncio.sleep(0.05)
+
+            prompt._idle_queue.put_nowait(("background done", [], "task:t1"))
+            pipe_input.send_text("hello")
+            await asyncio.sleep(0.10)
+            pipe_input.send_text("\r")
+
+            await asyncio.wait_for(task, timeout=1.0)
+            assert submitted == [
+                ("background done", [], "task:t1"),
+                ("hello", [], "user"),
+            ]
+
+    asyncio.run(run())
+
+
 def test_tool_result_prints_bounded_argument_summary():
     lines = []
     cli.print_agent_event(
