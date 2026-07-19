@@ -3,6 +3,7 @@
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.runtime.interrupt import clear_all
@@ -27,6 +28,8 @@ def _make_runtime(registry):
     rt._tool_worker_threads = set()
     rt._tool_worker_threads_lock = threading.Lock()
     rt.tool_registry = registry
+    rt.session_store = SimpleNamespace(session_id="session")
+    rt.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
     return rt
 
 

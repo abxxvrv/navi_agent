@@ -279,6 +279,27 @@ navi --plugin-dir /path/to/plugin
 
 项目 `.navi/plugins`、`.grok/plugins`、`.claude/plugins` 和用户 `~/.navi/plugins` 中的插件默认禁用。项目或外部配置插件还需把插件根目录的规范化绝对路径逐行写入 `~/.navi/trusted-plugins`，才会启动其 Agent、Hooks、MCP 或 LSP；`--plugin-dir` 代表本次会话显式信任。插件命令使用 `/plugin-name:command`，插件技能和 Agent 使用 `plugin-name:name`。
 
+## Hooks
+
+Navi 在启动时依次加载 `config.json` 顶层 `hooks`、`~/.navi/hooks/*.json` 和已启用且可信的插件 Hooks。项目目录中的 Hook 不会自动执行。首版支持 Claude/Grok 兼容的 command handler：
+
+```json
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write",
+        "hooks": [
+          {"type": "command", "command": "bin/check.sh", "timeout": 5}
+        ]
+      }
+    ]
+  }
+}
+```
+
+脚本从 stdin 接收包含 `hookEventName`、`sessionId`、`workspaceRoot` 和事件字段的 JSON。只有 `PreToolUse` 能阻断工具：输出 `{"decision":"deny","reason":"..."}` 或在没有有效决策 JSON 时以状态码 2 退出；超时、启动失败和其他状态码均不阻断。其余生命周期事件仅用于通知。
+
 ## 会话与记忆
 
 Navi 的本地数据目录是：
@@ -296,6 +317,7 @@ Navi 的本地数据目录是：
 | `skills/` | 已安装技能 |
 | `plugins/` | 用户插件 |
 | `plugin-data/` | 插件持久数据 |
+| `hooks/` | 用户 command hooks |
 | `memories/` | 长期记忆 |
 | `agents/` | 子 agent 实例 |
 | `logs/` | 运行日志 |

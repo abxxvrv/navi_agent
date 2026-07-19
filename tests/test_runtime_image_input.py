@@ -2,6 +2,8 @@ import threading
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.runtime.goal import GoalRunner
 from navi_agent.storage.goal_store import GoalStore
@@ -55,6 +57,13 @@ def _runtime(tmp_path, *, multimodal):
     runtime.enable_goal_mode = True
     runtime.tool_registry = ToolRegistry()
     runtime.goal_runner = GoalRunner(runtime, GoalStore(store.db_path))
+    runtime.hook_events = []
+    runtime.hooks = SimpleNamespace(
+        dispatch=lambda event, session_id, payload, scope=None: runtime.hook_events.append(
+            (event, session_id, payload)
+        )
+        or None
+    )
     runtime._goal_turn_reminder = ""
     runtime.loop_messages = None
 
@@ -92,6 +101,38 @@ def test_multimodal_image_stays_in_active_history_but_not_session_store(tmp_path
     active_user = [m for m in runtime.conversation_history if m.get("role") == "user"][0]
     assert isinstance(active_user["content"], list)
     assert "data:image/png;base64," in active_user["content"][1]["image_url"]["url"]
+    assert [event[0] for event in runtime.hook_events] == [
+        "UserPromptSubmit",
+        "Stop",
+    ]
+    assert runtime.hook_events[-1][2]["reason"] == "end_turn"
+
+
+def test_turn_failure_and_cancel_dispatch_stop_hooks(tmp_path):
+    failed = _runtime(tmp_path / "failed", multimodal=True)
+    failed._llm_node = lambda _messages: (_ for _ in ()).throw(RuntimeError("boom"))
+
+    result = failed.run_turn("fail")
+
+    assert result["ok"] is False
+    assert [event[0] for event in failed.hook_events] == [
+        "UserPromptSubmit",
+        "StopFailure",
+        "Stop",
+    ]
+    assert failed.hook_events[-1][2]["reason"] == "error"
+
+    cancelled = _runtime(tmp_path / "cancelled", multimodal=True)
+    cancelled._llm_node = lambda _messages: (_ for _ in ()).throw(KeyboardInterrupt())
+
+    with pytest.raises(KeyboardInterrupt):
+        cancelled.run_turn("cancel")
+
+    assert [event[0] for event in cancelled.hook_events] == [
+        "UserPromptSubmit",
+        "Stop",
+    ]
+    assert cancelled.hook_events[-1][2]["reason"] == "cancelled"
 
 
 def test_multimodal_image_is_sent_again_on_follow_up_turn(tmp_path):

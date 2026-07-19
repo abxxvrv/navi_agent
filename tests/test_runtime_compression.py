@@ -37,6 +37,14 @@ def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
     runtime.session_store = parent
     runtime.conversation_history = AgentRuntime._valid_messages(parent.messages)
     runtime.compressor = FakeCompressor(compressed_messages)
+    hook_events = []
+    runtime.hooks = SimpleNamespace(
+        dispatch=lambda event, session_id, payload, scope=None: hook_events.append(
+            (event, session_id, payload)
+        )
+        or None
+    )
+    runtime._current_scope = None
     runtime.goal_runner = SimpleNamespace(rebind=lambda old, new: None)
     runtime.navi_home = tmp_path / "navi"
     runtime.agent_store = AgentInstanceStore(runtime.navi_home / "agents")
@@ -86,6 +94,9 @@ def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
         assert [task["id"] for task in scheduler_store.load(result["new_session_id"])] == [
             scheduled["id"]
         ]
+        assert [event[0] for event in hook_events] == ["PreCompact", "PostCompact"]
+        assert hook_events[0][1] == parent.session_id
+        assert hook_events[1][1] == result["new_session_id"]
 
         started = runtime.task_manager.start_command(
             "printf done",

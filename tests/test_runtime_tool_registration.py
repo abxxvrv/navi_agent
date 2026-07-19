@@ -1,5 +1,6 @@
 from pathlib import Path
 import json
+from types import SimpleNamespace
 
 from navi_agent.runtime.agent import AgentRuntime, BACKGROUND_TOOL_NAMES
 from navi_agent.runtime.goal import GoalRunner
@@ -45,6 +46,7 @@ def _runtime(tmp_path):
     runtime._pending_attachments = []
     runtime.plugin_skills = {}
     runtime.plugin_agents = {}
+    runtime.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
     runtime.task_manager = TaskManager(Path(tmp_path) / "tasks")
     runtime.monitor = Monitor(runtime.task_manager, lambda _event: None)
     runtime.scheduler = Scheduler(
