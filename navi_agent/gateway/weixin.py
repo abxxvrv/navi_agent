@@ -120,6 +120,7 @@ class WeixinAdapter:
 
         self._runtimes: Dict[str, AgentRuntime] = {}
         self._chat_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._message_tasks: set[asyncio.Task] = set()
 
         self._poll_session: Optional["aiohttp.ClientSession"] = None
         self._send_session: Optional["aiohttp.ClientSession"] = None
@@ -138,10 +139,20 @@ class WeixinAdapter:
             await self._poll_loop()
         finally:
             self._running = False
+            for runtime in self._runtimes.values():
+                runtime.interrupt("微信网关正在关闭")
+            for task in self._message_tasks:
+                task.cancel()
+            if self._message_tasks:
+                await asyncio.gather(*self._message_tasks, return_exceptions=True)
             with contextlib.suppress(Exception):
                 await self._poll_session.close()
             with contextlib.suppress(Exception):
                 await self._send_session.close()
+            await asyncio.gather(*(
+                asyncio.to_thread(runtime.close)
+                for runtime in self._runtimes.values()
+            ))
 
     async def _poll_loop(self) -> None:
         assert self._poll_session is not None
@@ -194,7 +205,9 @@ class WeixinAdapter:
                     )
 
                 for message in response.get("msgs") or []:
-                    asyncio.create_task(self._handle_message_safe(message))
+                    task = asyncio.create_task(self._handle_message_safe(message))
+                    self._message_tasks.add(task)
+                    task.add_done_callback(self._message_tasks.discard)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -436,7 +449,9 @@ class WeixinAdapter:
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
                 if command_name == "new":
-                    self._runtimes.pop(chat_id, None)
+                    old_runtime = self._runtimes.pop(chat_id, None)
+                    if old_runtime is not None:
+                        await asyncio.to_thread(old_runtime.close)
                     self.get_or_create_runtime(chat_id)
                     await self.send_text(chat_id, "已开启新对话。")
                     return

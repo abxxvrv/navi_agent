@@ -43,6 +43,7 @@ def _adapter(tmp_path, bot_name="Navi agent"):
     a._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
     a._runtimes = {}
     a._chat_locks = defaultdict(asyncio.Lock)
+    a._message_tasks = set()
     a._chat_type = {}
     a._reply_msg_id = {}
     a._reply_seq = {}
@@ -55,6 +56,7 @@ class FakeRuntime:
         self.calls = []
         self.goal_commands = []
         self.interrupts = []
+        self.close_calls = 0
         self.current_goal = None
         self.last_usage = {"prompt_tokens": 10}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
@@ -78,6 +80,9 @@ class FakeRuntime:
 
     def interrupt(self, reason):
         self.interrupts.append(reason)
+
+    def close(self):
+        self.close_calls += 1
 
 def test_extract_context_parses_recent_messages(tmp_path):
     out = _adapter(tmp_path)._extract_atme_context({"msg_elements": REAL_MSG_ELEMENTS})
@@ -737,6 +742,7 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
 
     old_runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
     assert old_runtime.calls == []
+    assert old_runtime.close_calls == 1
     assert a._runtimes["USER1"] is new_runtime
     replies = [call.args[1] for call in send_text.await_args_list]
     assert replies[0] == "已切换模型：stepfun/step-3.7-flash"
@@ -748,7 +754,8 @@ async def test_gateway_commands_list_switch_model_and_start_new_chat(tmp_path):
 async def test_new_command_waits_for_current_qq_turn(tmp_path):
     a = _adapter(tmp_path)
     add_to_qq_allowlist(str(tmp_path), "acct", "USER1")
-    a._runtimes["USER1"] = FakeRuntime()
+    old_runtime = FakeRuntime()
+    a._runtimes["USER1"] = old_runtime
     lock = a._chat_locks["USER1"]
     await lock.acquire()
 
@@ -774,6 +781,7 @@ async def test_new_command_waits_for_current_qq_turn(tmp_path):
         await task
 
     send_text.assert_awaited_once_with("USER1", "已开启新对话。", "queued-new-command")
+    assert old_runtime.close_calls == 1
 
 
 @pytest.mark.asyncio

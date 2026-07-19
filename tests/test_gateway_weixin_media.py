@@ -366,6 +366,7 @@ class FakeRuntime:
         self.calls: list = []
         self.goal_commands: list = []
         self.interrupts: list = []
+        self.close_calls = 0
         self.current_goal = None
         self.last_usage = {"prompt_tokens": 44}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
@@ -388,6 +389,9 @@ class FakeRuntime:
 
     def interrupt(self, reason: str):
         self.interrupts.append(reason)
+
+    def close(self):
+        self.close_calls += 1
 
 def _make_full_adapter(tmp_path: Path) -> Any:
     """Adapter with all fields needed for _handle_message."""
@@ -415,6 +419,7 @@ def _make_full_adapter(tmp_path: Path) -> Any:
     adapter._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
     adapter._runtimes = {}
     adapter._chat_locks = defaultdict(asyncio.Lock)
+    adapter._message_tasks = set()
     adapter._running = True
 
     return adapter
@@ -590,6 +595,7 @@ async def test_weixin_gateway_commands_list_switch_model_and_start_new_chat(tmp_
 
     old_runtime.switch_model.assert_called_once_with("stepfun", "step-3.7-flash")
     assert old_runtime.calls == []
+    assert old_runtime.close_calls == 1
     assert adapter._runtimes["user123"] is new_runtime
     replies = [call.args[1] for call in send_text.await_args_list]
     assert replies[0] == "已切换模型：stepfun/step-3.7-flash"

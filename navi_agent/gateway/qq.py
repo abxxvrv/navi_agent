@@ -153,6 +153,7 @@ class QqAdapter:
         self._dedup = MessageDeduplicator(ttl_seconds=MESSAGE_DEDUP_TTL_SECONDS)
         self._runtimes: Dict[str, AgentRuntime] = {}
         self._chat_locks: Dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
+        self._message_tasks: set[asyncio.Task] = set()
         self._chat_type: Dict[str, str] = {}  # chat_id → "c2c" | "group"
         self._bot_name: str = ""  # bot 群显示名，从 READY 捕获，用于过滤 msg_elements 里 bot 自己的消息
 
@@ -183,9 +184,19 @@ class QqAdapter:
             await self._listen_loop()
         finally:
             self._running = False
+            for runtime in self._runtimes.values():
+                runtime.interrupt("QQ 网关正在关闭")
+            for task in self._message_tasks:
+                task.cancel()
+            if self._message_tasks:
+                await asyncio.gather(*self._message_tasks, return_exceptions=True)
             await self._close_ws()
             with contextlib.suppress(Exception):
                 await self._session.close()
+            await asyncio.gather(*(
+                asyncio.to_thread(runtime.close)
+                for runtime in self._runtimes.values()
+            ))
 
     async def _ensure_token(self) -> str:
         if self._token and time.time() < self._token_expires_at - 60:
@@ -359,18 +370,26 @@ class QqAdapter:
             elif event_type == "RESUMED":
                 logger.info("qq: session resumed")
             elif event_type == "C2C_MESSAGE_CREATE":
-                asyncio.create_task(self._handle_message_safe(d, "c2c"))
+                task = asyncio.create_task(self._handle_message_safe(d, "c2c"))
+                self._message_tasks.add(task)
+                task.add_done_callback(self._message_tasks.discard)
             elif event_type == "GROUP_MESSAGE_CREATE":
                 mentions = d.get("mentions") if isinstance(d, dict) else None
                 if isinstance(mentions, list) and any(
                     isinstance(mention, dict) and mention.get("is_you")
                     for mention in mentions
                 ):
-                    asyncio.create_task(self._handle_message_safe(d, "group"))
+                    task = asyncio.create_task(self._handle_message_safe(d, "group"))
+                    self._message_tasks.add(task)
+                    task.add_done_callback(self._message_tasks.discard)
             elif event_type == "GROUP_AT_MESSAGE_CREATE":
-                asyncio.create_task(self._handle_message_safe(d, "group"))
+                task = asyncio.create_task(self._handle_message_safe(d, "group"))
+                self._message_tasks.add(task)
+                task.add_done_callback(self._message_tasks.discard)
             elif event_type == "INTERACTION_CREATE":
-                asyncio.create_task(self._handle_interaction(d))
+                task = asyncio.create_task(self._handle_interaction(d))
+                self._message_tasks.add(task)
+                task.add_done_callback(self._message_tasks.discard)
             else:
                 logger.debug("qq: unhandled dispatch %s", event_type)
             return
@@ -862,7 +881,9 @@ class QqAdapter:
             async with self._chat_locks[chat_id]:
                 command_name, command_args = command
                 if command_name == "new":
-                    self._runtimes.pop(chat_id, None)
+                    old_runtime = self._runtimes.pop(chat_id, None)
+                    if old_runtime is not None:
+                        await asyncio.to_thread(old_runtime.close)
                     self.get_or_create_runtime(chat_id)
                     await self.send_text(chat_id, "已开启新对话。", message_id)
                     return

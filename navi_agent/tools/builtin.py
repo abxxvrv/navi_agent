@@ -4,15 +4,14 @@ import difflib
 import json
 import os
 import platform
-import signal
 import shutil
 import subprocess
-import threading
-import time
 import re
 
 from ..model.router import ModelRouter
 from ..runtime.interrupt import is_interrupted
+from ..runtime.task_manager import TaskManager
+from ..runtime.tool_context import CURRENT_TOOL_CONTEXT
 from ..storage.safe_file import atomic_write_text, file_lock, file_version
 from ..storage.version_tracker import VersionTracker
 
@@ -582,6 +581,7 @@ class RunCommandTool:
         max_output_chars: int = 50_000,
         on_output=None,
         shell: str = "bash",
+        task_manager: TaskManager | None = None,
     ):
         self.workspace = Path(workspace).resolve()
         self.default_timeout = default_timeout
@@ -589,6 +589,7 @@ class RunCommandTool:
         self.max_output_chars = max_output_chars
         self.on_output = on_output
         self.shell = shell
+        self.task_manager = task_manager
         if shell == "powershell":
             self.shell_path = shutil.which("pwsh") or shutil.which("powershell")
         elif platform.system() == "Linux":
@@ -605,6 +606,7 @@ class RunCommandTool:
         cwd: str = ".",
         timeout_seconds: int | None = None,
         encoding: str = "utf-8",
+        background: bool = False,
     ) -> dict[str, Any]:
         try:
             if not isinstance(command, str) or not command.strip():
@@ -638,130 +640,15 @@ class RunCommandTool:
                     "command": command,
                 }
 
-            # 2. 检查 timeout
-            if timeout_seconds is None:
-                timeout_seconds = self.default_timeout
-
-            if timeout_seconds < 1:
-                return {
-                    "ok": False,
-                    "error": "timeout_seconds 必须大于等于 1。",
-                    "command": command,
-                }
-
-            if timeout_seconds > self.max_timeout:
-                timeout_seconds = self.max_timeout
-
-            # 3. 执行命令
-            if self.shell_path is None:
-                shell_label = "PowerShell" if self.shell == "powershell" else "Git Bash bash.exe"
-                return {
-                    "ok": False,
-                    "error": f"未找到 {shell_label}。",
-                    "command": command,
-                    "cwd": str(target_cwd),
-                    "shell": self.shell,
-                }
-
-            popen_kwargs = dict(
-                cwd=str(target_cwd),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
+            if self.task_manager is None:
+                self.task_manager = TaskManager(max_output_chars=self.max_output_chars)
+            return self._run_managed(
+                command=command,
+                cwd=target_cwd,
+                timeout_seconds=timeout_seconds,
+                encoding=encoding,
+                background=background,
             )
-            if platform.system() == "Windows":
-                popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-            else:
-                popen_kwargs["start_new_session"] = True
-
-            if self.shell == "powershell":
-                # 强制 PowerShell 以 UTF-8 输出，否则在非 UTF-8 代码页（如中文 Windows 的 cp936）
-                # 下输出会被按 utf-8 解码成乱码。
-                command = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; " + command
-                argv = [
-                    self.shell_path,
-                    "-NoLogo",
-                    "-NoProfile",
-                    "-NonInteractive",
-                    "-ExecutionPolicy",
-                    "Bypass",
-                    "-Command",
-                    command,
-                ]
-            else:
-                argv = [self.shell_path, "-lc", command]
-
-            proc = subprocess.Popen(argv, **popen_kwargs)
-
-            timed_out = False
-            interrupted = False
-            output_parts: list[str] = []
-
-            def _reader():
-                displayed_chars = 0
-                cli_truncated = False
-                for line in proc.stdout:
-                    text = line.decode(encoding, errors="replace")
-                    output_parts.append(text)
-                    if self.on_output and not cli_truncated:
-                        if displayed_chars + len(text) <= 2000:
-                            self.on_output(text, end="", markup=False)
-                            displayed_chars += len(text)
-                        else:
-                            remaining = 2000 - displayed_chars
-                            if remaining > 0:
-                                self.on_output(text[:remaining], end="", markup=False)
-                            self.on_output("\n... (output truncated)", end="", markup=False)
-                            cli_truncated = True
-                proc.stdout.close()
-
-            reader = threading.Thread(target=_reader)
-            reader.daemon = True
-            reader.start()
-
-            deadline = time.monotonic() + timeout_seconds
-            while proc.poll() is None:
-                if is_interrupted():
-                    interrupted = True
-                    self._kill_process_tree(proc)
-                    break
-                if time.monotonic() >= deadline:
-                    timed_out = True
-                    self._kill_process_tree(proc)
-                    break
-                time.sleep(0.05)
-
-            reader.join(timeout=3)
-            output, output_truncated = self._truncate_output("".join(output_parts))
-
-            if interrupted:
-                return {
-                    "ok": False,
-                    "exit_code": None,
-                    "output": output,
-                    "output_truncated": output_truncated,
-                    "error": "命令执行已中断。",
-                    "interrupted": True,
-                    "shell": self.shell,
-                }
-
-            if timed_out:
-                return {
-                    "ok": False,
-                    "exit_code": None,
-                    "output": output,
-                    "output_truncated": output_truncated,
-                    "error": "命令执行超时。",
-                    "shell": self.shell,
-                }
-
-            return {
-                "ok": proc.returncode == 0,
-                "exit_code": proc.returncode,
-                "output": output,
-                "output_truncated": output_truncated,
-                "shell": self.shell,
-            }
 
         except Exception as e:
             return {
@@ -769,23 +656,83 @@ class RunCommandTool:
                 "error": str(e),
             }
 
-    def _kill_process_tree(self, proc: subprocess.Popen) -> None:
-        """杀掉 proc 及其所有子进程。"""
-        if platform.system() == "Windows":
-            try:
-                subprocess.run(
-                    ["taskkill", "/T", "/F", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                )
-            except Exception:
-                proc.kill()
+    def _run_managed(
+        self,
+        *,
+        command: str,
+        cwd: Path,
+        timeout_seconds: int | None,
+        encoding: str,
+        background: bool,
+    ) -> dict[str, Any]:
+        if self.shell_path is None:
+            shell_label = "PowerShell" if self.shell == "powershell" else "Git Bash bash.exe"
+            return {
+                "ok": False,
+                "error": f"未找到 {shell_label}。",
+                "command": command,
+                "cwd": str(cwd),
+                "shell": self.shell,
+            }
+
+        if timeout_seconds is not None and timeout_seconds < 0:
+            return {"ok": False, "error": "timeout_seconds 不能小于 0。", "command": command}
+        if background:
+            resolved_timeout = min(timeout_seconds, 36_000) if timeout_seconds else None
         else:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except Exception:
-                proc.kill()
+            resolved_timeout = timeout_seconds or self.default_timeout
+            resolved_timeout = min(resolved_timeout, self.max_timeout)
+
+        displayed_chars = 0
+        cli_truncated = False
+
+        def stream_output(text: str) -> None:
+            nonlocal displayed_chars, cli_truncated
+            if self.on_output is None or cli_truncated:
+                return
+            remaining = 2000 - displayed_chars
+            if remaining > 0:
+                self.on_output(text[:remaining], end="", markup=False)
+                displayed_chars += min(len(text), remaining)
+            if len(text) > remaining:
+                self.on_output("\n... (output truncated)", end="", markup=False)
+                cli_truncated = True
+
+        context = CURRENT_TOOL_CONTEXT.get()
+        snapshot = self.task_manager.start_command(
+            command,
+            cwd,
+            shell_path=self.shell_path,
+            shell=self.shell,
+            background=background,
+            timeout_seconds=resolved_timeout,
+            encoding=encoding,
+            tool_call_id=context.tool_call_id if context is not None else None,
+            on_output=stream_output,
+            is_cancelled=(
+                context.scope.is_cancelled
+                if context is not None and context.scope is not None
+                else is_interrupted
+            ),
+        )
+        result = {
+            **snapshot,
+            "output_truncated": snapshot.get("truncated", False),
+        }
+        if background or snapshot["status"] == "running":
+            return {"ok": True, "backgrounded": True, **result}
+        if snapshot.get("interrupted"):
+            return {
+                "ok": False,
+                **result,
+                "error": "命令执行已中断。",
+                "interrupted": True,
+            }
+        if snapshot["status"] == "timed_out":
+            return {"ok": False, **result, "error": "命令执行超时。"}
+        if snapshot["status"] == "cancelled":
+            return {"ok": False, **result, "error": "命令执行已取消。"}
+        return {"ok": snapshot["status"] == "completed", **result}
 
     def _resolve_bash_path(self) -> str | None:
         env_path = os.environ.get("GIT_BASH")
@@ -858,20 +805,6 @@ class RunCommandTool:
                 return candidate
 
         return None
-
-    def _truncate_output(self, text: str) -> tuple[str, bool]:
-        if text is None:
-            return "", False
-
-        if len(text) <= self.max_output_chars:
-            return text, False
-
-        truncated_text = (
-            text[: self.max_output_chars]
-            + "\n\n... 输出已截断 ..."
-        )
-        return truncated_text, True
-
 
 
 class GlobTool:

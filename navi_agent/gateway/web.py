@@ -29,6 +29,7 @@ except ImportError:  # pragma: no cover
     aiohttp = None  # type: ignore[assignment]
     web = None  # type: ignore[assignment]
 
+from ..integrations.mcp_client import shutdown_mcp_servers
 from ..paths import get_navi_home
 from ..runtime.agent import AgentRuntime
 from ..storage.history_store import HistoryStore
@@ -252,6 +253,7 @@ class WebAdapter:
         # session_id -> AgentRuntime。构建 runtime 昂贵（含 MCP 发现），浏览器
         # 刷新/自动重连时按会话复用，与 qq.py 的 per-chat runtime 缓存同一模式。
         self._runtime_cache: dict[str, AgentRuntime] = {}
+        self._turn_tasks: set[asyncio.Task] = set()
 
     @property
     def url(self) -> str:
@@ -509,7 +511,9 @@ class WebAdapter:
                 return
             if not text and not image_paths:
                 return
-            asyncio.create_task(conn.run_turn(text, image_paths))
+            task = asyncio.create_task(conn.run_turn(text, image_paths))
+            self._turn_tasks.add(task)
+            task.add_done_callback(self._turn_tasks.discard)
         elif mtype == "approval_response":
             conn.resolve_approval(str(data.get("choice") or "reject"))
         elif mtype == "interrupt":
@@ -681,4 +685,26 @@ class WebAdapter:
         try:
             await asyncio.Event().wait()
         finally:
+            gateway_tasks = [
+                entry["task"]
+                for entry in self._gateways.values()
+                if entry.get("task") is not None
+            ]
+            for task in gateway_tasks:
+                task.cancel()
+            if gateway_tasks:
+                await asyncio.gather(*gateway_tasks, return_exceptions=True)
             await runner.cleanup()
+            for runtime in self._runtime_cache.values():
+                runtime.interrupt("Web 网关正在关闭")
+            for task in self._turn_tasks:
+                task.cancel()
+            if self._turn_tasks:
+                await asyncio.gather(*self._turn_tasks, return_exceptions=True)
+            try:
+                await asyncio.gather(*(
+                    asyncio.to_thread(runtime.close)
+                    for runtime in self._runtime_cache.values()
+                ))
+            finally:
+                shutdown_mcp_servers()

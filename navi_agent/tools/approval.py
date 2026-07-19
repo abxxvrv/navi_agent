@@ -93,6 +93,7 @@ class ApprovalManager:
     COMMAND_TOOLS = {
         "bash",
         "powershell",
+        "monitor",
     }
 
     READ_ONLY_TOOLS = {
@@ -116,6 +117,9 @@ class ApprovalManager:
         "search_session",
         "read_session",
         "agent",
+        "get_task_output",
+        "wait_tasks",
+        "scheduler_list",
     }
 
     WRITE_TOOLS = {
@@ -360,11 +364,14 @@ class ApprovalManager:
             "get_goal",
             "set_goal_budget",
             "update_goal",
+            "kill_task",
+            "scheduler_create",
+            "scheduler_delete",
         }:
             return ApprovalDecision(
                 action=ApprovalAction.ALLOW,
                 risk=RiskLevel.SAFE,
-                reason="Goal state tool, allowed internally.",
+                reason="Internal lifecycle or state tool, allowed.",
                 tool_name=tool_name,
                 tool_args=args,
                 approval_key=None,

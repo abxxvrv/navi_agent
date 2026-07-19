@@ -9,6 +9,7 @@ from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.key_binding import KeyBindings
 from rich.markup import escape
 
+from ..integrations.mcp_client import shutdown_mcp_servers
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..tools.approval_broker import ApprovalBroker
 from ..paths import get_navi_home, load_navi_dotenv
@@ -66,6 +67,9 @@ class ChatController:
         self.stream_box: StreamingBox | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.cancel_notice_printed = False
+        self.current_tool_call_id: str | None = None
+        self.pending_monitor_events: list[dict[str, Any]] = []
+        self.monitor_notification_queued = False
         self.timer: dict[str, Any] = {"start": None, "frozen": 0.0}
 
     async def run(self) -> None:
@@ -113,6 +117,9 @@ class ChatController:
             ),
             image_dir=navi_home / "images",
             on_cancel=self.handle_cancel,
+            on_background=lambda: self.runtime.task_manager.background_current(
+                self.current_tool_call_id
+            ),
             on_approval_response=self.handle_approval_response,
         )
 
@@ -123,6 +130,7 @@ class ChatController:
             on_clear=lambda: self._call_ui(self.prompt_session.clear_approval),
         )
         self.prompt_session.approval_broker = self.approval_broker
+        self.runtime.scheduler.start()
 
         restore_sigint_trace = self._install_sigint_trace()
         try:
@@ -137,12 +145,61 @@ class ChatController:
             await self.prompt_session.run_session(on_submit=self.process_message)
         finally:
             restore_sigint_trace()
+            try:
+                self.runtime.close()
+            finally:
+                shutdown_mcp_servers()
 
         sid = self.runtime.session_store.session_id
         console.print(f"[dim]To resume this session: navi --resume {sid}[/dim]")
 
     def handle_runtime_event(self, event: dict[str, Any]) -> None:
         event_type = event.get("type")
+        if event_type == "task_backgrounded":
+            task = event["task"]
+            self.output.notice(
+                f"[dim]Task {task['task_id']} moved to the background.[/dim]"
+            )
+            return
+
+        if event_type == "task_completed":
+            task = event["task"]
+            prompt = self.prompt_session
+            if prompt is not None:
+                text = (
+                    "<system-reminder>\n"
+                    f"Background {task['task_type']} {task['task_id']} finished with "
+                    f"status {task['status']} and exit code {task['exit_code']}. "
+                    "Use get_task_output if the output is needed.\n"
+                    "</system-reminder>"
+                )
+                self._call_ui(
+                    lambda: prompt._idle_queue.put_nowait(
+                        (text, [], f"task:{task['task_id']}")
+                    )
+                )
+            return
+
+        if event_type == "monitor_event":
+            self._call_ui(lambda: self._queue_monitor_event(event))
+            return
+
+        if event_type == "scheduled_prompt":
+            prompt = self.prompt_session
+            if prompt is not None:
+                text = (
+                    "<system-reminder>\n"
+                    f"Scheduled task {event['task_id']} fired ({event['human_schedule']}).\n"
+                    f"{event['prompt']}\n"
+                    "</system-reminder>"
+                )
+                self._call_ui(
+                    lambda: prompt._idle_queue.put_nowait(
+                        (text, [], f"scheduler:{event['task_id']}")
+                    )
+                )
+            return
+
         if event_type == "approval_batch_done":
             prompt = self.prompt_session
             if prompt is not None:
@@ -153,6 +210,8 @@ class ChatController:
             if self.stream_box is not None and self.stream_box.has_output:
                 self.stream_box.close_all()
             name = str(event.get("tool_name") or "tool")
+            if name in {"bash", "powershell"}:
+                self.current_tool_call_id = event.get("tool_call_id")
             detail = _format_args(event.get("tool_args") or {})
             prompt = self.prompt_session
             if prompt is not None:
@@ -165,12 +224,34 @@ class ChatController:
             prompt = self.prompt_session
             if prompt is not None:
                 self._call_ui(lambda: prompt.clear_tool_status(name))
+            if event.get("tool_call_id") == self.current_tool_call_id:
+                self.current_tool_call_id = None
             return
 
         self.output.agent_event(event, box=self.stream_box)
 
-    async def process_message(self, text: str, image_paths: list[Path] | None = None) -> None:
+    async def process_message(
+        self,
+        text: str,
+        image_paths: list[Path] | None = None,
+        origin: str = "user",
+    ) -> None:
         image_paths = image_paths or []
+        if origin == "monitor":
+            events = self.pending_monitor_events
+            self.pending_monitor_events = []
+            self.monitor_notification_queued = False
+            if not events:
+                return
+            text = (
+                "<system-reminder>\n"
+                + "\n\n".join(
+                    f"Monitor {event['task_id']} ({event['description']}) reported:\n"
+                    f"{event['output']}"
+                    for event in events
+                )
+                + "\n</system-reminder>"
+            )
         trace_paste(
             "process_message_start",
             text_summary=summarize_text(text),
@@ -179,17 +260,31 @@ class ChatController:
         prompt_session = self._prompt_session()
         stream_box = self._stream_box()
 
-        if not image_paths and text.strip() == "/model":
+        if origin == "user" and not image_paths and text.strip() == "/model":
             self.open_model_picker()
             return
 
         stripped = text.strip()
-        if not image_paths and stripped == "/paste":
+        loop_input: str | None = None
+        if origin == "user" and stripped == "/loop":
+            self.output.notice("[yellow]Usage: /loop <interval> <prompt>[/yellow]")
+            return
+        if origin == "user" and stripped.startswith("/loop "):
+            loop_input = (
+                "Create a recurring scheduled task from this request. Derive the interval as "
+                "<number><unit> (s, m, h, or d); if it is missing or ambiguous, ask the user "
+                "instead of guessing. Intervals below 60 seconds are clamped to 60 seconds. "
+                "Call scheduler_create with recurring=true and fire_immediately=true. Do NOT "
+                "execute the prompt inline; the scheduler will fire it immediately. After the "
+                "tool succeeds, confirm the cadence, 7-day expiry, and cancellation ID. Request: "
+                + stripped[len("/loop ") :].strip()
+            )
+        if origin == "user" and not image_paths and stripped == "/paste":
             if not prompt_session.attach_clipboard_image():
                 self.output.notice("[yellow]No image found in clipboard.[/yellow]")
             return
 
-        if not image_paths and stripped.startswith("/image "):
+        if origin == "user" and not image_paths and stripped.startswith("/image "):
             path_text = stripped[len("/image "):].strip().strip('"')
             image_path = Path(path_text)
             if path_text and not image_path.is_absolute():
@@ -200,7 +295,11 @@ class ChatController:
 
         goal_runner = runtime.goal_runner
         goal_input: str | None = None
-        goal_command = parse_goal_command(stripped) if not image_paths else None
+        goal_command = (
+            parse_goal_command(stripped)
+            if origin == "user" and not image_paths
+            else None
+        )
         if goal_command is not None:
             action, argument = goal_command
             command_result = goal_runner.apply_command(action, argument)
@@ -215,16 +314,23 @@ class ChatController:
                 f"[green]{escape(str(command_result['message']))}[/green]"
             )
 
-        if goal_command is None and not image_paths and self.handle_slash_command(
-            command=text,
-            runtime=runtime,
-            workspace=self.workspace,
-            printer=self.output.raw,
+        if (
+            origin == "user"
+            and goal_command is None
+            and not image_paths
+            and self.handle_slash_command(
+                command=text,
+                runtime=runtime,
+                workspace=self.workspace,
+                printer=self.output.raw,
+            )
         ):
             return
 
         display_text = text
-        runtime_text = goal_input or expand_paste_references(text)
+        runtime_text = goal_input or loop_input or (
+            expand_paste_references(text) if origin == "user" else text
+        )
         if runtime_text != display_text:
             trace_paste("paste_reference_expanded", text_summary=summarize_text(display_text))
 
@@ -233,7 +339,10 @@ class ChatController:
             runtime.reviewer.pending_message = None
             self.output.notice(f"[dim]💾 {msg}[/dim]")
 
-        self.output.user_message(display_text, image_paths)
+        if origin == "user":
+            self.output.user_message(display_text, image_paths)
+        else:
+            self.output.notice(f"[dim]Running {escape(origin)} notification...[/dim]")
 
         import time as _time
 
@@ -264,7 +373,9 @@ class ChatController:
 
         def runner() -> dict[str, Any]:
             try:
-                return goal_runner.drive(runtime_text, image_paths=image_paths)
+                if origin == "user":
+                    return goal_runner.drive(runtime_text, image_paths=image_paths)
+                return runtime.run_turn(runtime_text)
             except KeyboardInterrupt:
                 return {
                     "ok": False,
@@ -273,7 +384,11 @@ class ChatController:
                     "content": "",
                 }
 
-        result = await asyncio.get_running_loop().run_in_executor(None, runner)
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(None, runner)
+        finally:
+            if origin.startswith("scheduler:"):
+                runtime.scheduler.complete(origin.split(":", 1)[1])
 
         if self.timer["start"] is not None:
             self.timer["frozen"] = max(0.0, _time.time() - self.timer["start"])
@@ -368,6 +483,18 @@ class ChatController:
             callback()
             return
         self.loop.call_soon_threadsafe(callback)
+
+    def _queue_monitor_event(self, event: dict[str, Any]) -> None:
+        prompt = self.prompt_session
+        if prompt is None:
+            return
+        self.pending_monitor_events.append(event)
+        if len(self.pending_monitor_events) > 50:
+            del self.pending_monitor_events[:-50]
+        if self.monitor_notification_queued:
+            return
+        self.monitor_notification_queued = True
+        prompt._idle_queue.put_nowait(("", [], "monitor"))
 
     def _runtime(self) -> AgentRuntime:
         if self.runtime is None:

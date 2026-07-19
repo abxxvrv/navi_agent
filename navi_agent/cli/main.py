@@ -18,6 +18,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+from ..integrations.mcp_client import shutdown_mcp_servers
 from ..tools.approval import ApprovalDecision, UserApprovalChoice
 from ..storage.history_store import HistoryStore
 from ..paths import get_navi_home
@@ -48,6 +49,7 @@ SLASH_COMMANDS = [
     "/model",
     "/approval",
     "/goal",
+    "/loop",
     "/compress",
     "/fork",
     "/exit",
@@ -171,6 +173,7 @@ def print_chat_help(printer: Callable[..., None] | None = None) -> None:
             "[cyan]/mcp[/cyan]       Manage MCP servers (status/add/remove/reload/help)",
             "[cyan]/approval[/cyan]  Show approval mode and session approvals",
             "[cyan]/goal[/cyan]      Create, inspect, pause, resume, or cancel a persistent goal",
+            "[cyan]/loop[/cyan]      Run a prompt on a recurring interval",
             "[cyan]/compress[/cyan]  Compress context into a new session",
             "[cyan]/fork[/cyan]     Fork session into a new window",
             "[cyan]/exit[/cyan]      Exit Navi",
@@ -1303,7 +1306,13 @@ def run(
         )
     )
 
-    result = run_with_stream_view(runtime, lambda: runtime.run_task(task))
+    try:
+        result = run_with_stream_view(runtime, lambda: runtime.run_task(task))
+    finally:
+        try:
+            runtime.close()
+        finally:
+            shutdown_mcp_servers()
 
     if result_is_ok(result):
         raise typer.Exit(code=0)
@@ -1348,7 +1357,13 @@ def tools(
         max_steps=DEFAULT_MAX_STEPS,
     )
 
-    tools_list = list_runtime_tools(runtime)
+    try:
+        tools_list = list_runtime_tools(runtime)
+    finally:
+        try:
+            runtime.close()
+        finally:
+            shutdown_mcp_servers()
 
     if not tools_list:
         console.print("[yellow]No tools found.[/yellow]")
@@ -1509,9 +1524,12 @@ def weixin_start(
         )
 
     try:
-        asyncio.run(adapter.run())
-    except KeyboardInterrupt:
-        console.print("\n[dim]gateway stopped.[/dim]")
+        try:
+            asyncio.run(adapter.run())
+        except KeyboardInterrupt:
+            console.print("\n[dim]gateway stopped.[/dim]")
+    finally:
+        shutdown_mcp_servers()
 
 
 @weixin_app.command("allow")
@@ -1741,9 +1759,12 @@ def qq_start(
         )
 
     try:
-        asyncio.run(adapter.run())
-    except KeyboardInterrupt:
-        console.print("\n[dim]gateway stopped.[/dim]")
+        try:
+            asyncio.run(adapter.run())
+        except KeyboardInterrupt:
+            console.print("\n[dim]gateway stopped.[/dim]")
+    finally:
+        shutdown_mcp_servers()
 
 
 @qq_app.command("allow")
