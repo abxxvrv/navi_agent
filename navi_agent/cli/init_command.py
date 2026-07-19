@@ -186,7 +186,7 @@ def run_init() -> None:
     config_path = get_config_path()
     console.print(f"Navi home: [bold]{navi_home}[/bold]")
 
-    for name in ("skills", "memories", "agents", "logs"):
+    for name in ("skills", "memories", "agents", "logs", "plugins", "plugin-data"):
         (navi_home / name).mkdir(parents=True, exist_ok=True)
 
     template_root = files("navi_agent").joinpath("templates")
@@ -234,6 +234,7 @@ def run_init() -> None:
     }
     config["providers"] = providers
     config.setdefault("mcp_servers", {})
+    config.setdefault("plugins", {"paths": [], "enabled": [], "disabled": []})
 
     config_path.write_text(json.dumps(config, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     console.print("[green]Navi initialized.[/green]")

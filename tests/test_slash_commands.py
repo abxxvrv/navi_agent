@@ -67,6 +67,8 @@ def test_loop_is_listed_in_completion_and_help() -> None:
 
     assert "/loop" in main.SLASH_COMMANDS
     assert "/loop" in output.getvalue()
+    assert "/plugins" in main.SLASH_COMMANDS
+    assert "/plugins" in output.getvalue()
 
 
 def test_loop_with_arguments_reaches_the_agent() -> None:
@@ -101,12 +103,45 @@ def test_handle_slash_command_handles_mcp_with_tab_separator(monkeypatch) -> Non
     monkeypatch.setattr(
         mcp_commands,
         "handle_mcp_command",
-        lambda args, tool_registry: calls.append((args, tool_registry)) or "ok",
+        lambda args, runtime: calls.append((args, runtime)) or "ok",
     )
 
     runtime = _runtime_stub()
     assert main.handle_slash_command("/mcp\tstatus", runtime, Path(".")) is True
-    assert calls == [("status", runtime.tool_registry)]
+    assert calls == [("status", runtime)]
+
+
+def test_mcp_add_and_remove_refresh_runtime_config(monkeypatch, tmp_path) -> None:
+    runtime = SimpleNamespace(
+        tool_registry=object(),
+        plugin_mcp_servers={"plugin": {"command": "plugin"}},
+        mcp_servers={},
+    )
+    monkeypatch.setattr(mcp_commands, "_mcp_add", lambda args: f"added {args}")
+    monkeypatch.setattr(
+        mcp_commands,
+        "_mcp_remove",
+        lambda args, registry: f"removed {args}",
+    )
+    monkeypatch.setattr(mcp_commands, "_get_config_path", lambda: tmp_path / "config.json")
+    monkeypatch.setattr(
+        mcp_commands,
+        "_load_config_file",
+        lambda path: {"mcp_servers": {"global": {"command": "global"}}},
+    )
+
+    assert mcp_commands.handle_mcp_command("add global", runtime) == "added global"
+    assert runtime.mcp_servers == {
+        "global": {"command": "global"},
+        "plugin": {"command": "plugin"},
+    }
+
+    runtime.mcp_servers = {}
+    assert mcp_commands.handle_mcp_command("remove global", runtime) == "removed global"
+    assert runtime.mcp_servers == {
+        "global": {"command": "global"},
+        "plugin": {"command": "plugin"},
+    }
 
 
 def test_handle_slash_command_uses_custom_printer(monkeypatch) -> None:

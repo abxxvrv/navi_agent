@@ -43,6 +43,8 @@ def _runtime(tmp_path):
     runtime._channel = "cli"
     runtime.on_output = None
     runtime._pending_attachments = []
+    runtime.plugin_skills = {}
+    runtime.plugin_agents = {}
     runtime.task_manager = TaskManager(Path(tmp_path) / "tasks")
     runtime.monitor = Monitor(runtime.task_manager, lambda _event: None)
     runtime.scheduler = Scheduler(

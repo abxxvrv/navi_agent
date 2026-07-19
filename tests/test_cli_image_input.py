@@ -167,7 +167,7 @@ def test_image_slash_command_attaches_path(tmp_path):
     assert attached == [image]
 
 
-def test_process_message_prints_submitted_preview_once_and_expands_loop(tmp_path):
+def test_process_message_expands_loop_and_plugin_commands(tmp_path):
     controller = ChatController.__new__(ChatController)
     calls = []
 
@@ -196,6 +196,12 @@ def test_process_message_prints_submitted_preview_once_and_expands_loop(tmp_path
 
     class Runtime:
         reviewer = SimpleNamespace(pending_message=None)
+        session_store = SimpleNamespace(session_id="session-1")
+        plugin_commands = {
+            "bundle:ship": "session=${SESSION_ID} first=$0 second=$ARGUMENTS[1] all=$ARGUMENTS",
+            "bundle:plain": "Deploy",
+            "bundle:price": "Price: $100",
+        }
 
         def __init__(self):
             self.inputs = []
@@ -225,3 +231,14 @@ def test_process_message_prints_submitted_preview_once_and_expands_loop(tmp_path
     assert "Do NOT execute the prompt inline" in controller.runtime.inputs[0]
     assert "instead of guessing" in controller.runtime.inputs[0]
     assert "every 5 minutes check deploy" in controller.runtime.inputs[0]
+
+    asyncio.run(controller.process_message("/bundle:ship alpha beta"))
+    assert controller.runtime.inputs[1] == (
+        "session=session-1 first=alpha second=beta all=alpha beta"
+    )
+
+    asyncio.run(controller.process_message("/bundle:plain staging"))
+    assert controller.runtime.inputs[2] == "Deploy\n\n**ARGUMENTS:** staging"
+
+    asyncio.run(controller.process_message("/bundle:price deploy staging"))
+    assert controller.runtime.inputs[3] == "Price: $100\n\n**ARGUMENTS:** deploy staging"

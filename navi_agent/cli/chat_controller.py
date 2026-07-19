@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ class ChatController:
         no_splash: bool,
         approval_mode: str,
         resume_session_id: str | None,
+        plugin_dirs: list[Path] | None,
         slash_commands: list[str],
         print_live: Callable[..., None],
         print_splash: Callable[[Path, str, str, str | None], None],
@@ -51,6 +53,7 @@ class ChatController:
         self.no_splash = no_splash
         self.approval_mode = approval_mode
         self.resume_session_id = resume_session_id
+        self.plugin_dirs = plugin_dirs
         self.slash_commands = slash_commands
         self.output = TerminalOutput(print_live, print_agent_event)
         self.print_splash = print_splash
@@ -98,12 +101,18 @@ class ChatController:
             approval_handler=approval_handler,
             resume_session_id=self.resume_session_id,
             on_output=self.output.raw,
+            plugin_dirs=self.plugin_dirs,
         )
 
         navi_home = get_navi_home()
         slash_commands = list(self.slash_commands)
         if "/goal" not in slash_commands:
             slash_commands.append("/goal")
+        slash_commands.extend(
+            f"/{name}"
+            for name in sorted(self.runtime.plugin_commands)
+            if f"/{name}" not in slash_commands
+        )
         self.prompt_session = NaviPromptSession(
             history_path=navi_home / "chat_history.txt",
             completer=WordCompleter(
@@ -274,6 +283,7 @@ class ChatController:
 
         stripped = text.strip()
         loop_input: str | None = None
+        plugin_input: str | None = None
         if origin == "user" and stripped == "/loop":
             self.output.notice("[yellow]Usage: /loop <interval> <prompt>[/yellow]")
             return
@@ -301,6 +311,41 @@ class ChatController:
                 self.output.notice(f"[yellow]Cannot attach image: {path_text or '<empty>'}[/yellow]")
             return
 
+        if origin == "user" and not image_paths and stripped.startswith("/"):
+            parts = stripped.split(maxsplit=1)
+            command_body = runtime.plugin_commands.get(parts[0][1:])
+            if command_body is not None:
+                command_body = command_body.replace(
+                    "${SESSION_ID}", runtime.session_store.session_id
+                ).replace("${CLAUDE_SESSION_ID}", runtime.session_store.session_id)
+                arguments = parts[1] if len(parts) > 1 else ""
+                argv = arguments.split()
+                plugin_input = command_body
+                arguments_substituted = False
+                max_index = max(len(argv), 1)
+                for index in range(max_index + 19, -1, -1):
+                    token = f"$ARGUMENTS[{index}]"
+                    if token in plugin_input:
+                        plugin_input = plugin_input.replace(
+                            token,
+                            argv[index] if index < len(argv) else "",
+                        )
+                        arguments_substituted = True
+                for index in range(max_index + 19, -1, -1):
+                    token = f"${index}"
+                    if re.search(rf"{re.escape(token)}(?!\d)", plugin_input):
+                        plugin_input = re.sub(
+                            rf"{re.escape(token)}(?!\d)",
+                            argv[index] if index < len(argv) else "",
+                            plugin_input,
+                        )
+                        arguments_substituted = True
+                if "$ARGUMENTS" in plugin_input:
+                    plugin_input = plugin_input.replace("$ARGUMENTS", arguments)
+                    arguments_substituted = True
+                if arguments and not arguments_substituted:
+                    plugin_input += f"\n\n**ARGUMENTS:** {arguments}"
+
         goal_runner = runtime.goal_runner
         goal_input: str | None = None
         goal_command = (
@@ -325,6 +370,7 @@ class ChatController:
         if (
             origin == "user"
             and goal_command is None
+            and plugin_input is None
             and not image_paths
             and self.handle_slash_command(
                 command=text,
@@ -336,8 +382,16 @@ class ChatController:
             return
 
         display_text = text
-        runtime_text = goal_input or loop_input or (
-            expand_paste_references(text) if origin == "user" else text
+        runtime_text = (
+            goal_input
+            if goal_input is not None
+            else loop_input
+            if loop_input is not None
+            else plugin_input
+            if plugin_input is not None
+            else expand_paste_references(text)
+            if origin == "user"
+            else text
         )
         if runtime_text != display_text:
             trace_paste("paste_reference_expanded", text_summary=summarize_text(display_text))

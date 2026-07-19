@@ -17,12 +17,12 @@ from typing import Optional
 logger = logging.getLogger(__name__)
 
 
-def handle_mcp_command(args: str, registry, console=None) -> str:
+def handle_mcp_command(args: str, runtime, console=None) -> str:
     """分发 /mcp 子命令。
 
     Args:
         args: 命令参数字符串
-        registry: ToolRegistry 实例
+        runtime: AgentRuntime 实例
         console: Rich Console 实例（可选）
 
     Returns:
@@ -30,21 +30,33 @@ def handle_mcp_command(args: str, registry, console=None) -> str:
     """
     from .mcp_client import reload_mcp_servers
 
+    registry = runtime.tool_registry
+
     parts = args.strip().split(None, 1)
     subcommand = parts[0].lower() if parts else "status"
     subargs = parts[1] if len(parts) > 1 else ""
 
     if subcommand in ("list", "status"):
-        return _mcp_status()
+        return _mcp_status(runtime.mcp_servers)
 
-    elif subcommand == "add":
-        return _mcp_add(subargs)
-
-    elif subcommand in ("remove", "rm"):
-        return _mcp_remove(subargs, registry)
+    elif subcommand in ("add", "remove", "rm"):
+        result = (
+            _mcp_add(subargs)
+            if subcommand == "add"
+            else _mcp_remove(subargs, registry)
+        )
+        config = _load_config_file(_get_config_path())
+        runtime.mcp_servers = dict(config.get("mcp_servers", {}))
+        for name, server in runtime.plugin_mcp_servers.items():
+            runtime.mcp_servers.setdefault(name, server)
+        return result
 
     elif subcommand == "reload":
-        return reload_mcp_servers(registry)
+        config = _load_config_file(_get_config_path())
+        runtime.mcp_servers = dict(config.get("mcp_servers", {}))
+        for name, server in runtime.plugin_mcp_servers.items():
+            runtime.mcp_servers.setdefault(name, server)
+        return reload_mcp_servers(registry, runtime.mcp_servers)
 
     elif subcommand == "help":
         return _mcp_help()
@@ -68,14 +80,14 @@ Config file: ~/.navi/config.json (mcp_servers section)
 """
 
 
-def _mcp_status() -> str:
+def _mcp_status(configured: dict | None = None) -> str:
     """显示 MCP 服务器状态。"""
     from .mcp_client import get_mcp_status, _MCP_AVAILABLE
 
     if not _MCP_AVAILABLE:
         return "MCP SDK not installed. Install with: pip install mcp"
 
-    status_list = get_mcp_status()
+    status_list = get_mcp_status(configured)
     if not status_list:
         return "No MCP servers configured. Use /mcp add to add one."
 

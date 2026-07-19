@@ -31,6 +31,7 @@ from .tool_context import CURRENT_TOOL_CONTEXT, ToolExecutionContext
 from ..model.request import ModelStreamRunner
 from ..model.router import ModelRouter
 from ..paths import get_config_path, get_navi_home
+from ..plugins import discover_plugins
 from .interrupt import set_interrupt, is_interrupted
 from ..tools.builtin import (
     GlobTool,
@@ -116,6 +117,7 @@ class AgentRuntime:
         on_output=None,
         channel: str = "cli",
         enable_goal_mode: bool = True,
+        plugin_dirs: list[Path] | None = None,
     ):
         load_navi_dotenv()
 
@@ -169,6 +171,48 @@ class AgentRuntime:
             )
             self.conversation_history = []
 
+        self.plugins = discover_plugins(
+            self.workspace,
+            self.navi_home,
+            _config,
+            plugin_dirs,
+        )
+        self.plugin_skills: dict[str, dict[str, Any]] = {}
+        self.plugin_commands: dict[str, str] = {}
+        self.plugin_agents: dict[str, dict[str, Any]] = {}
+        self.plugin_mcp_servers: dict[str, Any] = {}
+        self.plugin_lsp_servers: dict[str, Any] = {}
+        self.plugin_hooks: list[dict[str, Any]] = []
+        for plugin in self.plugins:
+            if not plugin["enabled"]:
+                continue
+            for name, skill in plugin["skills"].items():
+                self.plugin_skills.setdefault(
+                    f"{plugin['name']}:{name}",
+                    skill,
+                )
+            for name, command in plugin["commands"].items():
+                self.plugin_commands.setdefault(f"{plugin['name']}:{name}", command)
+            for name, agent in plugin["agents"].items():
+                self.plugin_agents.setdefault(f"{plugin['name']}:{name}", agent)
+            if plugin["trusted"]:
+                for name, server in plugin["mcp_servers"].items():
+                    self.plugin_mcp_servers.setdefault(name, server)
+                for name, server in plugin["lsp_servers"].items():
+                    self.plugin_lsp_servers.setdefault(name, server)
+                if plugin["hooks"] is not None:
+                    self.plugin_hooks.append(
+                        {
+                            "config": plugin["hooks"],
+                            "base": plugin["hooks_base"],
+                            "plugin": plugin["name"],
+                        }
+                    )
+
+        self.mcp_servers = dict(_config.get("mcp_servers", {}))
+        for name, server in self.plugin_mcp_servers.items():
+            self.mcp_servers.setdefault(name, server)
+
         self.tool_registry = ToolRegistry()
         self.memory_store = MemoryStore()
         self.context_manager = ContextManager(
@@ -176,6 +220,7 @@ class AgentRuntime:
             skills_path=str(self.navi_home / "skills"),
             navi_home=str(self.navi_home),
             memory_store=self.memory_store,
+            plugin_skills=self.plugin_skills,
         )
 
         self.router = ModelRouter(_config_path, provider=_provider, model=_model)
@@ -1566,6 +1611,8 @@ class AgentRuntime:
             function=SkillViewTool(
                 workspace=workspace,
                 skills_path=str(self.navi_home / "skills"),
+                plugin_skills=self.plugin_skills,
+                session_id=self.session_store.session_id,
             ),
         )
 
@@ -2147,7 +2194,12 @@ class AgentRuntime:
                 "properties": {
                     "subagent_type": {
                         "type": "string",
-                        "enum": ["general-purpose", "explore", "plan"],
+                        "enum": [
+                            "general-purpose",
+                            "explore",
+                            "plan",
+                            *sorted(self.plugin_agents),
+                        ],
                         "default": "general-purpose",
                     },
                     "prompt": {
@@ -2243,7 +2295,49 @@ class AgentRuntime:
 
         if subagent_type == "general":
             subagent_type = "general-purpose"
-        if subagent_type == "explore":
+        plugin_agent = self.plugin_agents.get(subagent_type)
+        if plugin_agent is not None:
+            tool_names = [
+                name
+                for name in self.tool_registry._tools
+                if name != "agent" and name not in GOAL_TOOL_NAMES
+            ]
+            aliases = {
+                "Bash": "bash",
+                "Read": "read_file",
+                "Write": "write_file",
+                "Edit": "patch_file",
+                "Grep": "grep",
+                "Glob": "glob",
+                "WebSearch": "web_search",
+                "WebFetch": "web_extract",
+            }
+            requested = {
+                aliases.get(str(name), str(name))
+                for name in plugin_agent["tools"]
+            }
+            if requested and "*" not in requested:
+                tool_names = [name for name in tool_names if name in requested]
+            denied = {
+                aliases.get(str(name), str(name))
+                for name in plugin_agent["disallowed_tools"]
+            }
+            tool_names = [name for name in tool_names if name not in denied]
+            if plugin_agent["prompt_mode"] == "full":
+                system_prompt = plugin_agent["prompt"]
+            else:
+                template = self.context_manager._read_text_file(
+                    self.navi_home / "subagent-general-prompt.txt",
+                    None,
+                )
+                base_prompt = self.context_manager._render_system_prompt_template(
+                    template,
+                    agents_md=self.context_manager.load_agents_md(),
+                    skills_prompt=self.context_manager.build_skill_index_prompt(),
+                ) if template else self._system_prompt
+                system_prompt = f"{base_prompt}\n\n{plugin_agent['prompt']}"
+            prompt_file = None
+        elif subagent_type == "explore":
             tool_names = [n for n in EXPLORE_TOOLS if n in self.tool_registry._tools]
             prompt_file = "subagent-explore-prompt.txt"
         elif subagent_type == "plan":
@@ -2261,23 +2355,24 @@ class AgentRuntime:
                 "ok": False,
                 "error": (
                     f"未知 subagent_type：{subagent_type}，"
-                    "应为 general-purpose、explore 或 plan。"
+                    "应为 general-purpose、explore、plan 或已启用的插件 agent。"
                 ),
             }
 
-        template = self.context_manager._read_text_file(self.navi_home / prompt_file, None)
-        if not template and subagent_type == "plan":
-            template = self.context_manager._read_text_file(
-                self.navi_home / "subagent-explore-prompt.txt",
-                None,
-            )
-            if template:
-                template += "\n\n只做分析，不修改文件。最终输出可直接执行的分步实施计划。"
-        system_prompt = self.context_manager._render_system_prompt_template(
-            template,
-            agents_md=self.context_manager.load_agents_md(),
-            skills_prompt=self.context_manager.build_skill_index_prompt(),
-        ) if template else self._system_prompt
+        if prompt_file is not None:
+            template = self.context_manager._read_text_file(self.navi_home / prompt_file, None)
+            if not template and subagent_type == "plan":
+                template = self.context_manager._read_text_file(
+                    self.navi_home / "subagent-explore-prompt.txt",
+                    None,
+                )
+                if template:
+                    template += "\n\n只做分析，不修改文件。最终输出可直接执行的分步实施计划。"
+            system_prompt = self.context_manager._render_system_prompt_template(
+                template,
+                agents_md=self.context_manager.load_agents_md(),
+                skills_prompt=self.context_manager.build_skill_index_prompt(),
+            ) if template else self._system_prompt
 
         source_meta = None
         if resume_from is not None:
@@ -2476,7 +2571,7 @@ class AgentRuntime:
         try:
             from ..integrations.mcp_client import discover_mcp_tools, _MCP_AVAILABLE
             if _MCP_AVAILABLE:
-                mcp_tools = discover_mcp_tools(self.tool_registry)
+                mcp_tools = discover_mcp_tools(self.tool_registry, self.mcp_servers)
                 if mcp_tools:
                     logger.info("MCP: registered %d tool(s): %s", len(mcp_tools), ", ".join(mcp_tools))
         except Exception as e:

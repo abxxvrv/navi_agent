@@ -52,6 +52,7 @@ def _make_subagent_runtime(tmp_path):
         lambda **_kwargs: {"ok": True},
     )
     runtime.context_manager = _FakeContextManager()
+    runtime.plugin_agents = {}
     runtime.navi_home = Path(tmp_path)
     runtime._system_prompt = "system"
     runtime.router = SimpleNamespace(provider="fake", model="fake", _provider=object())
@@ -444,6 +445,62 @@ def test_subagent_foreground_returns_complete_result(monkeypatch, tmp_path):
         assert result["tool_calls"] == 1
         assert result["resume_from_hint"] == result["subagent_id"]
         assert result["duration_secs"] >= 0
+    finally:
+        runtime.task_manager.shutdown()
+        runtime._current_scope.close()
+        clear_all()
+
+
+def test_plugin_subagent_uses_qualified_prompt_and_tool_filter(monkeypatch, tmp_path):
+    runtime = _make_subagent_runtime(tmp_path)
+    runtime.tool_registry.register(
+        "read_file",
+        "",
+        {"type": "object"},
+        lambda **_kwargs: {"ok": True},
+    )
+    runtime.plugin_agents["bundle:reviewer"] = {
+        "description": "Review code",
+        "prompt": "Plugin reviewer prompt",
+        "tools": ["Read", "Bash"],
+        "disallowed_tools": ["Bash"],
+        "prompt_mode": "extend",
+    }
+    captured = {}
+
+    class FakeAgent:
+        def run(self, user_input):
+            return SimpleNamespace(
+                success=True,
+                content=user_input,
+                steps=1,
+                tool_calls_made=[],
+            )
+
+    def prepare(**kwargs):
+        captured.update(kwargs)
+        return FakeAgent()
+
+    monkeypatch.setattr("navi_agent.runtime.agent.prepare_agent", prepare)
+    try:
+        result = runtime._run_subagent(
+            prompt="review this",
+            description="review",
+            subagent_type="bundle:reviewer",
+            background=False,
+        )
+        assert result["ok"] is True
+        assert captured["tool_names"] == ["read_file"]
+        assert captured["system_prompt"] == "system\n\nPlugin reviewer prompt"
+
+        runtime.plugin_agents["bundle:reviewer"]["prompt_mode"] = "full"
+        runtime._run_subagent(
+            prompt="review again",
+            description="review",
+            subagent_type="bundle:reviewer",
+            background=False,
+        )
+        assert captured["system_prompt"] == "Plugin reviewer prompt"
     finally:
         runtime.task_manager.shutdown()
         runtime._current_scope.close()
