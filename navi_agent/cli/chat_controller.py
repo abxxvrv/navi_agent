@@ -166,13 +166,21 @@ class ChatController:
             task = event["task"]
             prompt = self.prompt_session
             if prompt is not None:
-                text = (
-                    "<system-reminder>\n"
-                    f"Background {task['task_type']} {task['task_id']} finished with "
-                    f"status {task['status']} and exit code {task['exit_code']}. "
-                    "Use get_task_output if the output is needed.\n"
-                    "</system-reminder>"
-                )
+                if task["task_type"] == "subagent":
+                    text = (
+                        "<system-reminder>\n"
+                        f"Subagent {task['task_id']} ({task['description']}) finished "
+                        f"with status {task['status']}. Use get_task_output to read its result.\n"
+                        "</system-reminder>"
+                    )
+                else:
+                    text = (
+                        "<system-reminder>\n"
+                        f"Background {task['task_type']} {task['task_id']} finished with "
+                        f"status {task['status']} and exit code {task['exit_code']}. "
+                        "Use get_task_output if the output is needed.\n"
+                        "</system-reminder>"
+                    )
                 self._call_ui(
                     lambda: prompt._idle_queue.put_nowait(
                         (text, [], f"task:{task['task_id']}")

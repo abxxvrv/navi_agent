@@ -162,6 +162,17 @@ def test_background_runtime_events_enqueue_once_with_origin():
     )
     controller.handle_runtime_event(
         {
+            "type": "task_completed",
+            "task": {
+                "task_id": "agent-1",
+                "task_type": "subagent",
+                "description": "inspect code",
+                "status": "completed",
+            },
+        }
+    )
+    controller.handle_runtime_event(
+        {
             "type": "monitor_event",
             "task_id": "monitor-1",
             "description": "watch build",
@@ -177,18 +188,20 @@ def test_background_runtime_events_enqueue_once_with_origin():
         }
     )
 
-    queued = [prompt._idle_queue.get_nowait() for _ in range(3)]
+    queued = [prompt._idle_queue.get_nowait() for _ in range(4)]
     assert prompt._idle_queue.empty()
     assert [origin for _text, _images, origin in queued] == [
         "task:task-1",
+        "task:agent-1",
         "monitor",
         "scheduler:schedule-1",
     ]
     assert all(images == [] for _text, images, _origin in queued)
     assert "Background command task-1 finished" in queued[0][0]
-    assert queued[1][0] == ""
+    assert "Subagent agent-1 (inspect code) finished" in queued[1][0]
+    assert queued[2][0] == ""
     assert controller.pending_monitor_events[0]["output"] == "build passed"
-    assert "check deployment" in queued[2][0]
+    assert "check deployment" in queued[3][0]
 
 
 def test_monitor_events_share_one_bounded_queue_entry():

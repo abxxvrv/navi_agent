@@ -263,6 +263,58 @@ def test_windows_job_handle_closes_once_when_task_finishes(monkeypatch):
     assert closed == [42]
 
 
+def test_worker_uses_shared_output_wait_and_kill(tmp_path):
+    manager = TaskManager(tmp_path / "logs")
+    cancelled = threading.Event()
+
+    def run_until_cancelled():
+        cancelled.wait(timeout=2)
+        raise KeyboardInterrupt("cancelled")
+
+    try:
+        completed = manager.start_worker(
+            "a_complete",
+            "inspect code",
+            tmp_path,
+            description="inspect",
+            target=lambda: {
+                "success": True,
+                "content": "done",
+                "subagent_type": "explore",
+                "steps": 2,
+                "tool_calls": 3,
+            },
+            cancel=lambda _reason: None,
+            background=True,
+        )
+        running = manager.start_worker(
+            "a_running",
+            "run tests",
+            tmp_path,
+            description="tests",
+            target=run_until_cancelled,
+            cancel=lambda _reason: cancelled.set(),
+            background=True,
+        )
+
+        snapshots = manager.wait_tasks(
+            [completed["task_id"]],
+            timeout_ms=2000,
+        )
+        killed = manager.kill(running["task_id"])
+        stopped = manager.get_output([running["task_id"]], timeout_ms=2000)[0]
+
+        assert snapshots[0]["status"] == "completed"
+        assert snapshots[0]["output"] == "done"
+        assert snapshots[0]["subagent_type"] == "explore"
+        assert snapshots[0]["steps"] == 2
+        assert snapshots[0]["tool_calls"] == 3
+        assert killed["outcome"] == "killed"
+        assert stopped["status"] == "cancelled"
+    finally:
+        manager.shutdown()
+
+
 def test_foreground_command_can_move_to_background(tmp_path):
     manager = TaskManager(tmp_path / "logs")
     result: dict[str, dict] = {}

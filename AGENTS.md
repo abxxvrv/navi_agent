@@ -70,13 +70,14 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `navi_agent/runtime/agent.py`: agent 主执行逻辑，负责模型调用、工具调度、审批检查、历史写入；每轮通过 `TurnScope` 管理中断状态。
 - `navi_agent/runtime/interrupt_scope.py`: 一轮对话的中断作用域，集中管理 `cancel_event`、执行线程、工具 worker、模型 aborter、审批 canceller。
 - `navi_agent/runtime/interruptible.py`: 阻塞操作的统一入口，当前包含 `run_model_stream()`、`wait_approval()`、`tool_worker()`。
+- `navi_agent/runtime/task_manager.py`: 统一管理后台命令、monitor 和子 agent 的状态、输出、等待、转后台、取消与完成事件。
 - `navi_agent/model/request.py`: 模型流式请求 worker。runtime 控制线程轮询 chunk 和 cancel，必要时 abort 当前请求。
 - `navi_agent/model/router.py`: 模型 provider/router。普通调用保留共享 client，交互中断路径使用 request-local client。
 - `navi_agent/tools/builtin.py`: 内置工具实现；`RunCommandTool` 支撑对外的 `bash` / `powershell` 命令工具，并需要能在中断时杀掉 subprocess；`SearchSessionTool` 支持 DISCOVERY/SCROLL/BROWSE 三种模式。
 - `navi_agent/tools/registry.py`: 工具注册表。
 - `navi_agent/storage/history_store.py`: SQLite 会话历史存储。FTS5 全文搜索（unicode61 + trigram 双表，触发器自动同步）。关键方法：`search_messages()`、`get_messages_around()`、`get_anchored_view()`（window + bookends）、`get_session()`、`list_sessions_rich()`。
 - `navi_agent/storage/memory_store.py`: 长期记忆存储，管理全局 MEMORY/USER。项目记忆是工作区 `.navi/memories/` 下的单条 .md 文件（frontmatter 含 name/description），由 `context_manager.build_project_memory_prompt()` 扫描生成 `PROJECT_memory.md` 索引注入系统提示词，模型按系统提示词里的项目记忆规范用 write/patch 直接读写。
-- `navi_agent/storage/agent_store.py`: 子 agent 实例存储。
+- `navi_agent/storage/agent_store.py`: 子 agent 实例存储，保存元信息和 transcript，供同一父会话内恢复。
 - `navi_agent/context/context_manager.py`: 运行上下文组装。
 - `navi_agent/context/compressor.py`: 上下文压缩。
 - `navi_agent/integrations/mcp_client.py` / `navi_agent/integrations/mcp_commands.py`: MCP 集成。
@@ -95,6 +96,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 中断保存历史的原则：本轮 user 会写入会话；未完成的 assistant 文本不落库；已写入的 assistant tool_calls 必须补齐中断 tool message，避免 resume 时历史结构坏掉。
 - 优先模仿 Hermes 的中断思路：设置 cancel 标记、设置线程级 cooperative interrupt、abort 当前请求/进程，让执行层自行抛出并清理，不强杀 Python 线程。
 - 会话搜索（`SearchSessionTool`）三种模式复刻 Hermes：DISCOVERY（FTS5 搜索 + lineage 去重 + bookends）、SCROLL（锚定消息窗口）、BROWSE（最近会话列表）。`parent_session_id` 链用于压缩会话的 lineage 归并。搜索结果自动跳过当前活跃会话。
+- 子 agent 默认后台运行并进入 `TaskManager`；前台等待超时后无损转后台，后台不随父 turn 结束，前台随父 scope 取消。查询、等待和终止复用通用任务工具。
 
 ## 7. 未完成任务
 

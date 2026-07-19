@@ -79,6 +79,17 @@ def test_register_tools_renames_run_command_to_bash(monkeypatch, tmp_path):
     }.issubset(runtime.tool_registry._tools)
     create_parameters = runtime.tool_registry._tools["create_goal"].parameters
     assert "replace" not in create_parameters["properties"]
+    agent_parameters = runtime.tool_registry._tools["agent"].parameters
+    assert agent_parameters["required"] == ["prompt", "description"]
+    assert agent_parameters["properties"]["background"]["default"] is True
+    assert agent_parameters["properties"]["subagent_type"]["enum"] == [
+        "general-purpose",
+        "explore",
+        "plan",
+    ]
+    assert "resume_from" in agent_parameters["properties"]
+    assert "action" not in agent_parameters["properties"]
+    assert "actor_id" not in agent_parameters["properties"]
 
 
 def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path):
