@@ -168,6 +168,10 @@ def test_grok_uses_openai_compatible_provider():
     assert PROVIDER_CLASSES["grok"] is OpenAICompatibleProvider
 
 
+def test_openai_uses_openai_compatible_provider():
+    assert PROVIDER_CLASSES["openai"] is OpenAICompatibleProvider
+
+
 def test_runtime_rejects_model_switch_while_turn_is_running(tmp_path, monkeypatch):
     started = threading.Event()
     release = threading.Event()
