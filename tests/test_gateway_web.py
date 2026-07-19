@@ -596,6 +596,31 @@ def test_keyboard_interrupt_becomes_turn_end():
     asyncio.run(scenario())
 
 
+def test_file_endpoint_serves_workspace_images_only(tmp_path):
+    (tmp_path / "pic.png").write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    (tmp_path / "doc.txt").write_text("not an image")
+    adapter = WebAdapter(workspace=tmp_path, token=TOKEN)
+
+    async def scenario():
+        client = TestClient(TestServer(adapter.build_app()))
+        await client.start_server()
+        try:
+            # 无 token 拒绝
+            assert (await client.get("/api/file?path=pic.png")).status == 403
+            # 工作区内图片可访问
+            resp = await client.get(f"/api/file?token={TOKEN}&path=pic.png")
+            assert resp.status == 200
+            assert (await resp.read()) == b"\x89PNG\r\n\x1a\nfake"
+            # 非图片后缀、越界路径、不存在文件均不可取
+            assert (await client.get(f"/api/file?token={TOKEN}&path=doc.txt")).status == 404
+            assert (await client.get(f"/api/file?token={TOKEN}&path=../outside.png")).status == 403
+            assert (await client.get(f"/api/file?token={TOKEN}&path=gone.png")).status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
 class FakeGatewayAdapter:
     def __init__(self):
         self.stopped = asyncio.Event()

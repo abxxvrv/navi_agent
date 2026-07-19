@@ -58,6 +58,7 @@ class FakeRuntime:
         self.current_goal = None
         self.last_usage = {"prompt_tokens": 10}
         self.router = SimpleNamespace(context_window=100, model_name="step-3.7-flash")
+        self.reviewer = SimpleNamespace(pending_message=None)
         self.goal_runner = SimpleNamespace(
             drive=self.run_turn,
             apply_command=self.apply_goal_command,

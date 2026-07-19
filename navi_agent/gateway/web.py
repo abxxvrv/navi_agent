@@ -38,6 +38,9 @@ logger = logging.getLogger(__name__)
 
 WEBUI_DIR = Path(__file__).parent / "webui"
 MAX_IMAGE_ATTACHMENT_BYTES = 3 * 1000 * 1000
+IMAGE_SUFFIXES = {
+    ".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg", ".bmp", ".avif", ".ico",
+}
 
 
 def _json_dumps(data: Any) -> str:
@@ -281,6 +284,29 @@ class WebAdapter:
             return web.json_response({"error": "forbidden"}, status=403)
         sessions = HistoryStore.list_sessions(get_navi_home() / "history.sqlite3", limit=50)
         return web.json_response(sessions, dumps=_json_dumps)
+
+    async def handle_file(self, request):
+        """供前端 <img> 引用工作区内的图片（助手 markdown / 产物文件）。"""
+        if not self._authorized(request):
+            return web.Response(status=403, text="Forbidden")
+        raw = request.query.get("path", "").strip()
+        if not raw:
+            return web.Response(status=400, text="missing path")
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = self.workspace / candidate
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(self.workspace)
+        except (ValueError, OSError):
+            return web.Response(status=403, text="Forbidden: outside workspace")
+        if resolved.suffix.lower() not in IMAGE_SUFFIXES or not resolved.is_file():
+            return web.Response(status=404, text="Not found")
+        headers = {"X-Content-Type-Options": "nosniff"}
+        if resolved.suffix.lower() == ".svg":
+            # SVG 可内嵌脚本，禁掉脚本执行后再内联展示
+            headers["Content-Security-Policy"] = "script-src 'none'"
+        return web.FileResponse(resolved, headers=headers)
 
     async def handle_ws(self, request):
         if not self._authorized(request):
@@ -640,6 +666,7 @@ class WebAdapter:
         app.router.add_get("/", self.handle_index)
         app.router.add_get("/ws", self.handle_ws)
         app.router.add_get("/api/sessions", self.handle_sessions)
+        app.router.add_get("/api/file", self.handle_file)
         app.router.add_get("/api/gateways", self.handle_gateways)
         app.router.add_post("/api/gateways/{kind}/start", self.handle_gateway_start)
         app.router.add_post("/api/gateways/{kind}/stop", self.handle_gateway_stop)
