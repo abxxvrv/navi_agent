@@ -27,6 +27,7 @@ EXPLORE_TOOLS = (
     "vision_analyze",
     "search_session",
     "read_session",
+    "lsp",
 )
 
 

@@ -81,6 +81,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `navi_agent/context/context_manager.py`: 运行上下文组装。
 - `navi_agent/context/compressor.py`: 上下文压缩。
 - `navi_agent/integrations/mcp_client.py` / `navi_agent/integrations/mcp_commands.py`: MCP 集成。
+- `navi_agent/integrations/lsp.py`: stdio LSP 生命周期、文档同步和定义/引用/实现/符号查询。
 - `navi_agent/plugins.py`: 插件发现、manifest/约定组件解析、启用与信任边界。
 - `navi_agent/runtime/hooks.py`: Hooks 配置快照、matcher 和 command handler 调度；仅 PreToolUse 可阻断。
 - `navi_agent/skills/skill_manage.py`: skill 文件管理工具。
