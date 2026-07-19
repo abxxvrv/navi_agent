@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="description" content="Navi Agent 官方文档：安装、配置、工具、技能、插件、LSP、网关与开发指南。">
+  <meta name="theme-color" content="#07100f">
+  <title>Navi Agent 文档</title>
+  <style>
+    :root{--bg:#07100f;--panel:#0d1917;--panel2:#101f1c;--line:#243b35;--text:#eaf2ee;--muted:#8ea59d;--green:#81f499;--cyan:#5eead4;--amber:#ffca69;--red:#ff746c;--mono:"Cascadia Code","JetBrains Mono","SFMono-Regular",Consolas,monospace;--sans:"Microsoft YaHei","Noto Sans SC",sans-serif}*{box-sizing:border-box}html{scroll-behavior:smooth;scroll-padding-top:28px}body{margin:0;background:var(--bg);color:var(--text);font-family:var(--sans);font-size:15px;line-height:1.75}body:before{content:"";position:fixed;inset:0;z-index:-2;background:radial-gradient(circle at 85% 8%,rgba(94,234,212,.09),transparent 27%),radial-gradient(circle at 10% 45%,rgba(129,244,153,.05),transparent 24%)}body:after{content:"";position:fixed;inset:0;z-index:-1;opacity:.055;background-image:linear-gradient(rgba(255,255,255,.4) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.4) 1px,transparent 1px);background-size:44px 44px}a{color:var(--cyan);text-decoration:none}a:hover{color:#b6fff5}.layout{display:grid;grid-template-columns:280px minmax(0,1fr);min-height:100vh}.sidebar{position:sticky;top:0;height:100vh;padding:30px 22px;border-right:1px solid var(--line);background:rgba(7,16,15,.92);backdrop-filter:blur(14px);overflow:auto}.logo{display:flex;align-items:center;gap:12px;margin-bottom:30px;color:var(--text)}.mark{display:grid;place-items:center;width:39px;height:39px;border:1px solid var(--green);color:var(--green);font:700 18px var(--mono);box-shadow:inset 0 0 18px rgba(129,244,153,.12),0 0 18px rgba(129,244,153,.08)}.logo strong{display:block;font:700 18px var(--mono);letter-spacing:.06em}.logo small{display:block;color:var(--muted);font:11px var(--mono);letter-spacing:.08em}.nav-title{margin:18px 10px 7px;color:#58736a;font:700 10px var(--mono);letter-spacing:.16em;text-transform:uppercase}.nav a{display:block;padding:7px 10px;border-left:1px solid transparent;color:var(--muted);font-size:13px;transition:.18s}.nav a:hover,.nav a.active{border-left-color:var(--green);color:var(--text);background:linear-gradient(90deg,rgba(129,244,153,.08),transparent)}.side-meta{margin-top:28px;padding:14px;border:1px solid var(--line);color:var(--muted);font:11px/1.65 var(--mono)}.status{display:inline-block;width:6px;height:6px;margin-right:7px;border-radius:50%;background:var(--green);box-shadow:0 0 9px var(--green)}main{width:min(1060px,100%);padding:58px 70px 100px}.hero{position:relative;padding:64px 0 72px;border-bottom:1px solid var(--line)}.eyebrow{color:var(--green);font:700 12px var(--mono);letter-spacing:.18em;text-transform:uppercase}.hero h1{max-width:820px;margin:20px 0 18px;font:700 clamp(44px,7vw,88px)/.95 var(--mono);letter-spacing:-.065em}.hero h1 span{color:transparent;-webkit-text-stroke:1px var(--green)}.lead{max-width:750px;margin:0;color:#b4c7c0;font-size:18px}.actions{display:flex;flex-wrap:wrap;gap:12px;margin-top:30px}.button{display:inline-flex;align-items:center;height:42px;padding:0 17px;border:1px solid var(--line);color:var(--text);font:700 12px var(--mono);letter-spacing:.04em}.button.primary{border-color:var(--green);background:var(--green);color:#07100f}.button:hover{transform:translateY(-1px);color:var(--text);border-color:var(--cyan)}.button.primary:hover{color:#07100f;background:#a4ffb5}.facts{display:grid;grid-template-columns:repeat(3,1fr);gap:1px;margin-top:42px;background:var(--line);border:1px solid var(--line)}.fact{padding:16px 18px;background:var(--panel)}.fact b{display:block;color:var(--green);font:700 18px var(--mono)}.fact span{color:var(--muted);font-size:12px}.section{padding:70px 0 10px;border-bottom:1px solid var(--line)}.section:last-child{border:0}.section-no{color:#547168;font:11px var(--mono);letter-spacing:.14em}.section h2{margin:5px 0 16px;font:700 clamp(28px,4vw,44px)/1.1 var(--mono);letter-spacing:-.035em}.section-intro{max-width:760px;color:var(--muted);font-size:16px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:14px;margin:27px 0}.card{padding:22px;border:1px solid var(--line);background:linear-gradient(145deg,rgba(16,31,28,.95),rgba(10,20,18,.95));transition:.18s}.card:hover{border-color:#3d6359;transform:translateY(-2px)}.card .tag{color:var(--green);font:700 10px var(--mono);letter-spacing:.12em}.card h3{margin:8px 0 7px;font:700 17px var(--mono)}.card p{margin:0;color:var(--muted);font-size:13px}.steps{counter-reset:step;margin:28px 0}.step{position:relative;margin-left:17px;padding:0 0 30px 38px;border-left:1px solid var(--line)}.step:last-child{border-color:transparent}.step:before{counter-increment:step;content:counter(step);position:absolute;left:-17px;top:0;display:grid;place-items:center;width:32px;height:32px;border:1px solid var(--green);background:var(--bg);color:var(--green);font:700 12px var(--mono)}.step h3{margin:0 0 7px;font:700 16px var(--mono)}.step p{margin:0;color:var(--muted)}pre{position:relative;margin:16px 0 24px;padding:19px 21px;overflow:auto;border:1px solid var(--line);background:#050b0a;color:#c9ddd5;font:13px/1.7 var(--mono);tab-size:2}code{font-family:var(--mono)}p code,li code,td code{padding:2px 5px;border:1px solid var(--line);background:var(--panel);color:var(--amber);font-size:.9em}.code-label{display:block;margin-bottom:8px;color:#57746b;font:10px var(--mono);letter-spacing:.12em;text-transform:uppercase}.callout{margin:24px 0;padding:17px 19px;border-left:2px solid var(--amber);background:rgba(255,202,105,.055);color:#d6ccb7}.callout strong{color:var(--amber);font-family:var(--mono)}table{width:100%;margin:24px 0;border-collapse:collapse;font-size:13px}th,td{padding:11px 13px;border:1px solid var(--line);text-align:left;vertical-align:top}th{background:var(--panel2);color:var(--green);font:700 11px var(--mono);letter-spacing:.05em}td{color:#b9cbc4}.architecture{display:grid;gap:8px;margin:28px 0}.arch-row{display:grid;grid-template-columns:160px 1fr;border:1px solid var(--line)}.arch-row strong{padding:13px 15px;background:var(--panel2);color:var(--green);font:12px var(--mono)}.arch-row span{padding:13px 15px;color:var(--muted)}.kbd{display:inline-block;min-width:24px;padding:1px 6px;border:1px solid #476259;border-bottom-width:2px;background:#101b19;color:#dbeae4;text-align:center;font:11px var(--mono)}.footer{padding-top:50px;color:#617a71;font:11px var(--mono)}.mobile-menu{display:none}@media(max-width:900px){.layout{display:block}.sidebar{position:fixed;z-index:20;left:-300px;width:280px;transition:left .25s}.sidebar.open{left:0}.mobile-menu{position:fixed;z-index:30;right:15px;top:15px;display:block;width:42px;height:42px;border:1px solid var(--line);background:var(--bg);color:var(--green);font:20px var(--mono)}main{padding:40px 24px 70px}.hero{padding-top:55px}.facts{grid-template-columns:1fr}.grid{grid-template-columns:1fr}.arch-row{grid-template-columns:1fr}.arch-row strong{border-bottom:1px solid var(--line)}}@media(max-width:520px){main{padding-inline:17px}.hero h1{font-size:43px}.lead{font-size:15px}.actions{display:grid}.button{justify-content:center}.section{padding-top:52px}}
+  </style>
+</head>
+<body>
+<button class="mobile-menu" aria-label="切换目录">≡</button>
+<div class="layout">
+  <aside class="sidebar">
+    <a class="logo" href="#top"><span class="mark">N</span><span><strong>NAVI</strong><small>AGENT DOCUMENTATION</small></span></a>
+    <nav class="nav">
+      <div class="nav-title">开始</div>
+      <a href="#overview">概览</a><a href="#install">安装与初始化</a><a href="#usage">基本使用</a>
+      <div class="nav-title">能力</div>
+      <a href="#tools">工具系统</a><a href="#skills">技能与插件</a><a href="#sessions">会话与记忆</a><a href="#lsp">LSP</a><a href="#gateway">网关与 Web UI</a>
+      <div class="nav-title">参考</div>
+      <a href="#config">模型配置</a><a href="#architecture">架构</a><a href="#development">开发</a>
+    </nav>
+    <div class="side-meta"><span class="status"></span>DOCUMENTATION ONLINE<br>VERSION 0.1.0<br>PYTHON 3.11+</div>
+  </aside>
+
+  <main id="top">
+    <header class="hero">
+      <div class="eyebrow">Local-first coding agent / CLI / Gateway</div>
+      <h1>你的本地项目<br><span>智能导航员</span></h1>
+      <p class="lead">Navi 是一个本地优先的命令行 AI Agent。它能够理解代码、修改文件、执行命令、调用子 Agent、管理技能，并通过 CLI、Web、QQ 与微信接入你的工作流。</p>
+      <div class="actions"><a class="button primary" href="#install">开始安装</a><a class="button" href="https://github.com/abxxvrv/navi_agent" target="_blank" rel="noreferrer">查看 GitHub</a><a class="button" href="#architecture">了解架构</a></div>
+      <div class="facts"><div class="fact"><b>LOCAL FIRST</b><span>数据、配置与历史默认留在本机</span></div><div class="fact"><b>3 MODES</b><span>严格 / 普通 / 开放审批策略</span></div><div class="fact"><b>MULTI ENTRY</b><span>CLI、Web、QQ、微信多入口</span></div></div>
+    </header>
+
+    <section class="section" id="overview"><div class="section-no">01 / OVERVIEW</div><h2>一个 Agent，贯穿完整工程循环</h2><p class="section-intro">Navi 不只是聊天界面。它把模型、工具、审批、历史、记忆和外部集成组织成可中断、可恢复、可审计的本地执行环境。</p><div class="grid"><article class="card"><span class="tag">CODE</span><h3>真实修改工作区</h3><p>读取、搜索、创建和定向修补文件；配合测试命令完成从定位到验证的闭环。</p></article><article class="card"><span class="tag">CONTROL</span><h3>审批与中断</h3><p>对危险工具调用实施严格、普通或开放审批，并支持在执行过程中取消当前轮次。</p></article><article class="card"><span class="tag">CONTEXT</span><h3>持久会话与记忆</h3><p>SQLite 会话历史、FTS5 搜索、上下文压缩、长期记忆和项目级记忆共同维持连续性。</p></article><article class="card"><span class="tag">EXTEND</span><h3>技能、插件与 MCP</h3><p>按需加载专业技能，兼容约定式插件，并连接外部 MCP server 扩展工具边界。</p></article></div></section>
+
+    <section class="section" id="install"><div class="section-no">02 / INSTALL</div><h2>安装与初始化</h2><p class="section-intro">需要 Python 3.11 或更高版本。安装脚本会准备 CLI，随后由初始化向导创建 Navi 用户目录并配置模型。</p><div class="steps"><div class="step"><h3>安装 Navi</h3><span class="code-label">Windows PowerShell</span><pre><code>irm https://raw.githubusercontent.com/abxxvrv/navi_agent/gpt/install.ps1 | iex</code></pre><span class="code-label">macOS / Linux</span><pre><code>curl -fsSL https://raw.githubusercontent.com/abxxvrv/navi_agent/gpt/install.sh | bash</code></pre></div><div class="step"><h3>初始化配置</h3><pre><code>navi init</code></pre><p>创建 <code>~/.navi</code>，初始化历史数据库、提示词和内置技能，并引导配置主模型与压缩模型。</p></div><div class="step"><h3>检查环境</h3><pre><code>navi doctor</code></pre><p>检查安装、配置和运行环境是否可用。</p></div></div></section>
+
+    <section class="section" id="usage"><div class="section-no">03 / USAGE</div><h2>基本使用</h2><div class="grid"><article class="card"><span class="tag">INTERACTIVE</span><h3>交互模式</h3><pre><code>navi</code></pre><p>进入持续对话。工具输出、审批和流式回复都在终端中完成。</p></article><article class="card"><span class="tag">ONE SHOT</span><h3>单次任务</h3><pre><code>navi run "检查工作区修改"</code></pre><p>执行一个任务并退出，适合脚本或自动化流程。</p></article><article class="card"><span class="tag">WORKSPACE</span><h3>指定项目</h3><pre><code>navi --workspace E:\path\to\project</code></pre><p>显式设置 Agent 的工作区边界。</p></article><article class="card"><span class="tag">RESUME</span><h3>恢复会话</h3><pre><code>navi --continue
+navi --resume &lt;session_id&gt;</code></pre><p>继续最近会话，或恢复指定会话。</p></article></div><h3>审批模式</h3><pre><code>navi --approval strict   # 所有高风险动作严格确认
+navi --approval normal   # 默认平衡模式
+navi --approval open     # 开放执行
+navi --yolo              # 等价于 open</code></pre><div class="callout"><strong>中断语义：</strong>运行期间按 <span class="kbd">Ctrl</span> + <span class="kbd">C</span> 请求取消当前轮次；长命令或子 Agent 在前台运行时可按 <span class="kbd">Ctrl</span> + <span class="kbd">G</span> 无损转入后台。</div><h3>常用 Slash Commands</h3><table><thead><tr><th>命令</th><th>用途</th><th>命令</th><th>用途</th></tr></thead><tbody><tr><td><code>/help</code></td><td>帮助</td><td><code>/tools</code></td><td>工具列表</td></tr><tr><td><code>/skills</code></td><td>技能列表</td><td><code>/plugins</code></td><td>插件状态</td></tr><tr><td><code>/sessions</code></td><td>最近会话</td><td><code>/search</code></td><td>搜索历史</td></tr><tr><td><code>/model</code></td><td>切换模型</td><td><code>/approval</code></td><td>审批模式</td></tr><tr><td><code>/compress</code></td><td>压缩上下文</td><td><code>/mcp</code></td><td>MCP 管理</td></tr></tbody></table></section>
+
+    <section class="section" id="tools"><div class="section-no">04 / TOOLS</div><h2>工具系统</h2><p class="section-intro">模型通过结构化工具调用操作真实环境。工具注册表统一描述参数、审批级别和执行行为，长任务由任务管理器接管。</p><table><thead><tr><th>类别</th><th>代表工具</th><th>能力</th></tr></thead><tbody><tr><td>文件</td><td><code>read_file</code> <code>write_file</code> <code>patch_file</code></td><td>读取、创建、覆盖和精确修改文本文件</td></tr><tr><td>搜索</td><td><code>glob</code> <code>grep</code></td><td>按文件模式或内容定位代码</td></tr><tr><td>命令</td><td><code>bash</code> <code>powershell</code></td><td>运行非交互式命令，可前台或后台执行</td></tr><tr><td>任务</td><td><code>get_task_output</code> <code>wait_tasks</code> <code>kill_task</code></td><td>统一管理命令、监控与子 Agent</td></tr><tr><td>语义</td><td><code>lsp</code></td><td>查询定义、引用、实现和符号</td></tr><tr><td>会话</td><td><code>search_session</code></td><td>基于 SQLite FTS5 搜索历史消息</td></tr><tr><td>扩展</td><td><code>agent</code> <code>skill_view</code> <code>memory</code></td><td>派生子 Agent、读取技能与管理长期记忆</td></tr></tbody></table></section>
+
+    <section class="section" id="skills"><div class="section-no">05 / EXTENSIONS</div><h2>技能与插件</h2><div class="grid"><article class="card"><span class="tag">SKILLS</span><h3>按需加载的专业工作流</h3><p>技能位于 <code>~/.navi/skills/&lt;name&gt;/SKILL.md</code>。系统提示只注入索引，模型在需要时再读取完整说明，减少上下文占用。</p></article><article class="card"><span class="tag">PLUGINS</span><h3>约定式扩展包</h3><p>插件可提供 skills、commands、agents、hooks、MCP 和 LSP 配置，并兼容 Grok/Claude 的常见目录约定。</p></article></div><pre><code># 临时加载一个可信插件
+navi --plugin-dir /path/to/plugin</code></pre><div class="callout"><strong>信任边界：</strong>项目和外部插件不会自动执行。需要启用并加入可信路径后，其 Agent、Hooks、MCP 或 LSP 才能启动。</div></section>
+
+    <section class="section" id="sessions"><div class="section-no">06 / CONTINUITY</div><h2>会话与记忆</h2><p class="section-intro">Navi 的用户数据集中在 <code>~/.navi/</code>，形成从短期会话到长期经验的多层上下文。</p><div class="architecture"><div class="arch-row"><strong>history.sqlite3</strong><span>会话、消息、FTS5 全文搜索、锚定窗口和压缩 lineage。</span></div><div class="arch-row"><strong>memories/</strong><span>全局 MEMORY 与用户画像，跨项目复用稳定偏好和经验。</span></div><div class="arch-row"><strong>项目 .navi/</strong><span>项目记忆与索引，跟随当前工作区保存架构决策和项目约定。</span></div><div class="arch-row"><strong>agents/</strong><span>子 Agent 元信息与 transcript，用于同一父会话内恢复。</span></div><div class="arch-row"><strong>logs/</strong><span>运行日志和诊断信息。</span></div></div></section>
+
+    <section class="section" id="lsp"><div class="section-no">07 / LANGUAGE INTELLIGENCE</div><h2>LSP 语义查询</h2><p class="section-intro">Navi 通过 stdio 连接语言服务器，让 Agent 不只依赖字符串搜索，还能理解符号的定义、引用与实现关系。</p><pre><code>{
+  "python": {
+    "command": "pyright-langserver",
+    "args": ["--stdio"],
+    "extensions": {".py": "python"}
+  }
+}</code></pre><table><thead><tr><th>操作</th><th>作用</th></tr></thead><tbody><tr><td><code>goToDefinition</code></td><td>跳转到符号定义</td></tr><tr><td><code>findReferences</code></td><td>查找语义引用</td></tr><tr><td><code>goToImplementation</code></td><td>定位接口或抽象方法的实现</td></tr><tr><td><code>documentSymbol</code></td><td>查看文件符号结构</td></tr><tr><td><code>workspaceSymbol</code></td><td>搜索工作区符号</td></tr><tr><td><code>restart</code></td><td>修改项目语言配置后重启服务</td></tr></tbody></table></section>
+
+    <section class="section" id="gateway"><div class="section-no">08 / ACCESS</div><h2>网关与 Web UI</h2><div class="grid"><article class="card"><span class="tag">WEB</span><h3>本地网页控制台</h3><pre><code>navi web
+navi web -p 8080 -w ./proj</code></pre><p>支持流式输出、工具卡片、审批、中断、模型切换与会话恢复。</p></article><article class="card"><span class="tag">WEIXIN</span><h3>微信网关</h3><pre><code>navi weixin login
+navi weixin start --account &lt;id&gt;</code></pre><p>通过 iLink 接收文本、图片、文件、视频和语音路径。</p></article><article class="card"><span class="tag">QQ</span><h3>QQ 机器人</h3><pre><code>navi qq login
+navi qq start --account &lt;id&gt;</code></pre><p>支持私聊和群聊，访问控制默认 fail-closed。</p></article><article class="card"><span class="tag">SECURITY</span><h3>显式授权</h3><pre><code>navi qq allow &lt;user_id&gt; --account &lt;id&gt;
+navi weixin allow &lt;user_id&gt; --account &lt;id&gt;</code></pre><p>只有白名单用户和群组可以触发 Agent。</p></article></div></section>
+
+    <section class="section" id="config"><div class="section-no">09 / CONFIGURATION</div><h2>模型配置</h2><p class="section-intro">配置文件位于 <code>~/.navi/config.json</code>。主模型与压缩模型可以使用不同 provider，并为每个模型声明上下文窗口等能力。</p><pre><code>{
+  "default_provider": "openai",
+  "default_model": "your-model",
+  "compression": {
+    "provider": "openai",
+    "model": "your-model"
+  },
+  "providers": {
+    "openai": {
+      "api_key": "...",
+      "base_url": "https://api.example.com/v1",
+      "models": {
+        "your-model": {"context_window": 131072}
+      }
+    }
+  }
+}</code></pre><p>当前路由支持 OpenAI-compatible provider，也可连接 LM Studio 等本地兼容服务。恢复旧会话时，优先使用该会话保存的 provider 与 model。</p></section>
+
+    <section class="section" id="architecture"><div class="section-no">10 / ARCHITECTURE</div><h2>分层架构</h2><div class="architecture"><div class="arch-row"><strong>CLI</strong><span>prompt UI、流式输出、slash commands 与一轮对话编排。</span></div><div class="arch-row"><strong>RUNTIME</strong><span>Agent loop、工具调度、审批、中断作用域、后台任务与子 Agent。</span></div><div class="arch-row"><strong>MODEL</strong><span>Provider 路由、流式模型请求和 request-local 中断。</span></div><div class="arch-row"><strong>TOOLS</strong><span>内置工具、注册表、审批策略和 UI/runtime 审批桥。</span></div><div class="arch-row"><strong>STORAGE</strong><span>历史、记忆、Agent、Goal 和定时任务持久化。</span></div><div class="arch-row"><strong>INTEGRATIONS</strong><span>LSP、MCP、Hooks 与插件发现。</span></div><div class="arch-row"><strong>GATEWAY</strong><span>Web、QQ 和微信多入口适配。</span></div></div><div class="callout"><strong>核心原则：</strong>UI 主线程只负责输入、按键和渲染；阻塞 runtime 与工具在受控线程执行；外部命令使用可终止的 subprocess；每轮执行由独立的中断作用域统一收尾。</div></section>
+
+    <section class="section" id="development"><div class="section-no">11 / DEVELOPMENT</div><h2>参与开发</h2><pre><code># 克隆仓库
+git clone https://github.com/abxxvrv/navi_agent.git
+cd navi_agent
+
+# 安装开发依赖
+python -m pip install -e ".[dev]"
+
+# 运行测试
+python -m pytest
+
+# 运行指定测试
+python -m pytest tests/test_model_router.py</code></pre><p>项目要求 Python 3.11+。修改应保持最小、遵循现有分层，并为行为变更添加测试。</p><div class="footer">NAVI AGENT DOCUMENTATION · LOCAL-FIRST, TOOL-DRIVEN, HUMAN-CONTROLLED<br>Source: <a href="https://github.com/abxxvrv/navi_agent">github.com/abxxvrv/navi_agent</a></div></section>
+  </main>
+</div>
+<script>
+const sidebar=document.querySelector('.sidebar'),menu=document.querySelector('.mobile-menu'),links=[...document.querySelectorAll('.nav a')];menu.addEventListener('click',()=>sidebar.classList.toggle('open'));links.forEach(a=>a.addEventListener('click',()=>sidebar.classList.remove('open')));const sections=[...document.querySelectorAll('main section[id]')];const observer=new IntersectionObserver(entries=>{entries.forEach(e=>{if(e.isIntersecting){links.forEach(a=>a.classList.toggle('active',a.getAttribute('href')==='#'+e.target.id))}})},{rootMargin:'-20% 0px -70% 0px'});sections.forEach(s=>observer.observe(s));
+</script>
+</body>
+</html>
