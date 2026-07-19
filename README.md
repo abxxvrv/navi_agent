@@ -81,6 +81,7 @@ navi --yolo
 | `/help` | 查看帮助 |
 | `/tools` | 查看当前可用工具 |
 | `/skills` | 查看当前可用技能 |
+| `/plugins` | 查看已发现插件及启用、信任状态 |
 | `/sessions` | 查看最近会话 |
 | `/search` | 搜索历史会话 |
 | `/model` | 切换 provider / model |
@@ -254,6 +255,30 @@ SKILL.md
 
 后台技能反思会使用 `skill_manage` 维护技能库。目标是保持技能任务针对性强、边界清晰、彼此不重叠；当多个旧技能应合并时，会先创建或更新目标技能，再删除被替代的旧技能。
 
+## 插件
+
+插件兼容 Grok/Claude 的目录约定，可提供 `skills/`、`commands/`、`agents/`、`hooks/hooks.json`、`.mcp.json` 和 `.lsp.json`。manifest 按 `plugin.json`、`.grok-plugin/plugin.json`、`.claude-plugin/plugin.json` 的顺序查找；没有 manifest 时也可按约定目录发现。
+
+临时加载一个可信插件：
+
+```bash
+navi --plugin-dir /path/to/plugin
+```
+
+持久配置写在 `~/.navi/config.json`：
+
+```json
+{
+  "plugins": {
+    "paths": ["/path/to/plugin"],
+    "enabled": ["plugin-name"],
+    "disabled": []
+  }
+}
+```
+
+项目 `.navi/plugins`、`.grok/plugins`、`.claude/plugins` 和用户 `~/.navi/plugins` 中的插件默认禁用。项目或外部配置插件还需把插件根目录的规范化绝对路径逐行写入 `~/.navi/trusted-plugins`，才会启动其 Agent、Hooks、MCP 或 LSP；`--plugin-dir` 代表本次会话显式信任。插件命令使用 `/plugin-name:command`，插件技能和 Agent 使用 `plugin-name:name`。
+
 ## 会话与记忆
 
 Navi 的本地数据目录是：
@@ -269,6 +294,8 @@ Navi 的本地数据目录是：
 | `config.json` | provider、模型和 MCP 配置 |
 | `history.sqlite3` | SQLite 会话历史 |
 | `skills/` | 已安装技能 |
+| `plugins/` | 用户插件 |
+| `plugin-data/` | 插件持久数据 |
 | `memories/` | 长期记忆 |
 | `agents/` | 子 agent 实例 |
 | `logs/` | 运行日志 |

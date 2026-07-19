@@ -38,6 +38,7 @@ SLASH_COMMANDS = [
     "/clear",
     "/tools",
     "/skills",
+    "/plugins",
     "/sessions",
     "/search",
     "/mcp",
@@ -168,6 +169,7 @@ def print_chat_help(printer: Callable[..., None] | None = None) -> None:
             "[cyan]/clear[/cyan]     Clear screen",
             "[cyan]/tools[/cyan]     Show available tools",
             "[cyan]/skills[/cyan]    Show available skills",
+            "[cyan]/plugins[/cyan]   Show discovered plugins",
             "[cyan]/sessions[/cyan]  Show recent sessions",
             "[cyan]/search[/cyan]   Search session history",
             "[cyan]/mcp[/cyan]       Manage MCP servers (status/add/remove/reload/help)",
@@ -827,6 +829,7 @@ def handle_slash_command(
         "/clear",
         "/tools",
         "/skills",
+        "/plugins",
         "/sessions",
         "/approval",
         "/compress",
@@ -862,7 +865,7 @@ def handle_slash_command(
         return True
 
     if command_name == "/skills":
-        skills = list_skills_from_navi_home()
+        skills = list_skills_from_navi_home() + sorted(runtime.plugin_skills)
 
         if not skills:
             _p("[yellow]No skills found.[/yellow]")
@@ -872,6 +875,25 @@ def handle_slash_command(
         for skill in skills:
             _p(f"- {skill}")
 
+        return True
+
+    if command_name == "/plugins":
+        if not runtime.plugins:
+            _p("[yellow]No plugins found.[/yellow]")
+            return True
+        _p("[bold]Plugins[/bold]")
+        for plugin in runtime.plugins:
+            state = "enabled" if plugin["enabled"] else "disabled"
+            trust = "trusted" if plugin["trusted"] else "untrusted"
+            version = f" {plugin['version']}" if plugin["version"] else ""
+            _p(
+                f"- {plugin['name']}{version} [{plugin['scope']}, {state}, {trust}] "
+                f"skills={len(plugin['skills'])} "
+                f"agents={len(plugin['agents'])} "
+                f"mcp={len(plugin['mcp_servers'])} "
+                f"lsp={len(plugin['lsp_servers'])} "
+                f"hooks={int(plugin['hooks'] is not None)}"
+            )
         return True
 
     if command_name == "/sessions":
@@ -950,7 +972,7 @@ def handle_slash_command(
     if command_name == "/mcp":
         try:
             from ..integrations.mcp_commands import handle_mcp_command
-            result = handle_mcp_command(command_args, runtime.tool_registry)
+            result = handle_mcp_command(command_args, runtime)
             _p(result)
         except ImportError:
             _p("[yellow]MCP module not available. Install mcp package: pip install mcp[/yellow]")
@@ -1069,6 +1091,7 @@ def start_chat(
     no_splash: bool,
     approval_mode: str,
     resume_session_id: str | None = None,
+    plugin_dirs: list[Path] | None = None,
 ) -> None:
     """
     默认交互模式。
@@ -1085,6 +1108,7 @@ def start_chat(
             no_splash=no_splash,
             approval_mode=approval_mode,
             resume_session_id=resume_session_id,
+            plugin_dirs=plugin_dirs,
         )
     )
 
@@ -1131,6 +1155,7 @@ async def _start_chat_async(
     no_splash: bool,
     approval_mode: str,
     resume_session_id: str | None = None,
+    plugin_dirs: list[Path] | None = None,
 ) -> None:
     from .chat_controller import ChatController
 
@@ -1140,6 +1165,7 @@ async def _start_chat_async(
         no_splash=no_splash,
         approval_mode=approval_mode,
         resume_session_id=resume_session_id,
+        plugin_dirs=plugin_dirs,
         slash_commands=SLASH_COMMANDS,
         print_live=_print_live,
         print_splash=print_splash,
@@ -1213,6 +1239,13 @@ def main_callback(
             help="Resume the most recent session.",
         ),
     ] = False,
+    plugin_dir: Annotated[
+        list[Path],
+        typer.Option(
+            "--plugin-dir",
+            help="Load and trust a plugin directory for this session. Repeatable.",
+        ),
+    ] = [],
 ):
     """
     无子命令时，默认进入 chat 模式。
@@ -1234,6 +1267,7 @@ def main_callback(
         "no_splash": no_splash,
         "approval_mode": approval_mode,
         "resume_session_id": resume_session_id or None,
+        "plugin_dirs": plugin_dir,
     }
 
     if ctx.invoked_subcommand is None:
@@ -1243,6 +1277,7 @@ def main_callback(
             no_splash=no_splash,
             approval_mode=approval_mode,
             resume_session_id=resume_session_id or None,
+            plugin_dirs=plugin_dir,
         )
 
 
@@ -1259,6 +1294,7 @@ def chat(ctx: typer.Context):
         no_splash=config.get("no_splash", False),
         approval_mode=config.get("approval_mode", DEFAULT_APPROVAL_MODE),
         resume_session_id=config.get("resume_session_id"),
+        plugin_dirs=config.get("plugin_dirs"),
     )
 
 
@@ -1293,6 +1329,7 @@ def run(
         approval_handler=ask_approval_from_cli,
         resume_session_id=resume_session_id,
         on_output=console.print,
+        plugin_dirs=config.get("plugin_dirs"),
     )
 
     console.print(

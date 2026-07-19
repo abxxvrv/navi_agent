@@ -28,6 +28,7 @@ class ContextManager:
         skills_path: str | None = None,
         navi_home: str | None = None,
         memory_store=None,
+        plugin_skills: dict[str, dict[str, Any]] | None = None,
     ):
         self.workspace = Path(workspace).resolve()
         self.navi_home = Path(navi_home).resolve() if navi_home is not None else None
@@ -43,6 +44,7 @@ class ContextManager:
             else self.workspace / skills_dirname
         )
         self.memory_store = memory_store
+        self.plugin_skills = plugin_skills or {}
 
     # 加载系统提示词.md
     def load_system_prompt_md(self) -> str:
@@ -53,25 +55,31 @@ class ContextManager:
         return self._read_text_file(self.agents_path, None)
 
     def scan_skill_index(self) -> list[dict[str, str]]:
-        if not self.skills_path.exists() or not self.skills_path.is_dir():
-            return []
-
         index = []
+        if self.skills_path.is_dir():
+            for item in sorted(self.skills_path.iterdir(), key=lambda path: path.name):
+                skill_path = item / "SKILL.md"
+                if not item.is_dir() or not skill_path.is_file():
+                    continue
 
-        for item in sorted(self.skills_path.iterdir(), key=lambda path: path.name):
-            skill_path = item / "SKILL.md"
-            if not item.is_dir() or not skill_path.is_file():
-                continue
+                content = self._read_text_file(skill_path, None)
+                metadata = self._parse_skill_frontmatter(content)
+                index.append(
+                    {
+                        "name": metadata.get("name") or item.name,
+                        "description": metadata.get("description", ""),
+                        "path": str(skill_path),
+                    }
+                )
 
+        for name, skill in sorted(self.plugin_skills.items()):
+            skill_path = Path(skill["path"])
             content = self._read_text_file(skill_path, None)
             metadata = self._parse_skill_frontmatter(content)
-            name = metadata.get("name") or item.name
-            description = metadata.get("description", "")
-
             index.append(
                 {
                     "name": name,
-                    "description": description,
+                    "description": metadata.get("description", ""),
                     "path": str(skill_path),
                 }
             )

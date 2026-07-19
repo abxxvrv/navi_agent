@@ -566,7 +566,7 @@ def _register_server_tools(
 # Public API
 # ---------------------------------------------------------------------------
 
-def discover_mcp_tools(registry) -> List[str]:
+def discover_mcp_tools(registry, servers: Dict[str, dict] | None = None) -> List[str]:
     """Entry point: load config, connect to MCP servers, register tools.
 
     Called from AgentRuntime.__init__. Safe to call even when the ``mcp``
@@ -582,7 +582,11 @@ def discover_mcp_tools(registry) -> List[str]:
         logger.debug("MCP SDK not available -- skipping MCP tool discovery")
         return []
 
-    servers = _load_mcp_config()
+    servers = (
+        _load_mcp_config()
+        if servers is None
+        else {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+    )
     if not servers:
         logger.debug("No MCP servers configured")
         return []
@@ -592,6 +596,9 @@ def discover_mcp_tools(registry) -> List[str]:
     all_tool_names: List[str] = []
 
     for server_name, server_config in servers.items():
+        if not isinstance(server_config, dict):
+            logger.warning("MCP server '%s' has invalid configuration, skipping", server_name)
+            continue
         if server_config.get("enabled", True) is False:
             logger.debug("MCP server '%s' is disabled, skipping", server_name)
             continue
@@ -649,7 +656,7 @@ def shutdown_mcp_servers():
     _stop_mcp_loop()
 
 
-def reload_mcp_servers(registry) -> str:
+def reload_mcp_servers(registry, servers: Dict[str, dict] | None = None) -> str:
     """Reload MCP connections based on current config.
 
     Disconnects removed servers, connects new ones, and re-registers tools.
@@ -661,13 +668,17 @@ def reload_mcp_servers(registry) -> str:
         return "MCP SDK not installed"
 
     # Get current config
-    servers_config = _load_mcp_config()
+    servers_config = (
+        _load_mcp_config()
+        if servers is None
+        else {name: _interpolate_env_vars(cfg) for name, cfg in servers.items()}
+    )
 
     with _lock:
         current_names = set(_servers.keys())
         config_names = set(
             name for name, cfg in servers_config.items()
-            if cfg.get("enabled", True) is not False
+            if isinstance(cfg, dict) and cfg.get("enabled", True) is not False
         )
 
     # Disconnect servers no longer in config
@@ -719,14 +730,14 @@ def reload_mcp_servers(registry) -> str:
     return "MCP reload: " + ", ".join(parts)
 
 
-def get_mcp_status() -> List[dict]:
+def get_mcp_status(configured: Dict[str, dict] | None = None) -> List[dict]:
     """Return status of all configured MCP servers.
 
     Returns a list of dicts with keys: name, transport, tools, connected.
     """
     result: List[dict] = []
 
-    configured = _load_mcp_config()
+    configured = _load_mcp_config() if configured is None else configured
     if not configured:
         return result
 
@@ -734,6 +745,8 @@ def get_mcp_status() -> List[dict]:
         active_servers = dict(_servers)
 
     for name, cfg in configured.items():
+        if not isinstance(cfg, dict):
+            continue
         transport = "stdio" if "command" in cfg else cfg.get("transport", "http")
         server = active_servers.get(name)
 

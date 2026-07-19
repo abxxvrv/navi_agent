@@ -486,13 +486,21 @@ class PatchTool:
 
 
 class SkillViewTool:
-    def __init__(self, workspace: str = ".", skills_path: str | None = None):
+    def __init__(
+        self,
+        workspace: str = ".",
+        skills_path: str | None = None,
+        plugin_skills: dict[str, dict[str, Any]] | None = None,
+        session_id: str | None = None,
+    ):
         self.workspace = Path(workspace).resolve()
         self.skills_dir = (
             Path(skills_path).resolve()
             if skills_path is not None
             else self.workspace / "skills"
         )
+        self.plugin_skills = plugin_skills or {}
+        self.session_id = session_id
 
     def __call__(self, name: str) -> dict[str, Any]:
         try:
@@ -505,22 +513,33 @@ class SkillViewTool:
                     "name": name,
                 }
 
-            if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", skill_name):
-                return {
-                    "ok": False,
-                    "error": "非法技能名称。只允许字母、数字、下划线和连字符，长度不超过 64。",
-                    "name": name,
-                }
+            plugin_skill = self.plugin_skills.get(skill_name)
+            if plugin_skill is not None:
+                skill_file = Path(plugin_skill["path"]).resolve()
+                skill_dir = skill_file.parent
+                if not skill_file.is_relative_to(Path(plugin_skill["root"]).resolve()):
+                    return {
+                        "ok": False,
+                        "error": "Access denied: skill path is outside plugin directory.",
+                        "name": skill_name,
+                    }
+            else:
+                if not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}", skill_name):
+                    return {
+                        "ok": False,
+                        "error": "非法技能名称。只允许字母、数字、下划线和连字符，长度不超过 64。",
+                        "name": name,
+                    }
 
-            skill_dir = (self.skills_dir / skill_name).resolve()
-            skill_file = (skill_dir / "SKILL.md").resolve()
+                skill_dir = (self.skills_dir / skill_name).resolve()
+                skill_file = (skill_dir / "SKILL.md").resolve()
 
-            if not skill_file.is_relative_to(self.skills_dir.resolve()):
-                return {
-                    "ok": False,
-                    "error": "Access denied: skill path is outside skills directory.",
-                    "name": skill_name,
-                }
+                if not skill_file.is_relative_to(self.skills_dir.resolve()):
+                    return {
+                        "ok": False,
+                        "error": "Access denied: skill path is outside skills directory.",
+                        "name": skill_name,
+                    }
 
             if not skill_file.exists():
                 return {
@@ -539,10 +558,25 @@ class SkillViewTool:
                 }
 
             content = skill_file.read_text(encoding="utf-8")
+            if plugin_skill is not None:
+                for token, replacement in (
+                    ("${GROK_PLUGIN_ROOT}", plugin_skill["root"]),
+                    ("${CLAUDE_PLUGIN_ROOT}", plugin_skill["root"]),
+                    ("${GROK_PLUGIN_DATA}", plugin_skill["data_dir"]),
+                    ("${CLAUDE_PLUGIN_DATA}", plugin_skill["data_dir"]),
+                    ("${SKILL_DIR}", skill_dir),
+                    ("${CLAUDE_SKILL_DIR}", skill_dir),
+                ):
+                    content = content.replace(token, str(replacement))
+                if self.session_id is not None:
+                    content = content.replace("${SESSION_ID}", self.session_id).replace(
+                        "${CLAUDE_SESSION_ID}",
+                        self.session_id,
+                    )
 
             resources: list[str] = []
             for child in sorted(skill_dir.iterdir()):
-                if child.name == "SKILL.md":
+                if child == skill_file:
                     continue
                 if child.is_dir():
                     resources.append(f"{child.name}/")
