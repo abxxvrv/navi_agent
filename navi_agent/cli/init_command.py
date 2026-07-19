@@ -186,7 +186,15 @@ def run_init() -> None:
     config_path = get_config_path()
     console.print(f"Navi home: [bold]{navi_home}[/bold]")
 
-    for name in ("skills", "memories", "agents", "logs", "plugins", "plugin-data"):
+    for name in (
+        "skills",
+        "memories",
+        "agents",
+        "logs",
+        "plugins",
+        "plugin-data",
+        "hooks",
+    ):
         (navi_home / name).mkdir(parents=True, exist_ok=True)
 
     template_root = files("navi_agent").joinpath("templates")

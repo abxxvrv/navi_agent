@@ -24,6 +24,7 @@ from ..storage.agent_store import AgentInstanceStore
 from ..storage.history_store import HistoryStore
 from .interrupt_scope import TurnScope
 from .interruptible import run_model_stream, tool_worker, wait_approval
+from .hooks import HookManager
 from .monitor import Monitor
 from .scheduler import Scheduler
 from .task_manager import TaskManager
@@ -206,12 +207,20 @@ class AgentRuntime:
                             "config": plugin["hooks"],
                             "base": plugin["hooks_base"],
                             "plugin": plugin["name"],
+                            "root": plugin["root"],
+                            "data_dir": plugin["data_dir"],
                         }
                     )
 
         self.mcp_servers = dict(_config.get("mcp_servers", {}))
         for name, server in self.plugin_mcp_servers.items():
             self.mcp_servers.setdefault(name, server)
+        self.hooks = HookManager(
+            self.workspace,
+            self.navi_home,
+            _config.get("hooks"),
+            self.plugin_hooks,
+        )
 
         self.tool_registry = ToolRegistry()
         self.memory_store = MemoryStore()
@@ -309,6 +318,11 @@ class AgentRuntime:
         self.compressor = ContextCompressor(
             context_window=self.router.context_window,
             router=self.router,
+        )
+        self.hooks.dispatch(
+            "SessionStart",
+            self.session_store.session_id,
+            {"source": "resume" if resume_session_id else "new"},
         )
 
     def _emit(self, event: dict[str, Any]) -> None:
@@ -590,6 +604,12 @@ class AgentRuntime:
             snapshot_len = len(self.session_store.messages)
             self.session_store.append_message(user_message)
             self.reviewer.user_message_count += 1
+            self.hooks.dispatch(
+                "UserPromptSubmit",
+                self.session_store.session_id,
+                {"prompt": user_input},
+                scope,
+            )
 
             # 4. 构造本轮初始消息
             turn_messages = [*history, api_user_message]
@@ -633,11 +653,26 @@ class AgentRuntime:
                     self.conversation_history = self._valid_messages(self.session_store.messages)
                 # 中断的消息和被中断后补发的消息视为同一次用户交互
                 self.reviewer.user_message_count -= 1
+                self.hooks.dispatch(
+                    "Stop",
+                    self.session_store.session_id,
+                    {"reason": "cancelled"},
+                )
                 raise
             # 6. Agent 循环异常处理
             except Exception as exc:
                 if keep_history:
                     self.conversation_history = self._valid_messages(self.session_store.messages)
+                self.hooks.dispatch(
+                    "StopFailure",
+                    self.session_store.session_id,
+                    {"error": str(exc)},
+                )
+                self.hooks.dispatch(
+                    "Stop",
+                    self.session_store.session_id,
+                    {"reason": "error"},
+                )
                 return {
                     "ok": False,
                     "error": str(exc),
@@ -673,6 +708,11 @@ class AgentRuntime:
                     ]
                 self.conversation_history = self._valid_messages(history_messages)
 
+            self.hooks.dispatch(
+                "Stop",
+                self.session_store.session_id,
+                {"reason": "end_turn"},
+            )
             return { # 返回CLI
                 "ok": bool(final_answer),
                 "final_answer": final_answer,
@@ -707,6 +747,12 @@ class AgentRuntime:
         old_store = self.session_store
         old_session_id = old_store.session_id
         old_messages = list(old_store.messages)
+        self.hooks.dispatch(
+            "PreCompact",
+            old_session_id,
+            {"source": reason, "messageCount": len(old_messages)},
+            self._current_scope,
+        )
 
         try:
             compressed_messages = self.compressor.compress(
@@ -756,6 +802,17 @@ class AgentRuntime:
         self.conversation_history = self._valid_messages(new_store.messages)
         self.last_usage = {}
         self.goal_runner.rebind(old_session_id, new_store.session_id)
+        self.hooks.dispatch(
+            "PostCompact",
+            new_store.session_id,
+            {
+                "source": reason,
+                "oldSessionId": old_session_id,
+                "newSessionId": new_store.session_id,
+                "messageCount": len(new_store.messages),
+            },
+            self._current_scope,
+        )
 
         return {
             "ok": True,
@@ -1015,6 +1072,26 @@ class AgentRuntime:
                             "tool_result": tool_result, "elapsed": elapsed})
             finally:
                 CURRENT_TOOL_CONTEXT.reset(token)
+            elapsed = time.monotonic() - t0
+            hook_payload = {
+                "toolName": tool_name,
+                "toolUseId": tool_call_id,
+                "toolInput": tool_args,
+                "durationMs": round(elapsed * 1000),
+            }
+            failed = isinstance(tool_result, dict) and tool_result.get("ok") is False
+            if failed:
+                hook_payload["error"] = str(
+                    tool_result.get("error") or "Tool returned ok=false"
+                )
+            else:
+                hook_payload["toolResult"] = tool_result
+            self.hooks.dispatch(
+                "PostToolUseFailure" if failed else "PostToolUse",
+                self.session_store.session_id,
+                hook_payload,
+                scope,
+            )
             return (tool_call_id, tool_result, tool_name, tool_args)
 
         scope = getattr(self, "_current_scope", None)
@@ -1286,7 +1363,32 @@ class AgentRuntime:
         tool_name: str,
         tool_args: dict[str, Any],
         scope: TurnScope | None = None,
+        hook_session_id: str | None = None,
     ) -> dict[str, Any] | None:
+        hook_scope = scope or self._require_scope()
+        session_id = hook_session_id or self.session_store.session_id
+        hook_denial = self.hooks.dispatch(
+            "PreToolUse",
+            session_id,
+            {
+                "toolName": tool_name,
+                "toolUseId": tool_call_id,
+                "toolInput": tool_args,
+            },
+            hook_scope,
+        )
+        if hook_denial is not None:
+            reason = hook_denial.get("reason") or "工具调用被 PreToolUse hook 拒绝。"
+            self._emit(
+                {
+                    "type": "tool_error",
+                    "tool_name": tool_name,
+                    "tool_args": tool_args,
+                    "error": reason,
+                }
+            )
+            return {"ok": False, "error": reason, "hook": hook_denial}
+
         # 根据工具名字和参数，生成一个选择：看看是允许、拒绝、问用户的哪一种
         decision = self.approval_manager.check_tool_call(tool_name, tool_args)
 
@@ -1295,6 +1397,18 @@ class AgentRuntime:
 
         if decision.is_deny: # 如果被拒绝，会返回调用失败的结果作为工具结果。
             tool_result = decision.to_tool_error()
+            self.hooks.dispatch(
+                "PermissionDenied",
+                session_id,
+                {
+                    "toolName": tool_name,
+                    "toolUseId": tool_call_id,
+                    "toolInput": tool_args,
+                    "reason": decision.reason,
+                    "source": "policy",
+                },
+                hook_scope,
+            )
             self._emit(
                 {
                     "type": "tool_error",
@@ -1343,6 +1457,18 @@ class AgentRuntime:
 
         # 走到这里说明没同意，返回没同意的结果
         reason = "用户拒绝执行该工具调用。"
+        self.hooks.dispatch(
+            "PermissionDenied",
+            session_id,
+            {
+                "toolName": tool_name,
+                "toolUseId": tool_call_id,
+                "toolInput": tool_args,
+                "reason": reason,
+                "source": "user",
+            },
+            hook_scope,
+        )
         tool_result = {
             "ok": False,
             "error": reason,
@@ -2414,6 +2540,7 @@ class AgentRuntime:
                     }
 
         parent_scope = self._require_scope()
+        parent_session_id = self.session_store.session_id
         child_scope = TurnScope(threading.Event())
         stream_runner = ModelStreamRunner(router, child_scope.cancel_event)
         agent_id = self.agent_store.create(
@@ -2429,7 +2556,7 @@ class AgentRuntime:
         self.agent_store.update_meta(
             agent_id,
             status="running",
-            parent_session_id=self.session_store.session_id,
+            parent_session_id=parent_session_id,
             description=description.strip(),
             model={"provider": router.provider, "model": router.model},
             resumed_from=resume_from,
@@ -2445,10 +2572,49 @@ class AgentRuntime:
                     tool_name=name,
                     tool_args=args,
                     scope=child_scope,
+                    hook_session_id=agent_id,
                 )
                 if denied is not None:
                     return denied
-                return self.tool_registry.invoke(name, args)
+                started = time.monotonic()
+                try:
+                    result = self.tool_registry.invoke(name, args)
+                except Exception as exc:
+                    self.hooks.dispatch(
+                        "PostToolUseFailure",
+                        agent_id,
+                        {
+                            "toolName": name,
+                            "toolUseId": tool_call_id,
+                            "toolInput": args,
+                            "error": str(exc),
+                            "durationMs": round((time.monotonic() - started) * 1000),
+                            "subagentType": subagent_type,
+                        },
+                        child_scope,
+                    )
+                    raise
+                hook_payload = {
+                    "toolName": name,
+                    "toolUseId": tool_call_id,
+                    "toolInput": args,
+                    "durationMs": round((time.monotonic() - started) * 1000),
+                    "subagentType": subagent_type,
+                }
+                failed = isinstance(result, dict) and result.get("ok") is False
+                if failed:
+                    hook_payload["error"] = str(
+                        result.get("error") or "Tool returned ok=false"
+                    )
+                else:
+                    hook_payload["toolResult"] = result
+                self.hooks.dispatch(
+                    "PostToolUseFailure" if failed else "PostToolUse",
+                    agent_id,
+                    hook_payload,
+                    child_scope,
+                )
+                return result
             finally:
                 CURRENT_TOOL_CONTEXT.reset(token)
 
@@ -2467,6 +2633,18 @@ class AgentRuntime:
 
         def _runner() -> dict[str, Any]:
             child_scope.attach_execution_thread()
+            started = time.monotonic()
+            status = "failed"
+            self.hooks.dispatch(
+                "SubagentStart",
+                parent_session_id,
+                {
+                    "subagentId": agent_id,
+                    "subagentType": subagent_type,
+                    "description": description.strip(),
+                },
+                child_scope,
+            )
             try:
                 with tool_worker(child_scope):
                     result = agent.run(user_input=prompt)
@@ -2476,6 +2654,7 @@ class AgentRuntime:
                     steps=result.steps,
                     tool_calls=len(result.tool_calls_made),
                 )
+                status = "completed"
                 return {
                     "success": result.success,
                     "content": result.content,
@@ -2485,6 +2664,7 @@ class AgentRuntime:
                     "resume_from_hint": agent_id,
                 }
             except KeyboardInterrupt:
+                status = "cancelled"
                 self.agent_store.update_meta(agent_id, status="cancelled")
                 raise
             except Exception as exc:
@@ -2495,6 +2675,23 @@ class AgentRuntime:
                 )
                 raise
             finally:
+                self.hooks.dispatch(
+                    "SubagentStop",
+                    parent_session_id,
+                    {
+                        "subagentId": agent_id,
+                        "subagentType": subagent_type,
+                        "description": description.strip(),
+                        "exitCode": (
+                            0
+                            if status == "completed"
+                            else 130
+                            if status == "cancelled"
+                            else 1
+                        ),
+                        "durationMs": round((time.monotonic() - started) * 1000),
+                    },
+                )
                 child_scope.close()
 
         context = CURRENT_TOOL_CONTEXT.get()
@@ -2581,3 +2778,8 @@ class AgentRuntime:
         with self._turn_lock:
             self.scheduler.close()
             self.task_manager.shutdown()
+            self.hooks.dispatch(
+                "SessionEnd",
+                self.session_store.session_id,
+                {"reason": "shutdown"},
+            )

@@ -53,6 +53,7 @@ def _make_subagent_runtime(tmp_path):
     )
     runtime.context_manager = _FakeContextManager()
     runtime.plugin_agents = {}
+    runtime.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
     runtime.navi_home = Path(tmp_path)
     runtime._system_prompt = "system"
     runtime.router = SimpleNamespace(provider="fake", model="fake", _provider=object())
@@ -85,6 +86,8 @@ def test_runtime_interrupt_reaches_registered_tool_worker():
     runtime._execution_thread_id = None
     runtime._tool_worker_threads = set()
     runtime._tool_worker_threads_lock = threading.Lock()
+    runtime.session_store = SimpleNamespace(session_id="session")
+    runtime.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
 
     def tool_fn():
         entered.set()
@@ -126,6 +129,8 @@ def test_runtime_interrupt_uses_current_turn_scope_for_tool_worker():
     runtime._execution_thread_id = None
     runtime._tool_worker_threads = set()
     runtime._tool_worker_threads_lock = threading.Lock()
+    runtime.session_store = SimpleNamespace(session_id="session")
+    runtime.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
     runtime._current_scope = TurnScope(runtime.cancel_event)
     runtime._current_scope.attach_execution_thread()
 
@@ -343,6 +348,13 @@ def test_subagent_background_returns_and_exposes_output_and_tool_context(
     monkeypatch, tmp_path
 ):
     runtime = _make_subagent_runtime(tmp_path)
+    hook_events = []
+    runtime.hooks = SimpleNamespace(
+        dispatch=lambda event, session_id, payload, scope=None: hook_events.append(
+            (event, session_id, payload)
+        )
+        or None
+    )
     entered = threading.Event()
     release = threading.Event()
     seen = {}
@@ -407,6 +419,18 @@ def test_subagent_background_returns_and_exposes_output_and_tool_context(
         assert task["subagent_type"] == "general-purpose"
         assert task["steps"] == 2
         assert task["tool_calls"] == 1
+        assert [event[0] for event in hook_events] == [
+            "SubagentStart",
+            "PreToolUse",
+            "PostToolUse",
+            "SubagentStop",
+        ]
+        assert hook_events[0][1] == "session-parent"
+        assert hook_events[1][1] == result["subagent_id"]
+        assert hook_events[2][1] == result["subagent_id"]
+        assert hook_events[3][1] == "session-parent"
+        assert hook_events[0][2]["subagentId"] == result["subagent_id"]
+        assert hook_events[3][2]["exitCode"] == 0
     finally:
         release.set()
         runtime.task_manager.shutdown()
