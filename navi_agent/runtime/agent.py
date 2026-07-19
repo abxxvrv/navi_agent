@@ -2131,8 +2131,9 @@ class AgentRuntime:
                 name="lsp",
                 description=(
                     "Query a configured language server for definitions, references, "
-                    "implementations, document symbols, or workspace symbols. Input positions "
-                    "are 0-based; returned positions are 1-based."
+                    "implementations, document symbols, or workspace symbols, or restart all "
+                    "servers after changing project language-server configuration. Input "
+                    "positions are 0-based; returned positions are 1-based."
                 ),
                 parameters={
                     "type": "object",
@@ -2145,6 +2146,7 @@ class AgentRuntime:
                                 "goToImplementation",
                                 "documentSymbol",
                                 "workspaceSymbol",
+                                "restart",
                             ],
                         },
                         "file_path": {

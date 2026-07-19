@@ -322,7 +322,7 @@ Navi 在启动时依次加载 `config.json` 顶层 `hooks`、`~/.navi/hooks/*.js
 }
 ```
 
-配置存在时，Navi 注册一个只读 `lsp` 工具，支持 `goToDefinition`、`findReferences`、`goToImplementation`、`documentSymbol` 和 `workspaceSymbol`。输入行列从 0 开始，结果行列从 1 开始。用户配置覆盖同名插件配置；只有用户配置和已信任插件中的 LSP 会启动，不会执行项目目录里的 LSP 配置。
+配置存在时，Navi 注册 `lsp` 工具，支持 `goToDefinition`、`findReferences`、`goToImplementation`、`documentSymbol`、`workspaceSymbol` 和 `restart`。输入行列从 0 开始，结果行列从 1 开始。修改 `pyrightconfig.json`、`pyproject.toml` 等项目原生配置后，调用 `restart` 会关闭现有 language server，下一次查询按新配置启动。用户配置覆盖同名插件配置；只有用户配置和已信任插件中的 LSP 会启动，不会执行项目目录里的 LSP server 配置。
 
 ## 会话与记忆
 

@@ -300,3 +300,26 @@ def test_lsp_discards_dead_client_for_next_lazy_start(tmp_path):
     assert result["ok"] is False
     assert manager.clients == {}
     client.close.assert_called_once_with()
+
+
+def test_lsp_restart_closes_active_clients(tmp_path):
+    manager = LspManager(
+        tmp_path,
+        navi_home=tmp_path / "home",
+        plugin_servers={
+            "python": {
+                "command": "unused",
+                "extensions": {".py": "python"},
+            }
+        },
+    )
+    client = Mock()
+    manager.clients["python"] = client
+
+    assert manager.query("restart") == {
+        "ok": True,
+        "operation": "restart",
+        "servers": ["python"],
+    }
+    assert manager.clients == {}
+    client.close.assert_called_once_with()

@@ -422,6 +422,18 @@ class LspManager:
         character: int | None = None,
         query: str | None = None,
     ) -> dict[str, Any]:
+        if operation == "restart":
+            with self._lock:
+                clients = list(self.clients.values())
+                self.clients.clear()
+            for client in clients:
+                client.close()
+            return {
+                "ok": True,
+                "operation": operation,
+                "servers": sorted(self.servers),
+            }
+
         operations = {
             "goToDefinition": "textDocument/definition",
             "findReferences": "textDocument/references",
