@@ -65,9 +65,10 @@ class SubAgent:
         system_prompt: str | None = None,
         agent_id: str | None = None,
         store: AgentInstanceStore | None = None,
-        tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+        tool_executor: Callable[[str, str, dict[str, Any]], Any] | None = None,
         scope: TurnScope | None = None,
         stream_runner: ModelStreamRunner | None = None,
+        max_steps: int | None = None,
     ):
         self.router = router
         self.tools = tools
@@ -78,6 +79,7 @@ class SubAgent:
         self.tool_executor = tool_executor
         self.scope = scope
         self.stream_runner = stream_runner
+        self.max_steps = max_steps
         self.context: list[dict[str, Any]] = []
 
     def run(
@@ -85,7 +87,7 @@ class SubAgent:
         user_input: str,
         context_messages: list[dict[str, Any]] | None = None,
     ) -> SubAgentResult:
-        """同步执行子 agent。超时由调用方（_run_subagent）从外部强制，不在此处自查。"""
+        """同步执行子 agent。"""
         messages: list[dict[str, Any]] = []
 
         if self.system_prompt:
@@ -94,17 +96,17 @@ class SubAgent:
             messages.extend(self.context)
         elif context_messages:
             messages.extend(context_messages)
+        new_turn_start = len(messages)
         messages.append({"role": "user", "content": user_input})
 
         all_tool_calls: list[dict[str, Any]] = []
         steps = 0
-        # 记住本轮对话的起始位置，只持久化本轮新增部分
-        new_turn_start = len(messages)
 
         while True:
-            # Ctrl+C / 父 agent 取消（含外部超时触发的 set_interrupt）：被取消即抛出向上传播
             if self.scope is not None:
                 self.scope.raise_if_cancelled()
+            if self.max_steps is not None and steps >= self.max_steps:
+                raise RuntimeError(f"子 agent 已达到最大执行步数（{self.max_steps}）。")
 
             steps += 1
 
@@ -113,9 +115,17 @@ class SubAgent:
 
             # 没有 tool_calls → 结束
             if not tool_calls:
-                # 只保存本轮新增的对话（不含 system prompt、context_messages、旧 context）
-                self.context = [m for m in messages[new_turn_start:] if m.get("role") != "system"]
-                self._persist()
+                if not content.strip():
+                    raise RuntimeError("子 agent 返回了空响应。")
+                messages.append({"role": "assistant", "content": content})
+                self.context.extend(
+                    message
+                    for message in messages[new_turn_start:]
+                    if message.get("role") != "system"
+                )
+                if self.store and self.agent_id:
+                    self.store.save_context(self.agent_id, self.context)
+                    self.store.update_meta(self.agent_id, status="completed")
                 return SubAgentResult(
                     content=content,
                     tool_calls_made=all_tool_calls,
@@ -137,12 +147,12 @@ class SubAgent:
                 try:
                     tc_args = json.loads(tc_args_raw) if tc_args_raw else {}
                     if not isinstance(tc_args, dict):
-                        tc_args = {}
-                except (json.JSONDecodeError, TypeError):
+                        raise ValueError("tool arguments must be a JSON object")
+                except (json.JSONDecodeError, TypeError, ValueError) as exc:
                     tc_args = {}
-
-                # 执行工具
-                result = self._execute_tool(tc_name, tc_args)
+                    result = {"ok": False, "error": f"Invalid tool arguments: {exc}"}
+                else:
+                    result = self._execute_tool(tc_id, tc_name, tc_args)
                 result_str = json.dumps(result, ensure_ascii=False)
 
                 messages.append({
@@ -156,12 +166,6 @@ class SubAgent:
                     "args": tc_args,
                     "result": result,
                 })
-
-    def _persist(self) -> None:
-        """持久化上下文到 store。"""
-        if self.store and self.agent_id:
-            self.store.save_context(self.agent_id, self.context)
-            self.store.update_meta(self.agent_id, status="completed")
 
     def _call_llm(self, messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
         """流式调用 LLM，返回 (content, tool_calls)。"""
@@ -212,14 +216,19 @@ class SubAgent:
         tool_calls = [tool_calls_map[i] for i in sorted(tool_calls_map.keys())] if tool_calls_map else []
         return content, tool_calls
 
-    def _execute_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+    def _execute_tool(
+        self,
+        tool_call_id: str,
+        name: str,
+        args: dict[str, Any],
+    ) -> dict[str, Any]:
         """执行单个工具。"""
         if name not in self.tool_handlers:
             return {"ok": False, "error": f"Unknown tool: {name}"}
         try:
             # tool_executor 存在时走父 runtime（带审批），否则直接调处理函数
             if self.tool_executor is not None:
-                return self.tool_executor(name, args)
+                return self.tool_executor(tool_call_id, name, args)
             return self.tool_handlers[name](**args)
         except Exception as exc:
             return {"ok": False, "error": str(exc)}
@@ -232,9 +241,10 @@ def prepare_agent(
     system_prompt: str | None = None,
     agent_id: str | None = None,
     store: AgentInstanceStore | None = None,
-    tool_executor: Callable[[str, dict[str, Any]], Any] | None = None,
+    tool_executor: Callable[[str, str, dict[str, Any]], Any] | None = None,
     scope: TurnScope | None = None,
     stream_runner: ModelStreamRunner | None = None,
+    max_steps: int | None = None,
 ) -> SubAgent:
     """从父 ToolRegistry 按名字取工具，构造 SubAgent。
 
@@ -245,7 +255,7 @@ def prepare_agent(
         system_prompt: 子 agent 的系统提示词，None = 无。
         agent_id: 恢复已有实例的 ID，None = 新建。
         store: 实例存储，传入时启用持久化。
-        tool_executor: 工具执行回调 (name, args) -> result，传入时子工具走它（用于接入父审批）。
+        tool_executor: 工具执行回调 (tool_call_id, name, args) -> result，传入时子工具走它（用于接入父审批）。
     """
     # 恢复模式：从 store 加载 meta 和 context
     if agent_id and store:
@@ -287,6 +297,7 @@ def prepare_agent(
         tool_executor=tool_executor,
         scope=scope,
         stream_runner=stream_runner,
+        max_steps=max_steps,
     )
     agent.context = context
     return agent

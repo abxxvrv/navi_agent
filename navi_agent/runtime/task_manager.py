@@ -23,7 +23,7 @@ class _Task:
     command: str
     cwd: str
     shell: str
-    process: subprocess.Popen
+    process: subprocess.Popen | None
     started_at: float
     output_file: str
     timeout_seconds: float | None
@@ -39,6 +39,8 @@ class _Task:
     timed_out: bool = False
     suppress_completion: bool = False
     waiters: int = 0
+    cancel_callback: Callable[[str], None] | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
     windows_job: tuple[Any, Any] | None = None
     done: threading.Event = field(default_factory=threading.Event)
     detached: threading.Event = field(default_factory=threading.Event)
@@ -122,7 +124,8 @@ class TaskManager:
                 raise RuntimeError("task manager is shutting down")
             if background:
                 active = sum(
-                    task.status == "running" and task.background
+                    task.status == "running"
+                    and (task.background or task.task_type == "subagent")
                     for task in self._tasks.values()
                 )
                 if active >= self.max_background_tasks:
@@ -200,7 +203,11 @@ class TaskManager:
                 self._tasks.pop(task_id, None)
             return result
 
-    def background_current(self, tool_call_id: str | None = None) -> dict[str, Any] | None:
+    def background_current(
+        self,
+        tool_call_id: str | None = None,
+        task_id: str | None = None,
+    ) -> dict[str, Any] | None:
         with self._condition:
             candidates = [
                 task
@@ -208,22 +215,80 @@ class TaskManager:
                 if task.status == "running"
                 and not task.background
                 and (tool_call_id is None or task.tool_call_id == tool_call_id)
+                and (task_id is None or task.task_id == task_id)
             ]
             if not candidates:
                 return None
+            task = max(candidates, key=lambda item: item.started_at)
             active = sum(
-                task.status == "running" and task.background
-                for task in self._tasks.values()
+                item.status == "running"
+                and (item.background or item.task_type == "subagent")
+                for item in self._tasks.values()
+                if item is not task
             )
             if active >= self.max_background_tasks:
                 return None
-            task = max(candidates, key=lambda item: item.started_at)
             task.background = True
             task.detached.set()
             snapshot = self._snapshot_locked(task)
         if self.on_event is not None:
             self.on_event({"type": "task_backgrounded", "task": snapshot})
         return snapshot
+
+    def start_worker(
+        self,
+        task_id: str,
+        command: str,
+        cwd: str | Path,
+        *,
+        description: str,
+        target: Callable[[], dict[str, Any]],
+        cancel: Callable[[str], None],
+        background: bool,
+        tool_call_id: str | None = None,
+    ) -> dict[str, Any]:
+        output_file = (
+            str(self.log_dir / f"subagent-{task_id}.log")
+            if self.log_dir is not None
+            else ""
+        )
+        with self._condition:
+            if self._closing:
+                raise RuntimeError("task manager is shutting down")
+            active = sum(
+                task.status == "running"
+                and (task.background or task.task_type == "subagent")
+                for task in self._tasks.values()
+            )
+            if active >= self.max_background_tasks:
+                raise RuntimeError(
+                    f"maximum of {self.max_background_tasks} background tasks reached"
+                )
+            task = _Task(
+                task_id=task_id,
+                task_type="subagent",
+                command=command,
+                cwd=str(Path(cwd).resolve()),
+                shell="",
+                process=None,
+                started_at=time.time(),
+                output_file=output_file,
+                timeout_seconds=None,
+                background=background,
+                tool_call_id=tool_call_id,
+                description=description,
+                cancel_callback=cancel,
+            )
+            self._tasks[task_id] = task
+
+        threading.Thread(
+            target=self._run_worker,
+            args=(task, target),
+            name=f"navi-subagent-{task_id}",
+            daemon=True,
+        ).start()
+        with self._condition:
+            return self._snapshot_locked(task)
 
     def get_output(
         self,
@@ -291,7 +356,11 @@ class TaskManager:
                 }
             task.cancelled = True
             task.suppress_completion = True
-        self._terminate_process(task)
+            cancel_callback = task.cancel_callback
+        if cancel_callback is not None:
+            cancel_callback(f"Task {task_id} was killed")
+        else:
+            self._terminate_process(task)
         task.done.wait(2)
         return {
             "task_id": task_id,
@@ -356,7 +425,7 @@ class TaskManager:
             "cwd": task.cwd,
             "shell": task.shell,
             "status": task.status,
-            "pid": task.process.pid,
+            "pid": task.process.pid if task.process is not None else None,
             "exit_code": task.exit_code,
             "started": datetime.fromtimestamp(task.started_at, timezone.utc).isoformat(),
             "ended": (
@@ -368,6 +437,7 @@ class TaskManager:
             "output": task.output,
             "output_file": task.output_file,
             "truncated": task.truncated,
+            **task.metadata,
         }
 
     def _read_output(
@@ -377,6 +447,7 @@ class TaskManager:
         on_output: Callable[[str], None] | None,
         on_line: Callable[[str, str, str], None] | None,
     ) -> None:
+        assert task.process is not None
         log = (
             Path(task.output_file).open("w", encoding="utf-8", newline="")
             if task.output_file
@@ -411,6 +482,7 @@ class TaskManager:
         reader: threading.Thread,
         on_done: Callable[[str], None] | None,
     ) -> None:
+        assert task.process is not None
         deadline = (
             time.monotonic() + task.timeout_seconds
             if task.timeout_seconds is not None
@@ -471,8 +543,64 @@ class TaskManager:
             if self.on_event is not None:
                 self.on_event({"type": "task_completed", "task": snapshot})
 
+    def _run_worker(
+        self,
+        task: _Task,
+        target: Callable[[], dict[str, Any]],
+    ) -> None:
+        cancelled = False
+        try:
+            result = target()
+            success = result.get("success", True)
+            output = str(result.get("content") or result.get("error") or "")
+            metadata = {
+                key: value
+                for key, value in result.items()
+                if key not in {"success", "content", "error"}
+            }
+            if result.get("error"):
+                metadata["error"] = str(result["error"])
+        except KeyboardInterrupt as exc:
+            cancelled = True
+            success = False
+            output = str(exc)
+            metadata = {}
+        except Exception as exc:
+            success = False
+            output = str(exc)
+            metadata = {"error": str(exc)}
+
+        if task.output_file:
+            Path(task.output_file).write_text(output, encoding="utf-8")
+        with self._condition:
+            task.output = output[-self.max_output_chars :]
+            task.truncated = len(output) > self.max_output_chars
+            task.metadata.update(metadata)
+            task.ended_at = time.time()
+            if task.cancelled or cancelled:
+                task.status = "cancelled"
+                task.exit_code = None
+            elif success:
+                task.status = "completed"
+                task.exit_code = 0
+            else:
+                task.status = "failed"
+                task.exit_code = 1
+            should_emit = (
+                task.background
+                and not task.suppress_completion
+                and task.waiters == 0
+                and not self._closing
+            )
+            snapshot = self._snapshot_locked(task)
+            task.done.set()
+            self._condition.notify_all()
+        if should_emit and self.on_event is not None:
+            self.on_event({"type": "task_completed", "task": snapshot})
+
     def _terminate_process(self, task: _Task) -> None:
         process = task.process
+        assert process is not None
         if platform.system() == "Windows":
             with self._condition:
                 if task.windows_job is not None:
@@ -510,6 +638,7 @@ class TaskManager:
         process_group: int | None = None,
     ) -> None:
         process = task.process
+        assert process is not None
         if platform.system() == "Windows":
             if task.windows_job is not None:
                 kernel32, job = task.windows_job

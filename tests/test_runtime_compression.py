@@ -4,6 +4,7 @@ from pathlib import Path
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.runtime.scheduler import Scheduler
 from navi_agent.runtime.task_manager import TaskManager
+from navi_agent.storage.agent_store import AgentInstanceStore
 from navi_agent.storage.scheduler_store import SchedulerStore
 from navi_agent.storage.history_store import HistoryStore
 
@@ -38,6 +39,9 @@ def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
     runtime.compressor = FakeCompressor(compressed_messages)
     runtime.goal_runner = SimpleNamespace(rebind=lambda old, new: None)
     runtime.navi_home = tmp_path / "navi"
+    runtime.agent_store = AgentInstanceStore(runtime.navi_home / "agents")
+    agent_id = runtime.agent_store.create("explore")
+    runtime.agent_store.update_meta(agent_id, parent_session_id=parent.session_id)
     runtime.task_manager = TaskManager(
         runtime.navi_home / "sessions" / parent.session_id / "tasks"
     )
@@ -74,6 +78,10 @@ def test_compress_context_to_new_session_switches_runtime_store(tmp_path):
         ]
         assert loaded_child.meta["parent_session_id"] == parent.session_id
         assert loaded_child.messages == compressed_messages
+        assert (
+            runtime.agent_store.get_meta(agent_id)["parent_session_id"]
+            == result["new_session_id"]
+        )
         assert scheduler_store.load(parent.session_id) == []
         assert [task["id"] for task in scheduler_store.load(result["new_session_id"])] == [
             scheduled["id"]

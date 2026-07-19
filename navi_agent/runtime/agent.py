@@ -6,6 +6,7 @@ import random
 import threading
 import base64
 from collections.abc import Callable
+from contextlib import nullcontext
 import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor
 import os
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 from ..paths import load_navi_dotenv
 
 from ..context.context_manager import ContextManager
+from ..storage.agent_store import AgentInstanceStore
 from ..storage.history_store import HistoryStore
 from .interrupt_scope import TurnScope
 from .interruptible import run_model_stream, tool_worker, wait_approval
@@ -131,6 +133,7 @@ class AgentRuntime:
             workspace=self.workspace,
             navi_home=self.navi_home,
         )
+        self._approval_lock = threading.Lock()
 
         history_db_path = self.navi_home / "history.sqlite3"
 
@@ -192,6 +195,7 @@ class AgentRuntime:
         self._execution_thread_id: int | None = None
         self._tool_worker_threads: set[int] = set()
         self._tool_worker_threads_lock = threading.Lock()
+        self.agent_store = AgentInstanceStore(self.navi_home / "agents")
         self.task_manager = TaskManager(
             self.navi_home / "sessions" / self.session_store.session_id / "tasks",
             on_event=self._emit,
@@ -693,6 +697,12 @@ class AgentRuntime:
         )
         new_store.save_usage({})
         self.scheduler.rebind(new_store.session_id)
+        for meta in self.agent_store.list_instances():
+            if meta.get("parent_session_id") == old_session_id:
+                self.agent_store.update_meta(
+                    meta["agent_id"],
+                    parent_session_id=new_store.session_id,
+                )
         self.task_manager.log_dir = (
             self.navi_home / "sessions" / new_store.session_id / "tasks"
         )
@@ -1251,15 +1261,16 @@ class AgentRuntime:
             return tool_result
 
         try:
-            approval_scope = scope or self._require_scope()
-            approval_scope.raise_if_cancelled()
-            user_choice = wait_approval(
-                approval_scope,
-                self.approval_handler,
-                decision,
-            )
-            approval_scope.raise_if_cancelled()
-            approved = self.approval_manager.resolve_user_choice(decision, user_choice) # 这是个 bool 值
+            with self._approval_lock:
+                approval_scope = scope or self._require_scope()
+                approval_scope.raise_if_cancelled()
+                user_choice = wait_approval(
+                    approval_scope,
+                    self.approval_handler,
+                    decision,
+                )
+                approval_scope.raise_if_cancelled()
+                approved = self.approval_manager.resolve_user_choice(decision, user_choice) # 这是个 bool 值
         except Exception as exc:
             reason = f"审批处理失败：{exc}"
             tool_result = {
@@ -1715,7 +1726,7 @@ class AgentRuntime:
         self.tool_registry.register(
             name="get_task_output",
             description=(
-                "Get status and output for up to 20 background tasks. Omit timeout_ms or "
+                "Get status and output for up to 20 commands, monitors, or subagents. Omit timeout_ms or "
                 "use 0 to poll; a positive timeout waits until all requested tasks finish."
             ),
             parameters={
@@ -1740,7 +1751,7 @@ class AgentRuntime:
         )
         self.tool_registry.register(
             name="wait_tasks",
-            description="Wait until any or all requested background tasks finish.",
+            description="Wait until any or all requested commands, monitors, or subagents finish.",
             parameters={
                 "type": "object",
                 "properties": {
@@ -1768,7 +1779,7 @@ class AgentRuntime:
         )
         self.tool_registry.register(
             name="kill_task",
-            description="Stop a background command or monitor by task ID.",
+            description="Stop a command, monitor, or subagent by task ID.",
             parameters={
                 "type": "object",
                 "properties": {"task_id": {"type": "string"}},
@@ -2125,30 +2136,34 @@ class AgentRuntime:
         self.tool_registry.register(
             name="agent",
             description="""
-- 派生一个子 agent 来自主完成一个独立的子任务，并把结果汇报回来。
-- action="run"：阻塞执行，子 agent 跑完后把结果作为本工具的结果返回。
-- subagent_type="explore"：只读探索型。拥有全部只读工具（找文件、搜内容、读文件、搜网络/会话），无法修改任何东西。适合在代码库中定位文件、搜索关键词、回答关于代码库的问题。
-- subagent_type="general"：通用型。拥有除本工具外的全部工具（含写文件、执行命令），有风险操作仍会经过用户审批。适合需要多步执行、可能修改文件的子任务。
-- prompt 要写成自包含的完整任务描述：子 agent 看不到你当前的对话，只能看到 prompt。
-- 何时用：需要把一块边界清晰、可独立完成的工作交出去时；尤其是探索类任务，交给 explore 能省下主对话的上下文。
+- 派生子 agent 完成边界清晰的独立任务。默认后台运行并立即返回 task_id；之后用 get_task_output、wait_tasks 或 kill_task 管理。
+- background=false 会等待结果；等待超过 timeout_ms 时任务会继续在后台运行，不会被取消。
+- general-purpose 可读写并执行命令；explore 只读探索；plan 只读分析并输出实施计划。子 agent 不能继续派生子 agent。
+- prompt 必须自包含；description 是用于任务列表和完成提醒的短标签。
+- resume_from 会从同一父会话、同类型且已完成的子 agent 继续，并创建新的 subagent_id。
 """,
             parameters={
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["run"],
-                        "description": "执行方式。run=阻塞执行，子 agent 结果作为工具结果返回。",
-                    },
                     "subagent_type": {
                         "type": "string",
-                        "enum": ["explore", "general"],
-                        "description": "子 agent 类型。explore=只读探索，general=通用任务。",
+                        "enum": ["general-purpose", "explore", "plan"],
+                        "default": "general-purpose",
                     },
                     "prompt": {
                         "type": "string",
                         "description": "给子 agent 的完整、自包含的任务描述（作为 user 消息传入）。",
                         "minLength": 1,
+                    },
+                    "description": {
+                        "type": "string",
+                        "description": "任务短标签。",
+                        "minLength": 1,
+                    },
+                    "background": {
+                        "type": "boolean",
+                        "description": "后台运行并立即返回 task_id。",
+                        "default": True,
                     },
                     "model": {
                         "type": "object",
@@ -2157,19 +2172,21 @@ class AgentRuntime:
                             "provider": {"type": "string", "description": "供应商名，如 deepseek / mimo。"},
                             "model": {"type": "string", "description": "模型名。"},
                         },
+                        "required": ["provider", "model"],
                     },
-                    "actor_id": {
+                    "resume_from": {
                         "type": "string",
-                        "description": "（可选，暂未启用恢复）用于恢复已有子 agent；会话间不共享。",
+                        "description": "已完成子 agent 的 ID；类型和父会话必须相同。",
                     },
                     "timeout_ms": {
                         "type": "integer",
-                        "description": "（可选）超时毫秒数，到点返回已有进展。默认 600000（10 分钟）。",
+                        "description": "前台等待预算，超时后任务转后台。",
                         "default": 600000,
                         "minimum": 1,
+                        "maximum": 600000,
                     },
                 },
-                "required": ["action", "subagent_type", "prompt"],
+                "required": ["prompt", "description"],
             },
             function=self._run_subagent,
         )
@@ -2203,29 +2220,36 @@ class AgentRuntime:
 
     def _run_subagent(
         self,
-        action: str,
-        subagent_type: str,
         prompt: str,
+        description: str,
+        subagent_type: str = "general-purpose",
+        background: bool = True,
         model: dict[str, Any] | None = None,
-        actor_id: str | None = None,
+        resume_from: str | None = None,
         timeout_ms: int = 600_000,
     ) -> dict[str, Any]:
-        """agent 工具入口：按类型构造并同步运行一个子 agent。
-
-        actor_id 暂仅作为参数接收，恢复逻辑后续实现。
-        """
-        if action != "run":
-            return {"ok": False, "error": f"未知 action：{action}，应为 run。"}
         if not isinstance(prompt, str) or not prompt.strip():
             return {"ok": False, "error": "prompt 必须是非空字符串。"}
-        if not isinstance(timeout_ms, int) or isinstance(timeout_ms, bool) or timeout_ms < 1:
-            return {"ok": False, "error": "timeout_ms 必须是大于等于 1 的整数。"}
+        if not isinstance(description, str) or not description.strip():
+            return {"ok": False, "error": "description 必须是非空字符串。"}
+        if not isinstance(background, bool):
+            return {"ok": False, "error": "background 必须是布尔值。"}
+        if (
+            not isinstance(timeout_ms, int)
+            or isinstance(timeout_ms, bool)
+            or not 1 <= timeout_ms <= 600_000
+        ):
+            return {"ok": False, "error": "timeout_ms 必须是 1 到 600000 之间的整数。"}
 
-        # 工具集 + 内置系统提示词文件（各从 ~/.navi 下的 .txt 加载）
+        if subagent_type == "general":
+            subagent_type = "general-purpose"
         if subagent_type == "explore":
             tool_names = [n for n in EXPLORE_TOOLS if n in self.tool_registry._tools]
             prompt_file = "subagent-explore-prompt.txt"
-        elif subagent_type == "general":
+        elif subagent_type == "plan":
+            tool_names = [n for n in EXPLORE_TOOLS if n in self.tool_registry._tools]
+            prompt_file = "subagent-plan-prompt.txt"
+        elif subagent_type == "general-purpose":
             tool_names = [
                 n
                 for n in self.tool_registry._tools
@@ -2233,89 +2257,218 @@ class AgentRuntime:
             ]
             prompt_file = "subagent-general-prompt.txt"
         else:
-            return {"ok": False, "error": f"未知 subagent_type：{subagent_type}，应为 explore 或 general。"}
+            return {
+                "ok": False,
+                "error": (
+                    f"未知 subagent_type：{subagent_type}，"
+                    "应为 general-purpose、explore 或 plan。"
+                ),
+            }
 
-        # 两类提示词都走主 agent 的同一套变量替换（NAVI_OS / NAVI_WORK_DIR / NAVI_SKILLS 等）；
-        # Jinja 只替换模板中实际出现的占位符，未用到的变量不会注入内容。
         template = self.context_manager._read_text_file(self.navi_home / prompt_file, None)
+        if not template and subagent_type == "plan":
+            template = self.context_manager._read_text_file(
+                self.navi_home / "subagent-explore-prompt.txt",
+                None,
+            )
+            if template:
+                template += "\n\n只做分析，不修改文件。最终输出可直接执行的分步实施计划。"
         system_prompt = self.context_manager._render_system_prompt_template(
             template,
             agents_md=self.context_manager.load_agents_md(),
             skills_prompt=self.context_manager.build_skill_index_prompt(),
         ) if template else self._system_prompt
 
-        # 选模型：不传用主 router，传了就按 provider + model 新建
+        source_meta = None
+        if resume_from is not None:
+            if (
+                not isinstance(resume_from, str)
+                or len(resume_from) != 10
+                or not resume_from.startswith("a_")
+                or any(char not in "0123456789abcdef" for char in resume_from[2:])
+            ):
+                return {"ok": False, "error": "resume_from 不是有效的子 agent ID。"}
+            source_meta = self.agent_store.get_meta(resume_from)
+            if source_meta is None:
+                return {"ok": False, "error": f"找不到子 agent：{resume_from}。"}
+            if source_meta.get("parent_session_id") != self.session_store.session_id:
+                return {"ok": False, "error": "只能恢复当前父会话的子 agent。"}
+            if source_meta.get("status") != "completed":
+                return {"ok": False, "error": "只能恢复已完成的子 agent。"}
+            if source_meta.get("agent_type") != subagent_type:
+                return {"ok": False, "error": "恢复时 subagent_type 必须与原实例相同。"}
+            model = source_meta.get("model")
+
         router = self.router
         if model:
-            router = ModelRouter(get_config_path(), provider=model.get("provider", ""), model=model.get("model", ""))
-            if router._provider is None:
-                return {"ok": False, "error": f"模型不可用：provider={model.get('provider')!r} 未在 config.json 中配置。"}
+            if not isinstance(model, dict):
+                return {"ok": False, "error": "model 必须是对象。"}
+            if (
+                model.get("provider") != self.router.provider
+                or model.get("model") != self.router.model
+            ):
+                router = ModelRouter(
+                    get_config_path(),
+                    provider=model.get("provider", ""),
+                    model=model.get("model", ""),
+                )
+                if router._provider is None:
+                    return {
+                        "ok": False,
+                        "error": f"模型不可用：provider={model.get('provider')!r} 未在 config.json 中配置。",
+                    }
 
-        # 子 agent 使用自己的 scope：timeout 只取消子 agent，父 Ctrl+C 再通过 aborter 转发。
         parent_scope = self._require_scope()
         child_scope = TurnScope(threading.Event())
         stream_runner = ModelStreamRunner(router, child_scope.cancel_event)
-
-        # 子工具走父审批：被拒/拒绝时返回错误结果，允许时真正执行
-        def _exec(name: str, args: dict[str, Any]) -> Any:
-            denied = self._handle_approval(
-                tool_call_id="subagent",
-                tool_name=name,
-                tool_args=args,
-                scope=child_scope,
+        agent_id = self.agent_store.create(
+            agent_type=subagent_type,
+            system_prompt=system_prompt,
+            tool_names=tool_names,
+        )
+        if source_meta is not None:
+            self.agent_store.save_context(
+                agent_id,
+                self.agent_store.load_context(resume_from),
             )
-            if denied is not None:
-                return denied
-            return self.tool_registry.invoke(name, args)
+        self.agent_store.update_meta(
+            agent_id,
+            status="running",
+            parent_session_id=self.session_store.session_id,
+            description=description.strip(),
+            model={"provider": router.provider, "model": router.model},
+            resumed_from=resume_from,
+        )
+
+        def _exec(tool_call_id: str, name: str, args: dict[str, Any]) -> Any:
+            token = CURRENT_TOOL_CONTEXT.set(
+                ToolExecutionContext(scope=child_scope, tool_call_id=tool_call_id)
+            )
+            try:
+                denied = self._handle_approval(
+                    tool_call_id=tool_call_id,
+                    tool_name=name,
+                    tool_args=args,
+                    scope=child_scope,
+                )
+                if denied is not None:
+                    return denied
+                return self.tool_registry.invoke(name, args)
+            finally:
+                CURRENT_TOOL_CONTEXT.reset(token)
 
         agent = prepare_agent(
             router=router,
             tool_names=tool_names,
             tool_registry=self.tool_registry,
             system_prompt=system_prompt,
+            agent_id=agent_id,
+            store=self.agent_store,
             tool_executor=_exec,
             scope=child_scope,
             stream_runner=stream_runner,
+            max_steps=self.max_steps,
         )
 
-        # 子 agent 在嵌套线程里跑，本线程用带超时的 join 当“外部 watcher”：
-        #  - join 到点仍存活  => 超时：cancel child scope，返回超时结果（主 agent 继续）
-        #  - join 提前返回带 KeyboardInterrupt => Ctrl+C：向上传播（整轮停）
-        box: dict[str, Any] = {}
-
-        def _runner() -> None:
+        def _runner() -> dict[str, Any]:
             child_scope.attach_execution_thread()
             try:
                 with tool_worker(child_scope):
-                    box["result"] = agent.run(user_input=prompt)
-            except BaseException as exc:  # 含 KeyboardInterrupt，交由本线程判定来源
-                box["exc"] = exc
+                    result = agent.run(user_input=prompt)
+                self.agent_store.update_meta(
+                    agent_id,
+                    status="completed",
+                    steps=result.steps,
+                    tool_calls=len(result.tool_calls_made),
+                )
+                return {
+                    "success": result.success,
+                    "content": result.content,
+                    "subagent_type": subagent_type,
+                    "steps": result.steps,
+                    "tool_calls": len(result.tool_calls_made),
+                    "resume_from_hint": agent_id,
+                }
+            except KeyboardInterrupt:
+                self.agent_store.update_meta(agent_id, status="cancelled")
+                raise
+            except Exception as exc:
+                self.agent_store.update_meta(
+                    agent_id,
+                    status="failed",
+                    error=str(exc),
+                )
+                raise
             finally:
                 child_scope.close()
 
-        worker = threading.Thread(target=_runner, daemon=True)
-        with parent_scope.aborter(lambda: child_scope.cancel("父 agent 中断")):
-            worker.start()
-            worker.join(timeout=max(0.001, timeout_ms / 1000))
+        context = CURRENT_TOOL_CONTEXT.get()
+        guard = (
+            nullcontext()
+            if background
+            else parent_scope.aborter(lambda: child_scope.cancel("父 agent 中断"))
+        )
+        with guard:
+            try:
+                task = self.task_manager.start_worker(
+                    agent_id,
+                    prompt,
+                    self.workspace,
+                    description=description.strip(),
+                    target=_runner,
+                    cancel=child_scope.cancel,
+                    background=background,
+                    tool_call_id=context.tool_call_id if context is not None else None,
+                )
+            except Exception as exc:
+                child_scope.close()
+                self.agent_store.update_meta(agent_id, status="failed", error=str(exc))
+                return {"ok": False, "error": str(exc), "subagent_id": agent_id}
 
-            if worker.is_alive():
-                # 超时：只取消 child scope，父 agent 收到 timeout 工具结果后继续。
-                child_scope.cancel("子 agent 超时")
-                worker.join(timeout=2.0)
-                if parent_scope.is_cancelled():
-                    raise KeyboardInterrupt("用户中断")
-                return {"ok": True, "content": "(子 agent 超时，已请求停止)", "timeout": True}
+            if background:
+                return {
+                    "ok": True,
+                    "task_id": agent_id,
+                    "subagent_id": agent_id,
+                    "status": task["status"],
+                    "backgrounded": True,
+                }
+            task = self.task_manager.wait_tasks(
+                [agent_id],
+                timeout_ms=timeout_ms,
+            )[0]
 
-        exc = box.get("exc")
-        if isinstance(exc, KeyboardInterrupt):
-            raise exc
-        if exc is not None:
-            return {"ok": False, "error": str(exc)}
-
-        result = box["result"]
+        if parent_scope.is_cancelled():
+            raise KeyboardInterrupt("用户中断")
+        if task["status"] == "running":
+            task = (
+                self.task_manager.background_current(task_id=agent_id)
+                or self.task_manager.get_output([agent_id])[0]
+            )
+            if task["status"] == "running":
+                return {
+                    "ok": True,
+                    "task_id": agent_id,
+                    "subagent_id": agent_id,
+                    "status": "running",
+                    "backgrounded": True,
+                }
+        if task["status"] == "completed":
+            return {
+                "ok": True,
+                "content": task["output"],
+                "subagent_id": agent_id,
+                "subagent_type": subagent_type,
+                "steps": task.get("steps", 0),
+                "tool_calls": task.get("tool_calls", 0),
+                "duration_secs": task["duration_secs"],
+                "resume_from_hint": agent_id,
+            }
         return {
-            "ok": True,
-            "content": result.content,
+            "ok": False,
+            "error": task.get("error") or task["output"] or f"子 agent 状态：{task['status']}",
+            "subagent_id": agent_id,
+            "status": task["status"],
         }
 
     def _init_mcp_tools(self) -> None:
