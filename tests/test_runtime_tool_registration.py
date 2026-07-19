@@ -3,6 +3,8 @@ import json
 from types import SimpleNamespace
 
 from navi_agent.runtime.agent import AgentRuntime, BACKGROUND_TOOL_NAMES
+from navi_agent.runtime.sub_agent import EXPLORE_TOOLS
+from navi_agent.tools.approval import ApprovalManager
 from navi_agent.runtime.goal import GoalRunner
 from navi_agent.runtime.monitor import Monitor
 from navi_agent.runtime.scheduler import Scheduler
@@ -47,6 +49,7 @@ def _runtime(tmp_path):
     runtime.plugin_skills = {}
     runtime.plugin_agents = {}
     runtime.hooks = SimpleNamespace(dispatch=lambda *_args, **_kwargs: None)
+    runtime.lsp = SimpleNamespace(servers={}, query=lambda **_kwargs: {})
     runtime.task_manager = TaskManager(Path(tmp_path) / "tasks")
     runtime.monitor = Monitor(runtime.task_manager, lambda _event: None)
     runtime.scheduler = Scheduler(
@@ -108,6 +111,22 @@ def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path
     windows_runtime = _runtime(tmp_path / "windows")
     windows_runtime._register_tools()
     assert "powershell" in windows_runtime.tool_registry._tools
+
+
+def test_register_tools_exposes_configured_lsp(monkeypatch, tmp_path):
+    monkeypatch.setattr("navi_agent.runtime.agent.RunCommandTool", _CommandTool)
+    monkeypatch.setattr("navi_agent.runtime.agent.platform.system", lambda: "Linux")
+    runtime = _runtime(tmp_path)
+    runtime.lsp = SimpleNamespace(
+        servers={"python": {"command": "server"}},
+        query=lambda **_kwargs: {"ok": True},
+    )
+
+    runtime._register_tools()
+
+    assert "lsp" in runtime.tool_registry._tools
+    assert "lsp" in EXPLORE_TOOLS
+    assert "lsp" in ApprovalManager.READ_ONLY_TOOLS
 
 
 def test_attach_file_only_registered_for_message_gateways(monkeypatch, tmp_path):

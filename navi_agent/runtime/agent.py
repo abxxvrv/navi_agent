@@ -20,6 +20,7 @@ logger = logging.getLogger(__name__)
 from ..paths import load_navi_dotenv
 
 from ..context.context_manager import ContextManager
+from ..integrations.lsp import LspManager
 from ..storage.agent_store import AgentInstanceStore
 from ..storage.history_store import HistoryStore
 from .interrupt_scope import TurnScope
@@ -220,6 +221,11 @@ class AgentRuntime:
             self.navi_home,
             _config.get("hooks"),
             self.plugin_hooks,
+        )
+        self.lsp = LspManager(
+            workspace=self.workspace,
+            navi_home=self.navi_home,
+            plugin_servers=self.plugin_lsp_servers,
         )
 
         self.tool_registry = ToolRegistry()
@@ -2117,6 +2123,52 @@ class AgentRuntime:
             function=GrepTool(workspace=workspace),
         )
 
+        if self.lsp.servers:
+            self.tool_registry.register(
+                name="lsp",
+                description=(
+                    "Query a configured language server for definitions, references, "
+                    "implementations, document symbols, or workspace symbols. Input positions "
+                    "are 0-based; returned positions are 1-based."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "operation": {
+                            "type": "string",
+                            "enum": [
+                                "goToDefinition",
+                                "findReferences",
+                                "goToImplementation",
+                                "documentSymbol",
+                                "workspaceSymbol",
+                            ],
+                        },
+                        "file_path": {
+                            "type": "string",
+                            "description": "Absolute path or path relative to the workspace.",
+                        },
+                        "line": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "0-based line for position queries.",
+                        },
+                        "character": {
+                            "type": "integer",
+                            "minimum": 0,
+                            "description": "0-based character for position queries.",
+                        },
+                        "query": {
+                            "type": "string",
+                            "minLength": 1,
+                            "description": "Symbol name for workspaceSymbol.",
+                        },
+                    },
+                    "required": ["operation"],
+                },
+                function=self.lsp.query,
+            )
+
         # web_search
         self.tool_registry.register(
             name="web_search",
@@ -2778,6 +2830,7 @@ class AgentRuntime:
         with self._turn_lock:
             self.scheduler.close()
             self.task_manager.shutdown()
+            self.lsp.close()
             self.hooks.dispatch(
                 "SessionEnd",
                 self.session_store.session_id,

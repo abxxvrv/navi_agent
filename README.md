@@ -300,6 +300,22 @@ Navi 在启动时依次加载 `config.json` 顶层 `hooks`、`~/.navi/hooks/*.js
 
 脚本从 stdin 接收包含 `hookEventName`、`sessionId`、`workspaceRoot` 和事件字段的 JSON。只有 `PreToolUse` 能阻断工具：输出 `{"decision":"deny","reason":"..."}` 或在没有有效决策 JSON 时以状态码 2 退出；超时、启动失败和其他状态码均不阻断。其余生命周期事件仅用于通知。
 
+## LSP
+
+在 `~/.navi/lsp.json` 配置 stdio language server：
+
+```json
+{
+  "python": {
+    "command": "pyright-langserver",
+    "args": ["--stdio"],
+    "extensions": {".py": "python"}
+  }
+}
+```
+
+配置存在时，Navi 注册一个只读 `lsp` 工具，支持 `goToDefinition`、`findReferences`、`goToImplementation`、`documentSymbol` 和 `workspaceSymbol`。输入行列从 0 开始，结果行列从 1 开始。用户配置覆盖同名插件配置；只有用户配置和已信任插件中的 LSP 会启动，不会执行项目目录里的 LSP 配置。
+
 ## 会话与记忆
 
 Navi 的本地数据目录是：
@@ -313,6 +329,7 @@ Navi 的本地数据目录是：
 | 路径 | 内容 |
 |---|---|
 | `config.json` | provider、模型和 MCP 配置 |
+| `lsp.json` | 用户 LSP server 配置 |
 | `history.sqlite3` | SQLite 会话历史 |
 | `skills/` | 已安装技能 |
 | `plugins/` | 用户插件 |
@@ -449,6 +466,7 @@ navi_agent/
 │   ├── qqbot.py             # QQ 协议 helper
 │   └── qq.py                # QQ 网关 adapter
 ├── integrations/
+│   ├── lsp.py               # stdio LSP 客户端与查询管理
 │   ├── mcp_client.py
 │   └── mcp_commands.py
 ├── skills/

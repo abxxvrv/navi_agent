@@ -120,6 +120,7 @@ class ApprovalManager:
         "get_task_output",
         "wait_tasks",
         "scheduler_list",
+        "lsp",
     }
 
     WRITE_TOOLS = {

@@ -90,6 +90,7 @@ def test_close_dispatches_session_end_after_runtime_workers_stop():
     calls = []
     runtime.scheduler = SimpleNamespace(close=lambda: calls.append("scheduler"))
     runtime.task_manager = SimpleNamespace(shutdown=lambda: calls.append("tasks"))
+    runtime.lsp = SimpleNamespace(close=lambda: calls.append("lsp"))
     runtime.session_store = SimpleNamespace(session_id="session")
     runtime.hooks = SimpleNamespace(
         dispatch=lambda event, session_id, payload: calls.append(event) or None
@@ -97,4 +98,4 @@ def test_close_dispatches_session_end_after_runtime_workers_stop():
 
     runtime.close()
 
-    assert calls == ["scheduler", "tasks", "SessionEnd"]
+    assert calls == ["scheduler", "tasks", "lsp", "SessionEnd"]
