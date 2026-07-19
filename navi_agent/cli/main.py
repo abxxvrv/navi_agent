@@ -887,7 +887,7 @@ def handle_slash_command(
             trust = "trusted" if plugin["trusted"] else "untrusted"
             version = f" {plugin['version']}" if plugin["version"] else ""
             _p(
-                f"- {plugin['name']}{version} [{plugin['scope']}, {state}, {trust}] "
+                f"- {plugin['name']}{version} [{plugin['id']}, {state}, {trust}] "
                 f"skills={len(plugin['skills'])} "
                 f"agents={len(plugin['agents'])} "
                 f"mcp={len(plugin['mcp_servers'])} "
@@ -1392,6 +1392,7 @@ def tools(
     runtime = AgentRuntime(
         workspace=workspace.resolve(),
         max_steps=DEFAULT_MAX_STEPS,
+        enable_scheduler=True,
     )
 
     try:

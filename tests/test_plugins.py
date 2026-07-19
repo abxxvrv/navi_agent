@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -8,6 +9,7 @@ from navi_agent.integrations import mcp_client
 from navi_agent.plugins import discover_plugins
 from navi_agent.runtime.agent import AgentRuntime
 from navi_agent.tools.builtin import SkillViewTool
+from navi_agent.tools.registry import ToolRegistry
 
 
 def test_manifest_priority_and_convention_discovery(tmp_path):
@@ -66,12 +68,17 @@ def test_discovery_precedence_enablement_and_trust(tmp_path):
         encoding="utf-8",
     )
 
+    project_id = next(
+        plugin["id"]
+        for plugin in discover_plugins(workspace, home, {})
+        if plugin["name"] == "project"
+    )
     plugins = discover_plugins(
         workspace,
         home,
         {
             "plugins": {
-                "enabled": ["project", "user"],
+                "enabled": [project_id, "user"],
                 "paths": [str(config)],
             }
         },
@@ -102,6 +109,76 @@ def test_discovery_precedence_enablement_and_trust(tmp_path):
         True,
         False,
     )
+
+
+def test_bare_name_only_selects_user_plugin_over_project_duplicate(tmp_path):
+    workspace = tmp_path / "repo"
+    home = tmp_path / "home"
+    project = workspace / ".navi" / "plugins" / "shared"
+    user = home / "plugins" / "shared"
+    (workspace / ".git").mkdir(parents=True)
+    project.mkdir(parents=True)
+    user.mkdir(parents=True)
+    (project / "plugin.json").write_text('{"name":"shared"}', encoding="utf-8")
+    (user / "plugin.json").write_text('{"name":"shared"}', encoding="utf-8")
+
+    plugins = discover_plugins(
+        workspace,
+        home,
+        {"plugins": {"enabled": ["shared"]}},
+    )
+
+    assert len(plugins) == 1
+    assert plugins[0]["root"] == user.resolve()
+    assert (plugins[0]["scope"], plugins[0]["enabled"], plugins[0]["trusted"]) == (
+        "user",
+        True,
+        True,
+    )
+
+
+def test_project_and_config_plugin_toggles_require_id(tmp_path):
+    workspace = tmp_path / "repo"
+    home = tmp_path / "home"
+    project = workspace / ".navi" / "plugins" / "project"
+    configured = tmp_path / "configured"
+    (workspace / ".git").mkdir(parents=True)
+    project.mkdir(parents=True)
+    configured.mkdir()
+    (project / "plugin.json").write_text('{"name":"project"}', encoding="utf-8")
+    (configured / "plugin.json").write_text(
+        '{"name":"configured"}', encoding="utf-8"
+    )
+
+    plugins = discover_plugins(
+        workspace,
+        home,
+        {
+            "plugins": {
+                "paths": [str(configured)],
+                "enabled": ["project"],
+                "disabled": ["configured"],
+            }
+        },
+    )
+    by_name = {plugin["name"]: plugin for plugin in plugins}
+    assert by_name["project"]["enabled"] is False
+    assert by_name["configured"]["enabled"] is True
+
+    plugins = discover_plugins(
+        workspace,
+        home,
+        {
+            "plugins": {
+                "paths": [str(configured)],
+                "enabled": [by_name["project"]["id"]],
+                "disabled": [by_name["configured"]["id"]],
+            }
+        },
+    )
+    by_name = {plugin["name"]: plugin for plugin in plugins}
+    assert by_name["project"]["enabled"] is True
+    assert by_name["configured"]["enabled"] is False
 
 
 def test_component_paths_cannot_escape_plugin_root(tmp_path):
@@ -328,5 +405,44 @@ def test_malformed_mcp_server_does_not_hide_later_servers(monkeypatch):
             {"bad": "invalid", "good": {"command": "server"}},
         ) == []
         assert "good" in mcp_client._servers
+    finally:
+        mcp_client._servers.clear()
+
+
+def test_connected_mcp_server_registers_tools_in_each_registry(monkeypatch):
+    server = SimpleNamespace(
+        _tools=[
+            SimpleNamespace(
+                name="ping",
+                description="Ping the server",
+                inputSchema={"type": "object", "properties": {}},
+            )
+        ],
+        tool_timeout=1,
+        _registered_tool_names=[],
+    )
+    first = ToolRegistry()
+    second = ToolRegistry()
+    connections = []
+    mcp_client._servers.clear()
+    monkeypatch.setattr(mcp_client, "_MCP_AVAILABLE", True)
+    monkeypatch.setattr(mcp_client, "_ensure_mcp_loop", lambda: None)
+    monkeypatch.setattr(
+        mcp_client,
+        "_connect_server",
+        lambda name, _config: connections.append(name) or server,
+    )
+    monkeypatch.setattr(mcp_client, "_run_on_mcp_loop", lambda value, timeout: value)
+
+    try:
+        assert mcp_client.discover_mcp_tools(
+            first, {"shared": {"command": "server"}}
+        ) == ["mcp_shared_ping"]
+        assert mcp_client.discover_mcp_tools(
+            second, {"shared": {"command": "server"}}
+        ) == ["mcp_shared_ping"]
+        assert first.has("mcp_shared_ping")
+        assert second.has("mcp_shared_ping")
+        assert connections == ["shared"]
     finally:
         mcp_client._servers.clear()

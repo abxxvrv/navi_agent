@@ -101,6 +101,7 @@ class ChatController:
             approval_handler=approval_handler,
             resume_session_id=self.resume_session_id,
             on_output=self.output.raw,
+            enable_scheduler=True,
             plugin_dirs=self.plugin_dirs,
         )
 

@@ -320,6 +320,8 @@ class LspClient:
         try:
             if process.poll() is None:
                 try:
+                    if self._reader_error is not None:
+                        raise RuntimeError(self._reader_error)
                     self.request(
                         "shutdown",
                         None,
@@ -465,6 +467,13 @@ class LspManager:
                         raw_results.extend(result)
                 except Exception as exc:
                     errors.append(f"{name}: {exc}")
+                    if client._reader_error is not None or (
+                        client.process is not None and client.process.poll() is not None
+                    ):
+                        with self._lock:
+                            if self.clients.get(name) is client:
+                                self.clients.pop(name)
+                        client.close()
             if not succeeded:
                 return {
                     "ok": False,
@@ -537,6 +546,13 @@ class LspManager:
                 else:
                     raw_results = []
             except Exception as exc:
+                if client._reader_error is not None or (
+                    client.process is not None and client.process.poll() is not None
+                ):
+                    with self._lock:
+                        if self.clients.get(name) is client:
+                            self.clients.pop(name)
+                    client.close()
                 return {
                     "ok": False,
                     "operation": operation,

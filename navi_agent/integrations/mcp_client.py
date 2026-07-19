@@ -605,6 +605,9 @@ def discover_mcp_tools(registry, servers: Dict[str, dict] | None = None) -> List
 
         if server_name in _servers:
             logger.debug("MCP server '%s' already connected", server_name)
+            all_tool_names.extend(
+                _register_server_tools(server_name, _servers[server_name], registry)
+            )
             continue
 
         try:

@@ -232,6 +232,12 @@ Kimi 使用 Moonshot 官方的 OpenAI Chat Completions 兼容接口。通过 `na
 | `skill_manage` | 管理技能文件 |
 | `memory` | 管理长期记忆 |
 | `agent` | 管理子 agent |
+| `get_task_output` / `wait_tasks` / `kill_task` | 查询、等待或停止后台命令、监控和子 agent |
+| `monitor` | 持续监控命令输出并把事件送回会话 |
+| `scheduler_create` / `scheduler_list` / `scheduler_delete` | 在交互式 CLI 中管理定时 prompt |
+| `lsp` | 查询定义、引用、实现和符号 |
+
+长命令和子 agent 可直接在后台运行；前台执行时按 `Ctrl+G` 会无损转到后台。定时 prompt 只在交互式 CLI 暴露，因为该入口会消费触发事件并启动新一轮对话。
 
 `skill_manage` 支持：
 
@@ -278,6 +284,8 @@ navi --plugin-dir /path/to/plugin
 ```
 
 项目 `.navi/plugins`、`.grok/plugins`、`.claude/plugins` 和用户 `~/.navi/plugins` 中的插件默认禁用。项目或外部配置插件还需把插件根目录的规范化绝对路径逐行写入 `~/.navi/trusted-plugins`，才会启动其 Agent、Hooks、MCP 或 LSP；`--plugin-dir` 代表本次会话显式信任。插件命令使用 `/plugin-name:command`，插件技能和 Agent 使用 `plugin-name:name`。
+
+`enabled` / `disabled` 中的裸插件名只匹配用户插件；项目和外部配置插件使用发现结果中的完整 `id`。同名插件按 CLI、项目、用户、外部配置的优先级选择，但未启用或未信任的副本不会遮蔽后续可用副本。
 
 ## Hooks
 

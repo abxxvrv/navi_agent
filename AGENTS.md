@@ -100,6 +100,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - 优先模仿 Hermes 的中断思路：设置 cancel 标记、设置线程级 cooperative interrupt、abort 当前请求/进程，让执行层自行抛出并清理，不强杀 Python 线程。
 - 会话搜索（`SearchSessionTool`）三种模式复刻 Hermes：DISCOVERY（FTS5 搜索 + lineage 去重 + bookends）、SCROLL（锚定消息窗口）、BROWSE（最近会话列表）。`parent_session_id` 链用于压缩会话的 lineage 归并。搜索结果自动跳过当前活跃会话。
 - 子 agent 默认后台运行并进入 `TaskManager`；前台等待超时后无损转后台，后台不随父 turn 结束，前台随父 scope 取消。查询、等待和终止复用通用任务工具。
+- scheduler 工具只在 `ChatController` 的交互式 CLI runtime 启用；其他入口没有 scheduled event consumer，不应暴露无法触发的定时任务。
 
 ## 7. 未完成任务
 

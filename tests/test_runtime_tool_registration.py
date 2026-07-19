@@ -44,6 +44,7 @@ def _runtime(tmp_path):
     runtime.navi_home = Path(tmp_path) / "home"
     runtime.session_store = _SessionStore()
     runtime._channel = "cli"
+    runtime.enable_scheduler = False
     runtime.on_output = None
     runtime._pending_attachments = []
     runtime.plugin_skills = {}
@@ -73,7 +74,15 @@ def test_register_tools_renames_run_command_to_bash(monkeypatch, tmp_path):
 
     assert "bash" in runtime.tool_registry._tools
     assert "run_command" not in runtime.tool_registry._tools
-    assert BACKGROUND_TOOL_NAMES.issubset(runtime.tool_registry._tools)
+    assert (
+        BACKGROUND_TOOL_NAMES
+        - {"scheduler_create", "scheduler_list", "scheduler_delete"}
+    ).issubset(runtime.tool_registry._tools)
+    assert not {
+        "scheduler_create",
+        "scheduler_list",
+        "scheduler_delete",
+    }.intersection(runtime.tool_registry._tools)
     bash = runtime.tool_registry._tools["bash"]
     assert bash.function.kwargs["task_manager"] is runtime.task_manager
     assert bash.parameters["properties"]["background"]["default"] is False
@@ -111,6 +120,21 @@ def test_register_tools_only_exposes_powershell_on_windows(monkeypatch, tmp_path
     windows_runtime = _runtime(tmp_path / "windows")
     windows_runtime._register_tools()
     assert "powershell" in windows_runtime.tool_registry._tools
+
+
+def test_register_tools_only_exposes_scheduler_when_enabled(monkeypatch, tmp_path):
+    monkeypatch.setattr("navi_agent.runtime.agent.RunCommandTool", _CommandTool)
+    monkeypatch.setattr("navi_agent.runtime.agent.platform.system", lambda: "Linux")
+    runtime = _runtime(tmp_path)
+    runtime.enable_scheduler = True
+
+    runtime._register_tools()
+
+    assert {
+        "scheduler_create",
+        "scheduler_list",
+        "scheduler_delete",
+    }.issubset(runtime.tool_registry._tools)
 
 
 def test_register_tools_exposes_configured_lsp(monkeypatch, tmp_path):
@@ -209,5 +233,9 @@ def test_resume_migrates_run_command_tool_name(monkeypatch, tmp_path):
         "set_goal_budget",
         "update_goal",
     }.issubset(tool_names)
-    assert BACKGROUND_TOOL_NAMES.issubset(tool_names)
+    assert (
+        BACKGROUND_TOOL_NAMES
+        - {"scheduler_create", "scheduler_list", "scheduler_delete"}
+    ).issubset(tool_names)
+    assert "scheduler_create" not in tool_names
     runtime.close()

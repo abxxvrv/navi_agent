@@ -120,18 +120,29 @@ def discover_plugins(
         if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?", name):
             logger.warning("Invalid plugin name %r in %s", name, root)
             continue
-        if name in seen_names:
-            logger.warning("Skipping lower-priority duplicate plugin %s at %s", name, root)
-            continue
-
         plugin_id = f"{scope}/{hashlib.sha256(str(root).encode()).hexdigest()[:8]}/{name}"
-        is_enabled = default_enabled or name in enabled or plugin_id in enabled
-        if name in disabled or plugin_id in disabled:
+        is_enabled = (
+            default_enabled
+            or (scope == "user" and name in enabled)
+            or plugin_id in enabled
+        )
+        if (scope == "user" and name in disabled) or plugin_id in disabled:
             is_enabled = False
         is_trusted = default_trusted or root in trusted_paths
         if scope == "config" and root.is_relative_to(navi_home):
             is_trusted = True
         data_dir = navi_home / "plugin-data" / plugin_id
+        replace_index: int | None = None
+        if name in seen_names:
+            replace_index = next(
+                index for index, plugin in enumerate(plugins) if plugin["name"] == name
+            )
+            selected = plugins[replace_index]
+            if (selected["enabled"] and selected["trusted"]) or not (
+                is_enabled and is_trusted
+            ):
+                logger.warning("Skipping lower-priority duplicate plugin %s at %s", name, root)
+                continue
 
         skill_files: list[Path] = []
         command_files: list[Path] = []
@@ -351,26 +362,28 @@ def discover_plugins(
             continue
         if is_enabled and is_trusted:
             data_dir.mkdir(parents=True, exist_ok=True)
-        seen_names.add(name)
-        plugins.append(
-            {
-                "name": name,
-                "id": plugin_id,
-                "root": root,
-                "data_dir": data_dir,
-                "scope": scope,
-                "enabled": is_enabled,
-                "trusted": is_trusted,
-                "version": manifest.get("version"),
-                "description": manifest.get("description", ""),
-                "mcp_servers": components.get("mcp_servers", {}),
-                "lsp_servers": components.get("lsp_servers", {}),
-                "hooks": components.get("hooks"),
-                "hooks_base": components.get("hooks_base"),
-                "skills": skills,
-                "commands": commands,
-                "agents": agents,
-            }
-        )
+        plugin = {
+            "name": name,
+            "id": plugin_id,
+            "root": root,
+            "data_dir": data_dir,
+            "scope": scope,
+            "enabled": is_enabled,
+            "trusted": is_trusted,
+            "version": manifest.get("version"),
+            "description": manifest.get("description", ""),
+            "mcp_servers": components.get("mcp_servers", {}),
+            "lsp_servers": components.get("lsp_servers", {}),
+            "hooks": components.get("hooks"),
+            "hooks_base": components.get("hooks_base"),
+            "skills": skills,
+            "commands": commands,
+            "agents": agents,
+        }
+        if replace_index is None:
+            seen_names.add(name)
+            plugins.append(plugin)
+        else:
+            plugins[replace_index] = plugin
 
     return plugins

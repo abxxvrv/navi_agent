@@ -119,6 +119,7 @@ class AgentRuntime:
         on_output=None,
         channel: str = "cli",
         enable_goal_mode: bool = True,
+        enable_scheduler: bool = False,
         plugin_dirs: list[Path] | None = None,
     ):
         load_navi_dotenv()
@@ -131,6 +132,7 @@ class AgentRuntime:
         self.on_output = on_output
         self._channel = channel
         self.enable_goal_mode = enable_goal_mode
+        self.enable_scheduler = enable_scheduler
         self.navi_home = get_navi_home()
         self.approval_manager = ApprovalManager(
             mode=approval_mode,
@@ -1996,41 +1998,42 @@ class AgentRuntime:
                 persistent=persistent,
             ),
         )
-        self.tool_registry.register(
-            name="scheduler_create",
-            description=(
-                "Schedule a prompt. Intervals use Ns, Nm, Nh, or Nd and are clamped to a "
-                "minimum of 60 seconds. Recurring tasks expire after 7 days."
-            ),
-            parameters={
-                "type": "object",
-                "properties": {
-                    "interval": {"type": "string"},
-                    "prompt": {"type": "string", "minLength": 1},
-                    "recurring": {"type": "boolean", "default": True},
-                    "durable": {"type": "boolean", "default": False},
-                    "fire_immediately": {"type": "boolean", "default": False},
+        if self.enable_scheduler:
+            self.tool_registry.register(
+                name="scheduler_create",
+                description=(
+                    "Schedule a prompt. Intervals use Ns, Nm, Nh, or Nd and are clamped to a "
+                    "minimum of 60 seconds. Recurring tasks expire after 7 days."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": {
+                        "interval": {"type": "string"},
+                        "prompt": {"type": "string", "minLength": 1},
+                        "recurring": {"type": "boolean", "default": True},
+                        "durable": {"type": "boolean", "default": False},
+                        "fire_immediately": {"type": "boolean", "default": False},
+                    },
+                    "required": ["interval", "prompt"],
                 },
-                "required": ["interval", "prompt"],
-            },
-            function=self.scheduler.create,
-        )
-        self.tool_registry.register(
-            name="scheduler_list",
-            description="List active scheduled prompts and their next fire times.",
-            parameters={"type": "object", "properties": {}},
-            function=self.scheduler.list,
-        )
-        self.tool_registry.register(
-            name="scheduler_delete",
-            description="Cancel a scheduled prompt by ID.",
-            parameters={
-                "type": "object",
-                "properties": {"id": {"type": "string"}},
-                "required": ["id"],
-            },
-            function=self.scheduler.delete,
-        )
+                function=self.scheduler.create,
+            )
+            self.tool_registry.register(
+                name="scheduler_list",
+                description="List active scheduled prompts and their next fire times.",
+                parameters={"type": "object", "properties": {}},
+                function=self.scheduler.list,
+            )
+            self.tool_registry.register(
+                name="scheduler_delete",
+                description="Cancel a scheduled prompt by ID.",
+                parameters={
+                    "type": "object",
+                    "properties": {"id": {"type": "string"}},
+                    "required": ["id"],
+                },
+                function=self.scheduler.delete,
+            )
 
         # glob
         self.tool_registry.register(
@@ -2687,17 +2690,17 @@ class AgentRuntime:
             child_scope.attach_execution_thread()
             started = time.monotonic()
             status = "failed"
-            self.hooks.dispatch(
-                "SubagentStart",
-                parent_session_id,
-                {
-                    "subagentId": agent_id,
-                    "subagentType": subagent_type,
-                    "description": description.strip(),
-                },
-                child_scope,
-            )
             try:
+                self.hooks.dispatch(
+                    "SubagentStart",
+                    parent_session_id,
+                    {
+                        "subagentId": agent_id,
+                        "subagentType": subagent_type,
+                        "description": description.strip(),
+                    },
+                    child_scope,
+                )
                 with tool_worker(child_scope):
                     result = agent.run(user_input=prompt)
                 self.agent_store.update_meta(
@@ -2727,24 +2730,26 @@ class AgentRuntime:
                 )
                 raise
             finally:
-                self.hooks.dispatch(
-                    "SubagentStop",
-                    parent_session_id,
-                    {
-                        "subagentId": agent_id,
-                        "subagentType": subagent_type,
-                        "description": description.strip(),
-                        "exitCode": (
-                            0
-                            if status == "completed"
-                            else 130
-                            if status == "cancelled"
-                            else 1
-                        ),
-                        "durationMs": round((time.monotonic() - started) * 1000),
-                    },
-                )
-                child_scope.close()
+                try:
+                    self.hooks.dispatch(
+                        "SubagentStop",
+                        parent_session_id,
+                        {
+                            "subagentId": agent_id,
+                            "subagentType": subagent_type,
+                            "description": description.strip(),
+                            "exitCode": (
+                                0
+                                if status == "completed"
+                                else 130
+                                if status == "cancelled"
+                                else 1
+                            ),
+                            "durationMs": round((time.monotonic() - started) * 1000),
+                        },
+                    )
+                finally:
+                    child_scope.close()
 
         context = CURRENT_TOOL_CONTEXT.get()
         guard = (
