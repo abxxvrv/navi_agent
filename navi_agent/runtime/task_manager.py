@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import platform
 import signal
@@ -14,6 +15,19 @@ from typing import Any, Callable
 
 
 TERMINAL_STATUSES = {"completed", "failed", "cancelled", "timed_out"}
+
+
+class _JobAccountingInformation(ctypes.Structure):
+    _fields_ = [
+        ("total_user_time", ctypes.c_int64),
+        ("total_kernel_time", ctypes.c_int64),
+        ("this_period_total_user_time", ctypes.c_int64),
+        ("this_period_total_kernel_time", ctypes.c_int64),
+        ("total_page_fault_count", ctypes.c_uint32),
+        ("total_processes", ctypes.c_uint32),
+        ("active_processes", ctypes.c_uint32),
+        ("total_terminated_processes", ctypes.c_uint32),
+    ]
 
 
 @dataclass
@@ -498,6 +512,13 @@ class TaskManager:
         while True:
             if platform.system() == "Windows":
                 running = task.process.poll() is None or reader.is_alive()
+                if task.background and task.windows_job is not None:
+                    kernel32, job = task.windows_job
+                    info = _JobAccountingInformation()
+                    kernel32.QueryInformationJobObject(
+                        job, 1, ctypes.byref(info), ctypes.sizeof(info), None
+                    )
+                    running = info.active_processes > 0
             else:
                 task.process.poll()
                 try:
@@ -665,7 +686,6 @@ class TaskManager:
 
     @staticmethod
     def _create_windows_job(process: subprocess.Popen) -> tuple[Any, Any] | None:
-        import ctypes
         from ctypes import wintypes
 
         class BasicLimitInformation(ctypes.Structure):
@@ -711,6 +731,14 @@ class TaskManager:
             ctypes.c_uint32,
         ]
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
+        kernel32.QueryInformationJobObject.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        kernel32.QueryInformationJobObject.restype = wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
         kernel32.TerminateJobObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]

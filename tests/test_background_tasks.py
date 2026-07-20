@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes
 import os
 import shlex
 import sys
@@ -10,7 +11,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from navi_agent.runtime.task_manager import TaskManager, _Task
+from navi_agent.runtime.task_manager import (
+    TaskManager,
+    _JobAccountingInformation,
+    _Task,
+)
 
 
 def _python_command(source: str) -> str:
@@ -256,10 +261,24 @@ def test_windows_job_termination_does_not_depend_on_shell_leader(monkeypatch):
     assert calls == [(42, 1)]
 
 
-def test_windows_job_handle_closes_once_when_task_finishes(monkeypatch):
+def test_windows_background_job_waits_for_children_before_closing(monkeypatch):
     closed = []
+    queried = []
+    active_processes = iter([2, 0])
+
+    def query_job(job, _info_class, info, _size, _return_length):
+        queried.append(job)
+        accounting = ctypes.cast(
+            info, ctypes.POINTER(_JobAccountingInformation)
+        ).contents
+        accounting.active_processes = next(active_processes)
+        return True
+
     process = SimpleNamespace(pid=123, returncode=0, poll=lambda: 0, wait=lambda **_: 0)
-    kernel32 = SimpleNamespace(CloseHandle=lambda handle: closed.append(handle))
+    kernel32 = SimpleNamespace(
+        QueryInformationJobObject=query_job,
+        CloseHandle=lambda handle: closed.append(handle),
+    )
     task = _Task(
         task_id="task",
         task_type="command",
@@ -282,6 +301,7 @@ def test_windows_job_handle_closes_once_when_task_finishes(monkeypatch):
     assert task.status == "completed"
     assert task.done.is_set()
     assert task.windows_job is None
+    assert queried == [42, 42]
     assert closed == [42]
 
 

@@ -1,10 +1,32 @@
 ---
 name: playwright-cli
-description: Automate browser interactions, test web pages and work with Playwright tests.
+description: Automate browser interactions, test web pages, work with Playwright tests, and operate browser-hosted terminals such as ttyd/xterm.js.
 allowed-tools: Bash(playwright-cli:*) Bash(npx:*) Bash(npm:*)
 ---
 
 # Browser Automation with playwright-cli
+
+On Windows Navi, run the initial `playwright-cli ... open` command with the Bash
+tool's `background=true` and omit `timeout_seconds` for long-lived sessions. An
+explicit timeout terminates the browser job when it expires.
+
+## Browser terminals
+
+ttyd/xterm.js output may be canvas-rendered and absent from snapshots. If the page
+exposes `window.term`, read the active terminal buffer before using screenshots:
+
+```bash
+playwright-cli run-code "async page => await page.evaluate(() => {
+  const buffer = window.term.buffer.active;
+  return Array.from(
+    { length: buffer.length },
+    (_, i) => buffer.getLine(i)?.translateToString(true) ?? ''
+  ).join('\\n').trimEnd();
+})"
+```
+
+Fall back to a screenshot only when the buffer is unavailable or the task depends
+on visual details such as colors, images, or a QR code.
 
 ## Quick start
 
