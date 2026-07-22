@@ -181,25 +181,24 @@ class WebConnection:
             "approval_mode": self._adapter.approval_mode,
             "model_info": self.runtime.get_model_info(),
             "model_options": model_options,
-            "history": self._history_messages(self.runtime.conversation_history),
+            "history": self._full_history_messages(self.runtime.conversation_history),
             **self._status(),
         }
 
     @staticmethod
-    def _history_messages(source: list[dict[str, Any]]) -> list[dict[str, str]]:
-        messages: list[dict[str, str]] = []
+    def _full_history_messages(source: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        messages: list[dict[str, Any]] = []
         for msg in source:
             role = msg.get("role")
-            if role not in ("user", "assistant"):
+            if role not in ("user", "assistant", "tool"):
                 continue
-            content = msg.get("content")
-            if isinstance(content, list):
-                content = "\n".join(
-                    part.get("text", "") for part in content if part.get("type") == "text"
-                )
-            if not content:
-                continue
-            messages.append({"role": role, "content": str(content)})
+            entry: dict[str, Any] = {"role": role}
+            for key in ("content", "reasoning_content", "tool_calls", "tool_call_id", "name"):
+                if key in msg:
+                    entry[key] = msg[key]
+            if role == "tool" and "content" in entry:
+                entry["content"] = str(entry["content"])
+            messages.append(entry)
         return messages
 
     @staticmethod
@@ -328,16 +327,7 @@ class WebAdapter:
                 )
             except FileNotFoundError:
                 pass
-            else:
-                await ws.send_str(
-                    _json_dumps(
-                        {
-                            "type": "history",
-                            "session_id": resume_session_id,
-                            "history": WebConnection._history_messages(store.messages),
-                        }
-                    )
-                )
+
 
         if store is not None:
             channel = str(store.meta.get("channel") or "").strip()
@@ -350,12 +340,15 @@ class WebAdapter:
                     channel = "weixin"
             if channel in {"qq", "weixin"}:
                 runtime = self._gateway_runtime_for_session(channel, resume_session_id)
+                history = WebConnection._full_history_messages(store.messages)
                 read_only_payload = {
                     "type": "read_only",
                     "session_id": resume_session_id,
                     "channel": channel,
                     "workspace": store.meta.get("project_path", ""),
                     "can_switch_model": runtime is not None,
+                    "history": history,
+                    "live": runtime is not None,
                 }
                 if runtime is not None:
                     router = runtime.router
@@ -365,9 +358,78 @@ class WebAdapter:
                         for provider in router.list_providers()
                         for model in router.list_models(provider)
                     ]
-                await ws.send_str(
-                    _json_dumps(read_only_payload)
-                )
+                await ws.send_str(_json_dumps(read_only_payload))
+
+                if runtime is not None:
+                    # Live gateway session: stream events from the runtime
+                    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue()
+
+                    def emit_handler(event):
+                        self._loop.call_soon_threadsafe(queue.put_nowait, event)
+
+                    prev_handler = getattr(runtime, "event_handler", None)
+                    runtime.event_handler = emit_handler
+
+                    async def sender():
+                        while True:
+                            event = await queue.get()
+                            if event is None:
+                                return
+                            try:
+                                await ws.send_str(_json_dumps(event))
+                            except ConnectionResetError:
+                                return
+
+                    sender_task = asyncio.create_task(sender())
+                    try:
+                        async for msg in ws:
+                            if msg.type in {
+                                aiohttp.WSMsgType.CLOSE,
+                                aiohttp.WSMsgType.CLOSED,
+                                aiohttp.WSMsgType.ERROR,
+                            }:
+                                break
+                            if msg.type != aiohttp.WSMsgType.TEXT:
+                                continue
+                            try:
+                                data = json.loads(msg.data)
+                            except (json.JSONDecodeError, TypeError):
+                                data = {}
+                            if isinstance(data, dict) and data.get("type") == "switch_model":
+                                busy = runtime.is_busy
+                                ok = False if busy else runtime.switch_model(
+                                    str(data.get("provider") or ""),
+                                    str(data.get("model") or ""),
+                                )
+                                await ws.send_str(
+                                    _json_dumps(
+                                        {
+                                            "type": "model_switched",
+                                            "ok": ok,
+                                            "model_info": runtime.get_model_info(),
+                                            "error": "当前正在生成，请等待回复结束后再切换模型。"
+                                            if busy
+                                            else None,
+                                        }
+                                    )
+                                )
+                                continue
+                            if isinstance(data, dict) and data.get("type") == "interrupt":
+                                runtime.interrupt("用户通过 Web 请求取消")
+                                continue
+                            await ws.send_str(
+                                _json_dumps(
+                                    {"type": "notice", "text": "网关会话不可在 Web 中发送。"}
+                                )
+                            )
+                    finally:
+                        runtime.event_handler = prev_handler
+                        sender_task.cancel()
+                        with contextlib.suppress(asyncio.CancelledError):
+                            await sender_task
+                    return ws
+
+                # Dead gateway session: polling loop with full history
                 updated_at = store.meta.get("updated_at")
                 message_count = len(store.messages)
                 while not ws.closed:
@@ -393,7 +455,7 @@ class WebAdapter:
                                     {
                                         "type": "history",
                                         "session_id": resume_session_id,
-                                        "history": WebConnection._history_messages(
+                                        "history": WebConnection._full_history_messages(
                                             refreshed.messages
                                         ),
                                     }
@@ -427,7 +489,8 @@ class WebAdapter:
                             else:
                                 busy = runtime.is_busy
                                 ok = False if busy else runtime.switch_model(
-                                    str(data.get("provider") or ""), str(data.get("model") or "")
+                                    str(data.get("provider") or ""),
+                                    str(data.get("model") or ""),
                                 )
                                 await ws.send_str(
                                     _json_dumps(
@@ -436,7 +499,8 @@ class WebAdapter:
                                             "ok": ok,
                                             "model_info": runtime.get_model_info(),
                                             "error": "当前正在生成，请等待回复结束后再切换模型。"
-                                            if busy else None,
+                                            if busy
+                                            else None,
                                         }
                                     )
                                 )

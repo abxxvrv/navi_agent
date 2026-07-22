@@ -870,9 +870,47 @@ function addAssistant(text) {
 
 function renderHistory(messages) {
   chat.innerHTML = "";
+  const pendingToolCards = {};
   for (const msg of messages || []) {
-    if (msg.role === "user") addUser(msg.content, []);
-    else addAssistant(msg.content);
+    if (msg.role === "user") {
+      addUser(msg.content, []);
+    } else if (msg.role === "assistant") {
+      if (msg.tool_calls && msg.tool_calls.length) {
+        if (msg.reasoning_content) {
+          const details = el("details", "reasoning");
+          details.open = false;
+          const summary = document.createElement("summary");
+          summary.textContent = "思考过程";
+          details.appendChild(summary);
+          const body = document.createElement("div");
+          body.className = "reasoning-body";
+          body.textContent = msg.reasoning_content;
+          details.appendChild(body);
+          chat.appendChild(details);
+        }
+        for (const tc of msg.tool_calls) {
+          const name = tc.function.name;
+          let args = {};
+          try { args = JSON.parse(tc.function.arguments || "{}"); } catch (e) {}
+          const record = addToolCard(name, args);
+          pendingToolCards[tc.id] = record;
+        }
+        if (msg.content) {
+          addAssistant(msg.content);
+        }
+      } else if (msg.content) {
+        addAssistant(msg.content);
+      }
+    } else if (msg.role === "tool") {
+      const record = pendingToolCards[msg.tool_call_id];
+      if (record) {
+        record.st.innerHTML = "";
+        record.st.className = "st ok";
+        record.st.appendChild(document.createTextNode("0.0s"));
+        record.pre.textContent = toolResultText(msg.content) || "（无输出）";
+        delete pendingToolCards[msg.tool_call_id];
+      }
+    }
   }
   scrollDown(true);
 }
@@ -957,7 +995,19 @@ function takeToolCard(name) {
 
 function toolResultText(result) {
   if (result == null) return "";
-  if (typeof result === "string") return result;
+  if (typeof result === "string") {
+    try {
+      const parsed = JSON.parse(result);
+      if (typeof parsed === "object" && parsed !== null) {
+        if (typeof parsed.output === "string" && parsed.output) return parsed.output;
+        if (typeof parsed.content === "string" && parsed.content) return parsed.content;
+        if (typeof parsed.result === "string" && parsed.result) return parsed.result;
+        if (typeof parsed.error === "string" && parsed.error) return parsed.error;
+        return JSON.stringify(parsed, null, 2);
+      }
+    } catch (e) {}
+    return result;
+  }
   if (typeof result === "object") {
     if (typeof result.output === "string" && result.output) return result.output;
     if (typeof result.content === "string" && result.content) return result.content;
